@@ -18,10 +18,18 @@ jqr()   { jq -r "$2" "$RESULTS/$1.json" 2>/dev/null; }
 command -v jq >/dev/null || { echo "jq required: sudo apt install -y jq"; exit 1; }
 
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
+# Capture expanded snapcraft yaml (gpu extension evidence); use abs path since subshell cd's into spike/
+ABS_EVIDENCE="$(pwd)/$EVIDENCE"
+(cd spike && snapcraft expand-extensions > "$ABS_EVIDENCE/expanded-snapcraft.yaml" 2>/dev/null) || true
+
 if [ "${1:-}" != "--skip-install" ]; then
   [ -n "$SNAP_FILE" ] || { echo "ERROR: no spike/${SNAP_NAME}_*.snap file found - build first (cd spike && snapcraft pack)"; exit 1; }
   snap remove --purge "$SNAP_NAME" 2>/dev/null || true
+  # Install mesa-2604 content provider BEFORE frigate so gpu-2604 plug is live when daemons start.
+  # This ensures libGL.so.1 (removed from snap prime by gpu/cleanup) is available via content mount.
+  snap install mesa-2604 2>/dev/null || true
   snap install --dangerous "$SNAP_FILE" || { fail_ "snap install"; exit 1; }
+  snap connect $SNAP_NAME:gpu-2604 mesa-2604:gpu-2604 2>/dev/null || true
   pass_ "snap install --dangerous ($SNAP_FILE)"
   sleep 20  # let daemons start and probes write (tensorflow import needs ~12s observed, up to 15s allowed)
 fi
@@ -65,6 +73,16 @@ printf '# RECORDED FINDING (Task 6): snapcraft pack-time rejection, replayed by 
 check "edgetpu dlopen probe complete" test "$(jqr edgetpu-dlopen '.status')" = "complete"
 echo "  edgetpu finding: dlopen ok=$(jqr edgetpu-dlopen '.dlopen.ok') err=$(jqr edgetpu-dlopen '.dlopen.error // "-"')"
 
+# Ensure mesa-2604 is installed and connected (idempotent; also handles --skip-install path)
+snap install mesa-2604 2>/dev/null || true
+snap connect $SNAP_NAME:gpu-2604 mesa-2604:gpu-2604 2>/dev/null || true
+snap connections $SNAP_NAME > "$EVIDENCE/connections.txt"
+snap run $SNAP_NAME.gpu-probe || true
+check "gpu probe complete" test "$(jqr gpu '.status')" = "complete"
+check "openvino sees GPU" grep -q '"GPU"' "$RESULTS/gpu.json"
+check "vainfo produced output" test -s /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt
+cp /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt "$EVIDENCE/" 2>/dev/null || true
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
@@ -77,12 +95,20 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="[^"]*\/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online|name="/sys/bus/dax' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
 # 'network' interface + AppArmor rules for /proc/sys/vm/nr_hugepages, /proc/*/mountinfo.
 echo "  wheels finding: network/system denials from tensorflow+openvino imports (see denials.txt)"
+# FINDING (Task 10): gpu-probe additional expected denials:
+#   capname="sys_admin"  - vainfo needs CAP_SYS_ADMIN to query DRM GPU capabilities
+#   capname="perfmon"    - vainfo needs CAP_PERFMON for performance counters
+#   name="*/mounts"      - OpenVINO GPU plugin reads /proc/pid/mounts (short form, cf. mountinfo)
+#   hugepages/ dirs      - OpenVINO GPU plugin checks hugepages sysfs dirs (not just nr_hugepages)
+#   node/online          - OpenVINO GPU plugin reads NUMA topology
+#   bus/dax              - OpenVINO GPU plugin checks DAX (persistent-memory) devices
+echo "  gpu-probe finding: vainfo cap denials (sys_admin, perfmon) + OpenVINO GPU sysfs probes (hugepages dirs, NUMA, DAX)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true

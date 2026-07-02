@@ -1,0 +1,5 @@
+#!/bin/sh
+mkdir -p "$SNAP_COMMON/spike-results"
+vainfo --display drm --device /dev/dri/renderD128 \
+  > "$SNAP_COMMON/spike-results/vainfo.txt" 2>&1
+exec "$SNAP/usr/bin/python3.11" "$SNAP/probes/probe_gpu.py"

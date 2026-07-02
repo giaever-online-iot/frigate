@@ -16,6 +16,10 @@ layout:
   # BASE_DIR or recordings path directly to a $SNAP_COMMON path.
   /etc/letsencrypt:
     bind: $SNAP_DATA/letsencrypt
+  /etc/OpenCL:
+    bind: $SNAP/etc/OpenCL
+  /usr/lib/x86_64-linux-gnu/intel-opencl:
+    bind: $SNAP/usr/lib/x86_64-linux-gnu/intel-opencl
 
 platforms:
   amd64:
@@ -35,6 +39,10 @@ apps:
     daemon: simple
     restart-condition: never
     after: [svc-b]
+  gpu-probe:
+    command: bin/gpu-probe
+    extensions: [gpu]
+    plugs: [opengl]
 
 parts:
   python311:
@@ -88,6 +96,13 @@ parts:
       wget -O /tmp/libedgetpu.deb "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
       echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  /tmp/libedgetpu.deb" | sha256sum -c -
       dpkg-deb -x /tmp/libedgetpu.deb "$CRAFT_PART_INSTALL"
+  va-tools:
+    plugin: nil
+    stage-packages:
+      - vainfo
+      - ocl-icd-libopencl1   # ICD loader: provides libOpenCL.so.1 for OpenVINO GPU plugin
+      - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
+      - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
   wrappers:
     plugin: dump
     source: bin
