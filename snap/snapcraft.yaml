@@ -1,0 +1,289 @@
+# =============================================================================
+# DRAFT snapcraft.yaml for Frigate NVR  (native snap — NOT docker-in-snap)
+# Status: SKELETON / illustrative. Not yet buildable end-to-end.
+# See docs/snap-feasibility.md for the full rationale behind every choice here.
+#
+# Architecture mirrors Frigate's s6-overlay service tree as snap daemons:
+#   setup (oneshot) -> go2rtc -> frigate -> nginx -> certsync
+# =============================================================================
+
+name: frigate
+title: Frigate NVR
+base: core26                       # Ubuntu 26.04 LTS (decision 2026-07-02, see design spec).
+                                   # Frigate pins Python 3.11 -> built as a part regardless
+                                   # of the base's default Python. Fallback: core24 (one line).
+version: '0.17.2'                  # track upstream; set by `snapcraft.yaml` or adopt-info
+summary: Locally-processed AI NVR for IP cameras
+description: |
+  Frigate is a complete, locally-processed network video recorder with
+  real-time object detection (Coral USB, OpenVINO/Intel GPU, CPU).
+
+  Strict-confinement build. After install, connect the hardware/storage
+  interfaces you need, e.g.:
+      snap connect frigate:raw-usb              # Coral USB
+      snap connect frigate:removable-media      # recordings on external disk
+      snap connect frigate:camera               # Raspberry Pi / USB cameras
+  See `snap connections frigate`.
+
+grade: devel                      # -> stable once the /dev/shm + layout risks (§4) clear
+confinement: strict               # the whole point; classic only as a separate build
+# license: Apache-2.0
+
+# --- Architectures -----------------------------------------------------------
+platforms:
+  amd64:
+  arm64:                          # RPi / Apple-silicon hosts; ffmpeg/go2rtc binaries differ
+
+# =============================================================================
+# LAYOUTS  — remap Frigate's HARDCODED absolute paths into the snap dirs.
+# These apply to the whole snap mount namespace, so go2rtc/ffmpeg/nginx/python
+# all see them consistently (avoids forking frigate/const.py).  (report §2.3)
+# /tmp/cache needs NO layout: snaps already get a private writable /tmp.
+# /dev/shm CANNOT be fixed here — see BLOCKER in the `frigate` part below (§4.1).
+# =============================================================================
+layout:
+  /opt/frigate:
+    bind: $SNAP/opt/frigate            # app code + built web UI (read-only)
+  /usr/local/nginx:
+    bind: $SNAP/usr/local/nginx        # custom nginx prefix
+  /usr/local/go2rtc:
+    bind: $SNAP/usr/local/go2rtc
+  /usr/lib/ffmpeg:
+    bind: $SNAP/usr/lib/ffmpeg         # the 5.0/7.0/8.0 ffmpeg trees
+  /config:
+    bind: $SNAP_DATA/config            # config.yml, frigate.db (MUST stay local — §2.3)
+  /media/frigate:
+    bind: $SNAP_COMMON/media/frigate   # recordings/clips/exports (large)
+  /etc/letsencrypt:
+    bind: $SNAP_DATA/letsencrypt       # TLS certs written at runtime
+
+# =============================================================================
+# PLUGS  — manual-connect interfaces declared once, referenced per-app below.
+# network / network-bind / opengl AUTO-connect and need no declaration.
+# For a polished store snap, request snap-declaration grants to AUTO-connect
+# raw-usb / camera / removable-media (report §3).
+# =============================================================================
+plugs:
+  camera:            # /dev/video* — RPi V4L2, USB cameras
+  raw-usb:           # Coral USB /dev/bus/usb (needs root + udev; see §4.2)
+  removable-media:   # recordings to /media, /run/media, /mnt ONLY (§4.7)
+  hardware-observe:  # device enumeration + GPU/hw stats
+  mount-observe:     # disk-usage stats for the storage page
+  system-observe:    # process/system stats
+  avahi-observe:     # ONVIF/mDNS camera discovery (verify need — open Q#3)
+
+  # ---- BLOCKERS: uncomment ONLY for special builds (report §4.3/§4.4) --------
+  # custom-device is SUPER-PRIVILEGED and requires Snap Store approval.
+  # coral-pci:
+  #   interface: custom-device
+  #   custom-device: coral-pci
+  #   devices: [/dev/apex_0]
+  # intel-npu:
+  #   interface: custom-device
+  #   custom-device: intel-npu
+  #   devices: [/dev/accel/accel0]
+  # NVIDIA CUDA/TensorRT/NVDEC: NOT possible under strict confinement at all —
+  # ship as a separate `confinement: classic` snap or stay on Docker (§4.4).
+
+# =============================================================================
+# APPS / DAEMONS  — one per Frigate s6 long-run service, ordered by `after:`.
+# =============================================================================
+apps:
+
+  # --- oneshot init: replaces s6 `prepare` + `log-prepare` -------------------
+  setup:
+    command: bin/setup                 # mkdir $SNAP_DATA/{config,letsencrypt} +
+                                       # $SNAP_COMMON/media/frigate; migrate db;
+                                       # generate self-signed cert if absent.
+    daemon: oneshot
+    install-mode: enable
+    before: [go2rtc, frigate, nginx, certsync]
+    plugs: [removable-media]
+
+  # --- go2rtc: restreaming / RTSP / WebRTC ----------------------------------
+  go2rtc:
+    command: bin/go2rtc-run            # wrapper: runs create_config.py to render
+                                       # $SNAP_DATA/.../go2rtc.yaml, then exec go2rtc
+    daemon: simple
+    after: [setup]
+    restart-condition: on-failure      # replaces the s6 go2rtc-healthcheck loop
+    extensions: [gpu]                  # snapcraft 9 `gpu` ext -> mesa-2604 on core26 (§3)
+    plugs: [network, network-bind, hardware-observe, avahi-observe]
+
+  # --- frigate: the Python core (spawns ffmpeg per camera) ------------------
+  frigate:
+    command: bin/frigate-run           # wrapper: cd /opt/frigate && exec python3 -u -m frigate
+    daemon: simple
+    after: [go2rtc]
+    extensions: [gpu]                  # VA-API decode + OpenVINO on /dev/dri (mesa-2604)
+    plugs:
+      - network
+      - network-bind
+      - camera               # RPi V4L2 / USB cams
+      - raw-usb              # Coral USB
+      - removable-media      # external recording disks
+      - hardware-observe
+      - mount-observe
+      - system-observe
+    environment:
+      # ffmpeg selection (only env vars Frigate honours besides CONFIG_FILE)
+      DEFAULT_FFMPEG_VERSION: "8.0"
+      INCLUDED_FFMPEG_VERSIONS: "8.0:7.0:5.0"
+      # VA-API driver path provided by the gpu extension's Mesa content snap
+      # (mesa-2604 mounts at $SNAP/gpu-2604 on core26; the extension's
+      #  command-chain wrapper sets most of this up — verify in M0-C spike)
+      LIBVA_DRIVERS_PATH: $SNAP/gpu-2604/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/dri
+      PYTHONPATH: $SNAP/opt/frigate:$SNAP/usr/lib/python3.11/site-packages
+
+  # --- nginx: front door (custom build; rewrites own config at start) --------
+  nginx:
+    command: bin/nginx-run             # wrapper: tempio renders listen.conf/base_path.conf,
+                                       # sed worker_processes, then exec nginx
+    daemon: simple
+    after: [frigate]
+    plugs: [network, network-bind]
+
+  # --- certsync: Let's Encrypt reload loop -----------------------------------
+  certsync:
+    command: bin/certsync-run
+    daemon: simple
+    after: [nginx]
+    plugs: [network]
+
+  # --- user-facing control command ------------------------------------------
+  config-check:
+    command: bin/frigate-run --validate-config
+    plugs: [removable-media]
+
+# =============================================================================
+# PARTS  — translate Frigate's multi-stage Dockerfile (report §2.4).
+# Stock apt nginx/ffmpeg CANNOT be reused (custom nginx modules; pinned ffmpeg).
+# =============================================================================
+parts:
+
+  # ---- Python 3.11 from source (base ships 3.12; wheels are cp311) ----------
+  python311:
+    plugin: autotools
+    source: https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
+    autotools-configure-parameters:
+      - --prefix=/usr
+      - --enable-optimizations
+      - --enable-shared
+    build-packages: [build-essential, zlib1g-dev, libssl-dev, libffi-dev,
+                     libsqlite3-dev, libbz2-dev, liblzma-dev, libreadline-dev]
+    # TODO: confirm shared-lib paths land under $SNAP/usr correctly.
+
+  # ---- go2rtc binary (upstream release) ------------------------------------
+  go2rtc:
+    plugin: dump
+    source: https://github.com/AlexxIT/go2rtc/releases/download/v1.9.13/go2rtc_linux_${CRAFT_ARCH_BUILD_FOR}
+    source-type: file
+    organize:
+      go2rtc_linux_*: usr/local/go2rtc/bin/go2rtc
+    # TODO: chmod +x via override-build; create_config.py comes from frigate part.
+
+  # ---- ffmpeg static builds (NickM-27/FFmpeg-Builds), 3 versions ------------
+  ffmpeg:
+    plugin: nil
+    # TODO: fetch n8.1.1/n7.0.2/n5.1 gpl static tarballs into
+    #   $SNAP/usr/lib/ffmpeg/{8.0,7.0,5.0}/bin/{ffmpeg,ffprobe}
+    # NOTE: gpl static builds — confirm license compatibility for redistribution.
+    override-build: |
+      echo "TODO: download + unpack ffmpeg builds per arch"
+
+  # ---- custom nginx 1.27.4 + vod/secure-token/set-misc/devel-kit -----------
+  nginx:
+    plugin: autotools
+    source: https://nginx.org/download/nginx-1.27.4.tar.gz
+    # TODO: pull the 4 extra modules as additional sources and pass
+    #   --add-module=... ; apply Frigate's nginx-vod MAX_CLIPS 128->1080 patch.
+    autotools-configure-parameters:
+      - --prefix=/usr/local/nginx
+      - --with-http_ssl_module
+      - --with-http_v2_module
+      - --with-http_auth_request_module
+      - --with-http_realip_module
+      - --with-http_sub_module
+      - --with-threads
+    build-packages: [libpcre2-dev, zlib1g-dev, libssl-dev]
+    stage-packages: [libssl3, libpcre2-8-0]
+
+  sqlite-vec:
+    plugin: make
+    source: https://github.com/asg017/sqlite-vec.git   # TODO: pin tag
+    # builds the vector extension .so consumed by Frigate's semantic search
+
+  # ---- Coral USB runtime (Edge TPU) ----------------------------------------
+  libedgetpu:
+    plugin: dump
+    # NOTE: upstream uses feranick/libedgetpu .deb built for Debian 12 bookworm —
+    # VERIFY ABI against the Ubuntu core24 base, or build libedgetpu from source.
+    source: https://github.com/feranick/libedgetpu.git   # TODO: pin / use .deb
+    override-build: |
+      echo "TODO: stage libedgetpu.so.1 + plugdev udev rule"
+
+  # ---- web UI (React) ------------------------------------------------------
+  web-ui:
+    plugin: npm
+    npm-include-node: true
+    npm-node-version: "20"
+    source: https://github.com/blakeblackshear/frigate.git
+    source-tag: v0.17.2
+    source-subdir: web
+    organize:
+      "dist/*": opt/frigate/web/        # TODO: confirm build output dir
+
+  # ---- Frigate Python app + wheels -----------------------------------------
+  frigate:
+    after: [python311]
+    plugin: python
+    source: https://github.com/blakeblackshear/frigate.git
+    source-tag: v0.17.2
+    python-requirements: [docker/main/requirements-wheels.txt]
+    stage-packages:
+      # runtime libs from docker/main/install_deps.sh
+      - libgl1
+      - libglib2.0-0
+      - libusb-1.0-0
+      - libgomp1
+      - libvulkan1
+      - mesa-vulkan-drivers
+      - libva2
+      - libva-drm2
+      - mesa-va-drivers
+      - i965-va-driver
+      - intel-media-va-driver-non-free
+      - vainfo
+      - jq
+      - curl
+    organize:
+      # the python package + migrations live under /opt/frigate
+      frigate: opt/frigate/frigate
+      migrations: opt/frigate/migrations
+    # ===================================================================
+    # BLOCKER (report §4.1): Frigate's SharedMemoryFrameManager uses
+    # Python multiprocessing.shared_memory -> /dev/shm/psm_*  which snapd's
+    # AppArmor DENIES (only /dev/shm/snap.frigate.* is allowed).
+    # MUST patch the SHM name prefix to "snap.frigate." (or shim) here,
+    # AND verify snapd provides a large-enough writable /dev/shm.
+    # Prototype THIS before anything else.
+    # override-build: |
+    #   craftctl default
+    #   patch -p1 < $CRAFT_PROJECT_DIR/snap/local/patches/shm-prefix.patch
+    # ===================================================================
+
+  # ---- default models (detector + audio) -----------------------------------
+  models:
+    plugin: dump
+    source: snap/local/models           # TODO: or fetch at build time
+    # OpenVINO SSDLite MobileNet, EdgeTPU/CPU tflite, YAMNet audio, labelmaps
+    organize:
+      "*": opt/frigate/models/
+
+  # ---- launch/setup wrappers (replace s6 run scripts) ----------------------
+  wrappers:
+    plugin: dump
+    source: snap/local/bin
+    organize:
+      "*": bin/
+    # bin/setup, bin/go2rtc-run, bin/frigate-run, bin/nginx-run, bin/certsync-run
