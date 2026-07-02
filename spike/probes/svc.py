@@ -6,8 +6,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from probe_common import write_result
+import probe_platform
 
-PROBES = {}  # service-name -> [(result_name, probe_fn)] — filled by later tasks
+PROBES = {
+    "svc-a": [("shm", probe_platform.shm_probe)],
+}
 
 
 def _proc_start_monotonic() -> float:

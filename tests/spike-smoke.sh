@@ -34,6 +34,11 @@ check "svc-c active" sh -c "snap services $SNAP_NAME.svc-c | grep -q ' active'"
 TA=$(jqr ordering-svc-a '.start_monotonic'); TB=$(jqr ordering-svc-b '.start_monotonic'); TC=$(jqr ordering-svc-c '.start_monotonic')
 check "ordering: svc-a < svc-b < svc-c" awk -v a="$TA" -v b="$TB" -v c="$TC" 'BEGIN{exit !(a<b && b<c)}'
 
+check "shm probe complete" test "$(jqr shm '.status')" = "complete"
+check "shm probe has both sub-results" test "$(jqr shm '.default_name.ok, .snap_prefixed.ok' | wc -l)" = "2"
+echo "  shm finding: default(psm_*) ok=$(jqr shm '.default_name.ok') err=$(jqr shm '.default_name.error // "-"')"
+echo "  shm finding: snap-prefixed ok=$(jqr shm '.snap_prefixed.ok') err=$(jqr shm '.snap_prefixed.error // "-"')"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
