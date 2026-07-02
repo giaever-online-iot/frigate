@@ -62,6 +62,9 @@ echo "  layout finding: /media/frigate NOT in snap layout (pack-time rejection: 
 printf '# RECORDED FINDING (Task 6): snapcraft pack-time rejection, replayed by the harness - NOT live command output\nCannot pack snap: error: cannot validate snap "frigate": layout "/media/frigate" defines a new top-level directory "/media"\n' \
   > "$EVIDENCE/media-layout-pack-error.txt"
 
+check "edgetpu dlopen probe complete" test "$(jqr edgetpu-dlopen '.status')" = "complete"
+echo "  edgetpu finding: dlopen ok=$(jqr edgetpu-dlopen '.dlopen.ok') err=$(jqr edgetpu-dlopen '.dlopen.error // "-"')"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true

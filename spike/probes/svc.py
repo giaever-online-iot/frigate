@@ -13,7 +13,8 @@ PROBES: dict = {
     "svc-a": [("shm", probe_platform.shm_probe)],
     "svc-b": [("layout", probe_platform.layout_probe)],
     "svc-c": [("runtime", probe_runtime.runtime_probe),
-              ("imports", probe_runtime.imports_probe)],
+              ("imports", probe_runtime.imports_probe),
+              ("edgetpu-dlopen", probe_runtime.edgetpu_dlopen_probe)],
 }
 
 

@@ -1,4 +1,6 @@
 """Runtime probes: interpreter identity, wheel imports, native-lib loading."""
+import ctypes
+import os
 import sys
 
 
@@ -22,4 +24,18 @@ def imports_probe() -> dict:
         except Exception as e:
             out["imports"][mod] = {"ok": False,
                                    "error": f"{type(e).__name__}: {e}"}
+    return out
+
+
+def edgetpu_dlopen_probe() -> dict:
+    out = {"status": "complete"}
+    lib = os.path.join(os.environ.get("SNAP", ""),
+                       "usr/lib/x86_64-linux-gnu/libedgetpu.so.1")
+    out["lib_path"] = lib
+    out["lib_exists"] = os.path.exists(lib)
+    try:
+        ctypes.CDLL(lib)
+        out["dlopen"] = {"ok": True}
+    except OSError as e:
+        out["dlopen"] = {"ok": False, "error": str(e)}
     return out

@@ -64,14 +64,30 @@ parts:
       - libgl1
     override-build: |
       export LD_LIBRARY_PATH="$CRAFT_STAGE/usr/lib:${LD_LIBRARY_PATH:-}"
-      "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
+      "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir --ignore-installed \
         --root "$CRAFT_PART_INSTALL" --prefix /usr \
         -r requirements-spike.txt
+      # Remove packages already staged by python311 (ensurepip) to avoid staging conflicts
+      SP="$CRAFT_PART_INSTALL/usr/lib/python3.11/site-packages"
+      rm -rf "$SP/setuptools" "$SP/_distutils_hack" "$SP/pkg_resources"
+      find "$SP" -maxdepth 1 \( \
+        -name 'setuptools-*.dist-info' -o \
+        -name 'pip-*.dist-info' -o \
+        -name 'wheel-*.dist-info' -o \
+        -name 'distutils-precedence.pth' \
+      \) -exec rm -rf {} +
   probes:
     plugin: dump
     source: probes
     organize:
       '*': probes/
+  libedgetpu:
+    plugin: nil
+    build-packages: [wget]
+    stage-packages: [libusb-1.0-0]
+    override-build: |
+      wget -O /tmp/libedgetpu.deb "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
+      dpkg-deb -x /tmp/libedgetpu.deb "$CRAFT_PART_INSTALL"
   wrappers:
     plugin: dump
     source: bin
