@@ -149,6 +149,7 @@ echo "  coral-probe finding: CAP_NET_ADMIN denial during firmware upload (libedg
 #                 /dev/accel/accel0; denied by AppArmor but open() still SUCCEEDS (cap check
 #                 is advisory for this driver path). Branch (d): open OK confirmed. Same mechanism
 #                 applies to Coral-PCIe /dev/apex_0 via custom-device slot.
+# NOTE: this denial fires once per NPU device init (observed 2026-07-02 06:41 run, journal-verified); it may be absent from later runs' capture windows.
 echo "  npu-probe finding: CAP_SYS_ADMIN denial at accel open (advisory, non-blocking) — branch (d) open OK, custom-device works on classic Ubuntu"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
