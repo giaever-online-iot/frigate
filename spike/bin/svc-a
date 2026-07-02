@@ -1,0 +1,4 @@
+#!/bin/sh
+mkdir -p "$SNAP_COMMON/spike-results"
+echo "scaffold-alive" > "$SNAP_COMMON/spike-results/scaffold.txt"
+exec sleep infinity

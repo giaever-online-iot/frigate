@@ -1,0 +1,33 @@
+name: frigate
+version: '0.0.1-spike'
+summary: Frigate snap M0 de-risking spike (throwaway probes, not Frigate)
+description: |
+  Probe snap that answers the strict-confinement unknowns for the real
+  Frigate snap. See docs/superpowers/specs/2026-07-02-frigate-snap-design.md.
+base: core26
+grade: devel
+confinement: strict
+
+platforms:
+  amd64:
+
+apps:
+  svc-a:
+    command: bin/svc-a
+    daemon: simple
+    restart-condition: never
+
+parts:
+  runtime:
+    plugin: nil
+    stage-packages: [python3]
+  probes:
+    plugin: dump
+    source: probes
+    organize:
+      '*': probes/
+  wrappers:
+    plugin: dump
+    source: bin
+    organize:
+      '*': bin/
