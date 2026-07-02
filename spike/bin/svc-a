@@ -1,2 +1,2 @@
 #!/bin/sh
-exec "$SNAP/usr/bin/python3" "$SNAP/probes/svc.py" svc-a
+exec "$SNAP/usr/bin/python3.11" "$SNAP/probes/svc.py" svc-a

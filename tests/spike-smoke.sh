@@ -46,6 +46,8 @@ echo "  layout finding: /config NOT in snap layout (pack-time rejection); runtim
 check "layout: /etc/letsencrypt -> SNAP_DATA" grep -q "$TOK" /var/snap/$SNAP_NAME/current/letsencrypt/probe.txt
 check "private /tmp/cache holds token" sh -c "grep -rq '$TOK' /tmp/snap-private-tmp/snap.$SNAP_NAME/tmp/cache/ 2>/dev/null"
 
+check "daemons run on python 3.11" test "$(jqr runtime '.version_major_minor')" = "3.11"
+
 # FINDING (Task 6): /media/frigate layout REJECTED at snap pack time (same "defines a new top-level
 # directory" error as /config). snapd does not treat /media as a valid layout base even though the
 # directory exists in the base filesystem. Implication for M3: recordings cannot use a /media/frigate

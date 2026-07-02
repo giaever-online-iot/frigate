@@ -7,10 +7,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from probe_common import write_result
 import probe_platform
+import probe_runtime
 
 PROBES: dict = {
     "svc-a": [("shm", probe_platform.shm_probe)],
     "svc-b": [("layout", probe_platform.layout_probe)],
+    "svc-c": [("runtime", probe_runtime.runtime_probe)],
 }
 
 

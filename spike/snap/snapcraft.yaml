@@ -37,9 +37,25 @@ apps:
     after: [svc-b]
 
 parts:
-  runtime:
+  python311:
     plugin: nil
-    stage-packages: [python3]
+    source: https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
+    build-packages:
+      - build-essential
+      - pkg-config
+      - libssl-dev
+      - zlib1g-dev
+      - libffi-dev
+      - libsqlite3-dev
+      - libbz2-dev
+      - liblzma-dev
+      - libreadline-dev
+      - uuid-dev
+    override-build: |
+      ./configure --prefix=/usr --enable-shared --with-ensurepip=install \
+        LDFLAGS="-Wl,-rpath,/snap/frigate/current/usr/lib"
+      make -j"$(nproc)"
+      make install DESTDIR="$CRAFT_PART_INSTALL"
   probes:
     plugin: dump
     source: probes
