@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from probe_common import write_result
 
-out = {"status": "complete"}
+out: dict = {"status": "complete"}
 try:
     fd = os.open("/dev/accel/accel0", os.O_RDWR)
     os.close(fd)

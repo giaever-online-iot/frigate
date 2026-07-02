@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from probe_common import write_result
 
-out = {"status": "complete", "render_node_access": {}}
+out: dict = {"status": "complete", "render_node_access": {}}
 try:
     from openvino import Core
     out["openvino_devices"] = Core().available_devices

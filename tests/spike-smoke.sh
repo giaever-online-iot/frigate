@@ -49,6 +49,7 @@ echo "  shm finding: default(psm_*) ok=$(jqr shm '.default_name.ok') err=$(jqr s
 echo "  shm finding: snap-prefixed ok=$(jqr shm '.snap_prefixed.ok') err=$(jqr shm '.snap_prefixed.error // "-"')"
 
 TOK=$(jqr layout '.writes."/etc/letsencrypt/probe.txt".token')
+[ -n "$TOK" ] || fail_ "layout: token missing from layout.json (write failed?) - downstream token greps would be vacuous"
 check "layout probe complete" test "$(jqr layout '.status')" = "complete"
 # FINDING: layout /config is rejected at snap pack time ("defines a new top-level directory").
 echo "  layout finding: /config NOT in snap layout (pack-time rejection); runtime probe: ok=$(jqr layout '.writes."/config/probe.txt".ok // "N/A"') err=$(jqr layout '.writes."/config/probe.txt".error // "-"')"

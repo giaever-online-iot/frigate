@@ -1,1 +1,6 @@
+# M0 spike dev-machine rule. SECURITY SCOPE: passwordless /usr/bin/snap is
+# effectively root ("snap install --dangerous" runs arbitrary root code).
+# Install deliberately via: sudo bash tests/sudo-setup.sh
+# Remove after spike work:  sudo rm /etc/sudoers.d/frigate-spike
+# Hardcoded to user "joachimmgg" and this repo's absolute path by design.
 joachimmgg ALL=(root) NOPASSWD: /usr/bin/snap, /usr/bin/journalctl, /usr/bin/lsusb, /home/joachimmgg/Development/giaever-online-iot/frigate/tests/spike-smoke.sh
