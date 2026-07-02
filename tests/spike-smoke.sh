@@ -11,6 +11,7 @@ mkdir -p "$EVIDENCE"
 
 pass_() { echo "PASS: $1"; }
 fail_() { echo "FAIL: $1"; FAIL=1; }
+# Note: check() always returns 0; failures accumulate in $FAIL. Do not use in && chains or if-conditions.
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass_ "$d"; else fail_ "$d"; fi; }
 jqr()   { jq -r "$2" "$RESULTS/$1.json" 2>/dev/null; }
 
@@ -18,7 +19,8 @@ command -v jq >/dev/null || { echo "jq required: sudo apt install -y jq"; exit 1
 
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
 if [ "${1:-}" != "--skip-install" ]; then
-  snap remove --purge $SNAP_NAME 2>/dev/null || true
+  [ -n "$SNAP_FILE" ] || { echo "ERROR: no spike/${SNAP_NAME}_*.snap file found - build first (cd spike && snapcraft pack)"; exit 1; }
+  snap remove --purge "$SNAP_NAME" 2>/dev/null || true
   snap install --dangerous "$SNAP_FILE" || { fail_ "snap install"; exit 1; }
   pass_ "snap install --dangerous ($SNAP_FILE)"
   sleep 8   # let daemons start and probes write
