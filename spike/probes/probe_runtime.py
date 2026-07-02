@@ -14,7 +14,7 @@ def runtime_probe() -> dict:
 
 
 def imports_probe() -> dict:
-    out = {"status": "complete", "imports": {}}
+    out: dict = {"status": "complete", "imports": {}}
     for mod in ("numpy", "cv2", "onnxruntime", "tflite_runtime",
                 "tensorflow", "openvino"):
         try:
@@ -28,7 +28,7 @@ def imports_probe() -> dict:
 
 
 def edgetpu_dlopen_probe() -> dict:
-    out = {"status": "complete"}
+    out: dict = {"status": "complete"}
     lib = os.path.join(os.environ.get("SNAP", ""),
                        "usr/lib/x86_64-linux-gnu/libedgetpu.so.1")
     out["lib_path"] = lib

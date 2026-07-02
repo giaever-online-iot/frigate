@@ -23,7 +23,7 @@ if [ "${1:-}" != "--skip-install" ]; then
   snap remove --purge "$SNAP_NAME" 2>/dev/null || true
   snap install --dangerous "$SNAP_FILE" || { fail_ "snap install"; exit 1; }
   pass_ "snap install --dangerous ($SNAP_FILE)"
-  sleep 20  # let daemons start and probes write (tensorflow import needs up to 15s on startup)
+  sleep 20  # let daemons start and probes write (tensorflow import needs ~12s observed, up to 15s allowed)
 fi
 
 check "svc-a active" sh -c "snap services $SNAP_NAME.svc-a | grep -q ' active'"
@@ -68,15 +68,16 @@ echo "  edgetpu finding: dlopen ok=$(jqr edgetpu-dlopen '.dlopen.ok') err=$(jqr 
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
-# Known expected denials (FINDINGS, not bugs):
+# Known expected denials (FINDINGS, not bugs) — enumerated EXACTLY; any new denial pattern must
+# fail the run and be triaged before being added here:
 #   psm_        - svc-a: unnamespaced POSIX shm (Task 3 finding)
 #   name="/config/ - layout probe: /config not in layout (Task 5 finding)
-#   class="net" - svc-c: tensorflow/openvino attempt network ops (inet/inet6 sockets, telemetry)
-#                 → needs 'network' interface in production snap
+#   operation="create".*class="net".*comm="python3 - svc-c: tensorflow/openvino python3 socket
+#                 creation at import time (inet/inet6, telemetry) → needs 'network' interface
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|class="net"|nr_hugepages|mountinfo|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
