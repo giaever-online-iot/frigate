@@ -32,7 +32,8 @@ check "svc-a active" sh -c "snap services $SNAP_NAME.svc-a | grep -q ' active'"
 check "svc-b active" sh -c "snap services $SNAP_NAME.svc-b | grep -q ' active'"
 check "svc-c active" sh -c "snap services $SNAP_NAME.svc-c | grep -q ' active'"
 TA=$(jqr ordering-svc-a '.start_monotonic'); TB=$(jqr ordering-svc-b '.start_monotonic'); TC=$(jqr ordering-svc-c '.start_monotonic')
-check "ordering: svc-a < svc-b < svc-c" awk -v a="$TA" -v b="$TB" -v c="$TC" 'BEGIN{exit !(a<b && b<c)}'
+# starttime has 10ms (jiffy) resolution: sub-jiffy starts tie. Ties allowed; inversions still fail.
+check "ordering: svc-a <= svc-b <= svc-c (jiffy resolution, ties allowed)" awk -v a="$TA" -v b="$TB" -v c="$TC" 'BEGIN{exit !(a<=b && b<=c)}'
 
 check "shm probe complete" test "$(jqr shm '.status')" = "complete"
 check "shm probe has both sub-results" test "$(jqr shm '.default_name.ok, .snap_prefixed.ok' | wc -l)" = "2"
@@ -53,8 +54,8 @@ check "daemons run on python 3.11" test "$(jqr runtime '.version_major_minor')" 
 # directory exists in the base filesystem. Implication for M3: recordings cannot use a /media/frigate
 # layout; Frigate's recordings path must be configured directly to a $SNAP_COMMON sub-path.
 echo "  layout finding: /media/frigate NOT in snap layout (pack-time rejection: 'defines a new top-level directory /media')"
-printf 'Cannot pack snap: error: cannot validate snap "frigate": layout "/media/frigate" defines a new top-level directory "/media"\n' \
-  > "$EVIDENCE/media-layout-install.txt"
+printf '# RECORDED FINDING (Task 6): snapcraft pack-time rejection, replayed by the harness - NOT live command output\nCannot pack snap: error: cannot validate snap "frigate": layout "/media/frigate" defines a new top-level directory "/media"\n' \
+  > "$EVIDENCE/media-layout-pack-error.txt"
 
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
