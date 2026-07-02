@@ -10,6 +10,7 @@ import probe_platform
 
 PROBES: dict = {
     "svc-a": [("shm", probe_platform.shm_probe)],
+    "svc-b": [("layout", probe_platform.layout_probe)],
 }
 
 

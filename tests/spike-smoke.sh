@@ -39,10 +39,17 @@ check "shm probe has both sub-results" test "$(jqr shm '.default_name.ok, .snap_
 echo "  shm finding: default(psm_*) ok=$(jqr shm '.default_name.ok') err=$(jqr shm '.default_name.error // "-"')"
 echo "  shm finding: snap-prefixed ok=$(jqr shm '.snap_prefixed.ok') err=$(jqr shm '.snap_prefixed.error // "-"')"
 
+TOK=$(jqr layout '.writes."/etc/letsencrypt/probe.txt".token')
+check "layout probe complete" test "$(jqr layout '.status')" = "complete"
+# FINDING: layout /config is rejected at snap pack time ("defines a new top-level directory").
+echo "  layout finding: /config NOT in snap layout (pack-time rejection); runtime probe: ok=$(jqr layout '.writes."/config/probe.txt".ok // "N/A"') err=$(jqr layout '.writes."/config/probe.txt".error // "-"')"
+check "layout: /etc/letsencrypt -> SNAP_DATA" grep -q "$TOK" /var/snap/$SNAP_NAME/current/letsencrypt/probe.txt
+check "private /tmp/cache holds token" sh -c "grep -rq '$TOK' /tmp/snap-private-tmp/snap.$SNAP_NAME/tmp/cache/ 2>/dev/null"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
-UNEXPECTED=$(grep -cvE 'psm_' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 

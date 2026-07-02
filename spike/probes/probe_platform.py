@@ -1,5 +1,28 @@
 """Platform probes: shared memory and layout behavior under strict confinement."""
 import os
+import time
+
+
+LAYOUT_TEST_PATHS = [
+    "/config/probe.txt",
+    "/etc/letsencrypt/probe.txt",
+    "/tmp/cache/probe.txt",
+]
+
+
+def layout_probe() -> dict:
+    out: dict = {"status": "complete", "writes": {}}
+    token = f"spike-{int(time.time())}"
+    for path in LAYOUT_TEST_PATHS:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(token)
+            out["writes"][path] = {"ok": True, "token": token,
+                                   "realpath": os.path.realpath(path)}
+        except Exception as e:
+            out["writes"][path] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return out
 
 
 def shm_probe() -> dict:

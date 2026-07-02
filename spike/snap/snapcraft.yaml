@@ -8,6 +8,12 @@ base: core26
 grade: devel
 confinement: strict
 
+layout:
+  # NOTE: /config bind is REJECTED at pack time (snapd: "defines a new top-level directory").
+  # /etc/letsencrypt is a sub-path of /etc (exists in base) and is accepted.
+  /etc/letsencrypt:
+    bind: $SNAP_DATA/letsencrypt
+
 platforms:
   amd64:
 
