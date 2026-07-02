@@ -107,6 +107,12 @@ check "coral delegate loaded (firmware upload)" test "$(jqr coral '.load_delegat
 check "coral inference ran" test "$(jqr coral '.inference.ok')" = "true"
 check "coral: device in initialized state (18d1) after probe" grep -q 18d1 "$EVIDENCE/coral-usb-after.txt"
 
+# --- NPU custom-device section ---
+snap connect $SNAP_NAME:npu $SNAP_NAME:npu-dev 2> "$EVIDENCE/npu-connect.txt" || true
+snap run $SNAP_NAME.npu-probe 2>> "$EVIDENCE/npu-connect.txt" || true
+check "npu probe produced evidence" sh -c "test -s $RESULTS/npu.json -o -s $EVIDENCE/npu-connect.txt"
+echo "  npu finding: open=$(jqr npu '.open_accel0.ok // "no-json"') connect-err=$(head -c120 "$EVIDENCE/npu-connect.txt" 2>/dev/null)"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true

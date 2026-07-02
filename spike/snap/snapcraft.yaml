@@ -21,6 +21,18 @@ layout:
   /usr/lib/x86_64-linux-gnu/intel-opencl:
     bind: $SNAP/usr/lib/x86_64-linux-gnu/intel-opencl
 
+slots:
+  npu-dev:
+    interface: custom-device
+    custom-device: intel-npu
+    devices:
+      - /dev/accel/accel0
+
+plugs:
+  npu:
+    interface: custom-device
+    custom-device: intel-npu
+
 platforms:
   amd64:
 
@@ -46,6 +58,9 @@ apps:
   coral-probe:
     command: bin/coral-probe
     plugs: [raw-usb, hardware-observe]
+  npu-probe:
+    command: bin/npu-probe
+    plugs: [npu]
 
 parts:
   python311:
