@@ -59,12 +59,13 @@ parts:
   spike-wheels:
     plugin: nil
     after: [python311]
-    source: probes
+    # source deliberately isolated: probe edits must not retrigger this 500MB build
+    source: wheels-src
     stage-packages:
       - libgl1
     override-build: |
       export LD_LIBRARY_PATH="$CRAFT_STAGE/usr/lib:${LD_LIBRARY_PATH:-}"
-      "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir --ignore-installed \
+      "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
         --root "$CRAFT_PART_INSTALL" --prefix /usr \
         -r requirements-spike.txt
       # Remove packages already staged by python311 (ensurepip) to avoid staging conflicts
@@ -72,8 +73,6 @@ parts:
       rm -rf "$SP/setuptools" "$SP/_distutils_hack" "$SP/pkg_resources"
       find "$SP" -maxdepth 1 \( \
         -name 'setuptools-*.dist-info' -o \
-        -name 'pip-*.dist-info' -o \
-        -name 'wheel-*.dist-info' -o \
         -name 'distutils-precedence.pth' \
       \) -exec rm -rf {} +
   probes:
@@ -87,6 +86,7 @@ parts:
     stage-packages: [libusb-1.0-0]
     override-build: |
       wget -O /tmp/libedgetpu.deb "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
+      echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  /tmp/libedgetpu.deb" | sha256sum -c -
       dpkg-deb -x /tmp/libedgetpu.deb "$CRAFT_PART_INSTALL"
   wrappers:
     plugin: dump
