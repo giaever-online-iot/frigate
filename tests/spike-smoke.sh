@@ -83,6 +83,17 @@ check "openvino sees GPU" grep -q '"GPU"' "$RESULTS/gpu.json"
 check "vainfo produced output" test -s /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt
 cp /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt "$EVIDENCE/" 2>/dev/null || true
 
+snap connect $SNAP_NAME:raw-usb 2>/dev/null || true
+snap connect $SNAP_NAME:hardware-observe 2>/dev/null || true
+lsusb | grep -Ei '1a6e|18d1' > "$EVIDENCE/coral-usb-before.txt" || true
+snap run $SNAP_NAME.coral-probe || true
+sleep 3
+lsusb | grep -Ei '1a6e|18d1' > "$EVIDENCE/coral-usb-after.txt" || true
+check "coral probe complete" test "$(jqr coral '.status')" = "complete"
+check "coral delegate loaded (firmware upload)" test "$(jqr coral '.load_delegate.ok')" = "true"
+check "coral inference ran" test "$(jqr coral '.inference.ok')" = "true"
+check "coral re-enumerated as Google (18d1)" grep -q 18d1 "$EVIDENCE/coral-usb-after.txt"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
@@ -95,7 +106,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="[^"]*\/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online|name="/sys/bus/dax' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="[^"]*\/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online|name="/sys/bus/dax|coral-probe.*capname="net_admin"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -109,6 +120,11 @@ echo "  wheels finding: network/system denials from tensorflow+openvino imports 
 #   node/online          - OpenVINO GPU plugin reads NUMA topology
 #   bus/dax              - OpenVINO GPU plugin checks DAX (persistent-memory) devices
 echo "  gpu-probe finding: vainfo cap denials (sys_admin, perfmon) + OpenVINO GPU sysfs probes (hugepages dirs, NUMA, DAX)"
+# FINDING (Task 11): coral-probe additional expected denial:
+#   coral-probe.*capname="net_admin" - libedgetpu firmware upload attempts CAP_NET_ADMIN during USB
+#                 re-enumeration (1a6e:089a -> 18d1:9302); denied but firmware upload + inference succeed.
+#                 Production snap does NOT need net_admin — this is a benign libedgetpu USB init probe.
+echo "  coral-probe finding: CAP_NET_ADMIN denial during firmware upload (libedgetpu USB init probe; benign - delegate + inference succeed)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true

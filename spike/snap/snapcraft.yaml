@@ -43,6 +43,9 @@ apps:
     command: bin/gpu-probe
     extensions: [gpu]
     plugs: [opengl]
+  coral-probe:
+    command: bin/coral-probe
+    plugs: [raw-usb, hardware-observe]
 
 parts:
   python311:
@@ -103,6 +106,13 @@ parts:
       - ocl-icd-libopencl1   # ICD loader: provides libOpenCL.so.1 for OpenVINO GPU plugin
       - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
       - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
+  coral-model:
+    plugin: nil
+    build-packages: [wget]
+    override-build: |
+      mkdir -p "$CRAFT_PART_INSTALL/models"
+      wget -O "$CRAFT_PART_INSTALL/models/edgetpu-test.tflite" \
+        https://github.com/google-coral/test_data/raw/master/mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite
   wrappers:
     plugin: dump
     source: bin
