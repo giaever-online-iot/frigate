@@ -27,6 +27,10 @@ fi
 check "svc-a active" sh -c "snap services $SNAP_NAME.svc-a | grep -q ' active'"
 
 # --- task assertions inserted below this line ---
+check "svc-b active" sh -c "snap services $SNAP_NAME.svc-b | grep -q ' active'"
+check "svc-c active" sh -c "snap services $SNAP_NAME.svc-c | grep -q ' active'"
+TA=$(jqr ordering-svc-a '.start_monotonic'); TB=$(jqr ordering-svc-b '.start_monotonic'); TC=$(jqr ordering-svc-c '.start_monotonic')
+check "ordering: svc-a < svc-b < svc-c" awk -v a="$TA" -v b="$TB" -v c="$TC" 'BEGIN{exit !(a<b && b<c)}'
 
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \

@@ -16,6 +16,16 @@ apps:
     command: bin/svc-a
     daemon: simple
     restart-condition: never
+  svc-b:
+    command: bin/svc-b
+    daemon: simple
+    restart-condition: never
+    after: [svc-a]
+  svc-c:
+    command: bin/svc-c
+    daemon: simple
+    restart-condition: never
+    after: [svc-b]
 
 parts:
   runtime:

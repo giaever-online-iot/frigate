@@ -1,4 +1,2 @@
 #!/bin/sh
-mkdir -p "$SNAP_COMMON/spike-results"
-echo "scaffold-alive" > "$SNAP_COMMON/spike-results/scaffold.txt"
-exec sleep infinity
+exec "$SNAP/usr/bin/python3" "$SNAP/probes/svc.py" svc-a
