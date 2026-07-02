@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from probe_common import write_result
 
-out = {"status": "complete"}
+out: dict = {"status": "complete"}
 snap = os.environ.get("SNAP", "")
 lib = os.path.join(snap, "usr/lib/x86_64-linux-gnu/libedgetpu.so.1")
 model = os.path.join(snap, "models/edgetpu-test.tflite")
