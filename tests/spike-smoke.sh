@@ -23,7 +23,7 @@ if [ "${1:-}" != "--skip-install" ]; then
   snap remove --purge "$SNAP_NAME" 2>/dev/null || true
   snap install --dangerous "$SNAP_FILE" || { fail_ "snap install"; exit 1; }
   pass_ "snap install --dangerous ($SNAP_FILE)"
-  sleep 8   # let daemons start and probes write
+  sleep 20  # let daemons start and probes write (tensorflow import needs up to 15s on startup)
 fi
 
 check "svc-a active" sh -c "snap services $SNAP_NAME.svc-a | grep -q ' active'"
@@ -49,6 +49,11 @@ check "private /tmp/cache holds token" sh -c "grep -rq '$TOK' /tmp/snap-private-
 
 check "daemons run on python 3.11" test "$(jqr runtime '.version_major_minor')" = "3.11"
 
+check "imports probe complete" test "$(jqr imports '.status')" = "complete"
+for MOD in numpy cv2 onnxruntime tflite_runtime tensorflow openvino; do
+  check "import $MOD" test "$(jqr imports ".imports.$MOD.ok")" = "true"
+done
+
 # FINDING (Task 6): /media/frigate layout REJECTED at snap pack time (same "defines a new top-level
 # directory" error as /config). snapd does not treat /media as a valid layout base even though the
 # directory exists in the base filesystem. Implication for M3: recordings cannot use a /media/frigate
@@ -60,8 +65,20 @@ printf '# RECORDED FINDING (Task 6): snapcraft pack-time rejection, replayed by 
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/' "$EVIDENCE/denials.txt" || true)
+# Known expected denials (FINDINGS, not bugs):
+#   psm_        - svc-a: unnamespaced POSIX shm (Task 3 finding)
+#   name="/config/ - layout probe: /config not in layout (Task 5 finding)
+#   class="net" - svc-c: tensorflow/openvino attempt network ops (inet/inet6 sockets, telemetry)
+#                 → needs 'network' interface in production snap
+#   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
+#   mountinfo    - openvino reads /proc/<pid>/mountinfo
+#   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|class="net"|nr_hugepages|mountinfo|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
+# FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
+# creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
+# 'network' interface + AppArmor rules for /proc/sys/vm/nr_hugepages, /proc/*/mountinfo.
+echo "  wheels finding: network/system denials from tensorflow+openvino imports (see denials.txt)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true

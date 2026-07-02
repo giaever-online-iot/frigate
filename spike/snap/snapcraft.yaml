@@ -56,6 +56,17 @@ parts:
         LDFLAGS="-Wl,-rpath,/snap/frigate/current/usr/lib"
       make -j"$(nproc)"
       make install DESTDIR="$CRAFT_PART_INSTALL"
+  spike-wheels:
+    plugin: nil
+    after: [python311]
+    source: probes
+    stage-packages:
+      - libgl1
+    override-build: |
+      export LD_LIBRARY_PATH="$CRAFT_STAGE/usr/lib:${LD_LIBRARY_PATH:-}"
+      "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
+        --root "$CRAFT_PART_INSTALL" --prefix /usr \
+        -r requirements-spike.txt
   probes:
     plugin: dump
     source: probes
