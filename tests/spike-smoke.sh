@@ -125,7 +125,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -144,6 +144,12 @@ echo "  gpu-probe finding: vainfo cap denials (sys_admin, perfmon) + OpenVINO GP
 #                 re-enumeration (1a6e:089a -> 18d1:9302); denied but firmware upload + inference succeed.
 #                 Production snap does NOT need net_admin — this is a benign libedgetpu USB init probe.
 echo "  coral-probe finding: CAP_NET_ADMIN denial during firmware upload (libedgetpu USB init probe; benign - delegate + inference succeed)"
+# FINDING (Task 12): npu-probe additional expected denial:
+#   npu-probe.*capname="sys_admin" - intel_vpu/accel driver checks CAP_SYS_ADMIN at open() on
+#                 /dev/accel/accel0; denied by AppArmor but open() still SUCCEEDS (cap check
+#                 is advisory for this driver path). Branch (d): open OK confirmed. Same mechanism
+#                 applies to Coral-PCIe /dev/apex_0 via custom-device slot.
+echo "  npu-probe finding: CAP_SYS_ADMIN denial at accel open (advisory, non-blocking) — branch (d) open OK, custom-device works on classic Ubuntu"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true
