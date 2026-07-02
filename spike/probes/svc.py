@@ -8,26 +8,28 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from probe_common import write_result
 import probe_platform
 
-PROBES = {
+PROBES: dict = {
     "svc-a": [("shm", probe_platform.shm_probe)],
 }
 
 
 def _proc_start_monotonic() -> float:
-    """Return process creation time as seconds since boot (10 ms resolution).
+    """Kernel-recorded process start time (CLOCK_MONOTONIC base, jiffy resolution).
 
-    Uses /proc/self/stat field 22 (starttime in jiffies) which reflects when
-    systemd forked this process — unaffected by Python interpreter startup
-    overhead, making it reliable for cross-service ordering comparisons.
+    Parses /proc/self/stat safely: comm (field 2) may contain spaces or ')',
+    so split after the LAST ')'. starttime is field 22 overall -> index 19
+    of the post-comm remainder.
     """
     with open("/proc/self/stat") as f:
-        stat = f.read().split()
-    return int(stat[21]) / os.sysconf("SC_CLK_TCK")
+        raw = f.read()
+    after_comm = raw[raw.rindex(")") + 2:]
+    return int(after_comm.split()[19]) / os.sysconf("SC_CLK_TCK")
 
 
 def main() -> None:
     name = sys.argv[1]
     write_result(f"ordering-{name}", {
+        "status": "complete",
         "service": name,
         "start_monotonic": _proc_start_monotonic(),
     })
@@ -35,8 +37,11 @@ def main() -> None:
         try:
             write_result(result_name, fn())
         except Exception as e:  # a probe must never kill the daemon
-            write_result(result_name, {"status": "crashed",
-                                       "error": f"{type(e).__name__}: {e}"})
+            try:
+                write_result(result_name, {"status": "crashed",
+                                           "error": f"{type(e).__name__}: {e}"})
+            except Exception:
+                pass  # even the crash report must not kill the daemon
     while True:
         time.sleep(60)
 

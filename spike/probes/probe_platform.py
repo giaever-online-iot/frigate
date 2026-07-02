@@ -4,7 +4,7 @@ import os
 
 def shm_probe() -> dict:
     from multiprocessing import shared_memory
-    out = {"status": "complete"}
+    out: dict = {"status": "complete"}
     inst = os.environ.get("SNAP_INSTANCE_NAME", "frigate")
 
     # Sub-test 1: CPython default name (/dev/shm/psm_*) — Frigate's current behavior.
