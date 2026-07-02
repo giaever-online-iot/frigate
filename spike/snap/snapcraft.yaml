@@ -11,6 +11,9 @@ confinement: strict
 layout:
   # NOTE: /config bind is REJECTED at pack time (snapd: "defines a new top-level directory").
   # /etc/letsencrypt is a sub-path of /etc (exists in base) and is accepted.
+  # NOTE: /media/frigate ALSO REJECTED at pack time — same error: "defines a new top-level directory /media".
+  # Implication for M3: recordings dir cannot use a /media/frigate layout; must configure Frigate's
+  # BASE_DIR or recordings path directly to a $SNAP_COMMON path.
   /etc/letsencrypt:
     bind: $SNAP_DATA/letsencrypt
 

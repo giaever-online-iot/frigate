@@ -46,6 +46,14 @@ echo "  layout finding: /config NOT in snap layout (pack-time rejection); runtim
 check "layout: /etc/letsencrypt -> SNAP_DATA" grep -q "$TOK" /var/snap/$SNAP_NAME/current/letsencrypt/probe.txt
 check "private /tmp/cache holds token" sh -c "grep -rq '$TOK' /tmp/snap-private-tmp/snap.$SNAP_NAME/tmp/cache/ 2>/dev/null"
 
+# FINDING (Task 6): /media/frigate layout REJECTED at snap pack time (same "defines a new top-level
+# directory" error as /config). snapd does not treat /media as a valid layout base even though the
+# directory exists in the base filesystem. Implication for M3: recordings cannot use a /media/frigate
+# layout; Frigate's recordings path must be configured directly to a $SNAP_COMMON sub-path.
+echo "  layout finding: /media/frigate NOT in snap layout (pack-time rejection: 'defines a new top-level directory /media')"
+printf 'Cannot pack snap: error: cannot validate snap "frigate": layout "/media/frigate" defines a new top-level directory "/media"\n' \
+  > "$EVIDENCE/media-layout-install.txt"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
