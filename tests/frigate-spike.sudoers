@@ -1,0 +1,1 @@
+joachimmgg ALL=(root) NOPASSWD: /usr/bin/snap, /usr/bin/journalctl, /usr/bin/lsusb, /home/joachimmgg/Development/giaever-online-iot/frigate/tests/spike-smoke.sh
