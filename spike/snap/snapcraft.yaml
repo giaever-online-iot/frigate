@@ -113,6 +113,7 @@ parts:
       mkdir -p "$CRAFT_PART_INSTALL/models"
       wget -O "$CRAFT_PART_INSTALL/models/edgetpu-test.tflite" \
         https://github.com/google-coral/test_data/raw/master/mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite
+      echo "5b468dfe63ce4d79056bb19b953529e25df0a8d841b204c626576a1b8bd36afe  $CRAFT_PART_INSTALL/models/edgetpu-test.tflite" | sha256sum -c -
   wrappers:
     plugin: dump
     source: bin

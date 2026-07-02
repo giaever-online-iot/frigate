@@ -83,16 +83,29 @@ check "openvino sees GPU" grep -q '"GPU"' "$RESULTS/gpu.json"
 check "vainfo produced output" test -s /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt
 cp /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt "$EVIDENCE/" 2>/dev/null || true
 
+# --- Coral USB section ---
+# Once the Coral firmware is uploaded, the device stays in initialized state (18d1:9302) until
+# physically replugged. On re-runs, before==18d1 is the expected steady state — the 1a6e->18d1
+# transition only occurs on the very first probe after a replug. A live transition is auto-archived
+# to coral-reenum-transition.txt by the block below (1) whenever a replugged device is probed.
 snap connect $SNAP_NAME:raw-usb 2>/dev/null || true
 snap connect $SNAP_NAME:hardware-observe 2>/dev/null || true
 lsusb | grep -Ei '1a6e|18d1' > "$EVIDENCE/coral-usb-before.txt" || true
 snap run $SNAP_NAME.coral-probe || true
 sleep 3
 lsusb | grep -Ei '1a6e|18d1' > "$EVIDENCE/coral-usb-after.txt" || true
+# Archive the one-shot firmware re-enumeration transition whenever it occurs (append, never truncate).
+if grep -q 1a6e "$EVIDENCE/coral-usb-before.txt" 2>/dev/null && grep -q 18d1 "$EVIDENCE/coral-usb-after.txt" 2>/dev/null; then
+  { echo "# LIVE TRANSITION CAPTURED $(date '+%Y-%m-%d %H:%M:%S')"; cat "$EVIDENCE/coral-usb-before.txt"; cat "$EVIDENCE/coral-usb-after.txt"; echo; } \
+    >> "$EVIDENCE/coral-reenum-transition.txt"
+fi
+# Replay the first-run transition as a RECORDED finding so the evidence is never clobbered by steady-state runs.
+printf '# RECORDED FINDING (Task 11): first-run transition, replayed by the harness - NOT live capture\nBus 003 Device 076: ID 1a6e:089a Global Unichip Corp.\nBus 003 Device 077: ID 18d1:9302 Google Inc.\n' \
+  > "$EVIDENCE/coral-reenum-firstrun.txt"
 check "coral probe complete" test "$(jqr coral '.status')" = "complete"
 check "coral delegate loaded (firmware upload)" test "$(jqr coral '.load_delegate.ok')" = "true"
 check "coral inference ran" test "$(jqr coral '.inference.ok')" = "true"
-check "coral re-enumerated as Google (18d1)" grep -q 18d1 "$EVIDENCE/coral-usb-after.txt"
+check "coral: device in initialized state (18d1) after probe" grep -q 18d1 "$EVIDENCE/coral-usb-after.txt"
 
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
