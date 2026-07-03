@@ -37,6 +37,7 @@ def main() -> None:
         "status": "complete",
         "service": name,
         "start_monotonic": _proc_start_monotonic(),
+        "waited_ms": int(os.environ.get("SPIKE_WAITED_MS", "-1")),
     })
     for result_name, fn in PROBES.get(name, []):
         try:

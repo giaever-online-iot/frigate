@@ -122,6 +122,11 @@ check "go2rtc service active" sh -c "snap services frigate.go2rtc | grep -q ' ac
 curl -sf --max-time 5 http://127.0.0.1:1984/api/streams > "$EVIDENCE/go2rtc-streams.json" 2>/dev/null || true
 check "go2rtc API lists test stream" sh -c "jq -e '.test' \"$EVIDENCE/go2rtc-streams.json\""
 
+# --- M1: readiness gate evidence (Task 3) ---
+# Note: jqr is a shell function not available in subshells; inline jq with the expanded $RESULTS path.
+check "readiness: svc-a waited_ms recorded (>=0)" sh -c "WMS=\$(jq -r '.waited_ms' \"$RESULTS/ordering-svc-a.json\" 2>/dev/null); [ -n \"\$WMS\" ] && [ \"\$WMS\" -ge 0 ]"
+echo "  readiness finding: svc-a waited_ms=$(jqr ordering-svc-a '.waited_ms')"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true

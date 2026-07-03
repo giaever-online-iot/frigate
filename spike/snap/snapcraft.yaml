@@ -46,6 +46,8 @@ apps:
     command: bin/svc-a
     daemon: simple
     restart-condition: never
+    after: [go2rtc]
+    plugs: [network]
   svc-b:
     command: bin/svc-b
     daemon: simple
