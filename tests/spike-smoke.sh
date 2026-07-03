@@ -139,6 +139,23 @@ curl -sf --max-time 5 "http://127.0.0.1:1984/api/streams?src=test" > "$EVIDENCE/
 check "go2rtc exec producer active (confined ffmpeg spawned)" sh -c "jq -e '.producers[0]' \"$EVIDENCE/go2rtc-producer.json\""
 echo "  subprocess finding: exec producer state captured in go2rtc-producer.json"
 
+# --- M1: WebRTC (Task 5) ---
+check "webrtc: 8555/tcp bound" sh -c "ss -tlnp | grep -q ':8555'"
+check "webrtc: 8555/udp bound" sh -c "ss -ulnp | grep -q ':8555'"
+# WHEP: POST a minimal recvonly offer; a 2xx + SDP answer is full automated proof.
+# A non-2xx HTTP response still proves the endpoint is alive (record; manual browser
+# check below is then the SDP-level evidence). Connection-refused fails the check.
+WHEP_OFFER='v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=rtpmap:96 H264/90000\r\na=ice-ufrag:spike\r\na=ice-pwd:spikespikespikespikespike\r\na=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r\na=setup:actpass\r\n'
+printf "%b" "$WHEP_OFFER" | curl -s --max-time 5 -X POST -H 'Content-Type: application/sdp' \
+  --data-binary @- -o "$EVIDENCE/whep-response.txt" -w '%{http_code}' \
+  "http://127.0.0.1:1984/api/webrtc?src=test" > "$EVIDENCE/whep-status.txt" 2>/dev/null || true
+check "webrtc: WHEP endpoint alive (HTTP response)" sh -c "grep -qE '^[1-5][0-9][0-9]$' \"$EVIDENCE/whep-status.txt\""
+if grep -q '^2' "$EVIDENCE/whep-status.txt" && grep -q '^v=0' "$EVIDENCE/whep-response.txt"; then
+  pass_ "webrtc: WHEP returned SDP answer (automated full proof)"
+else
+  echo "  webrtc finding: WHEP status=$(cat "$EVIDENCE/whep-status.txt") - SDP answer not automated; manual browser check required (see docs/m1-findings.md)"
+fi
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
