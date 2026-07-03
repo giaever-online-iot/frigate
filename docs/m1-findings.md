@@ -4,12 +4,12 @@
 
 | # | Question | Verdict | Evidence |
 |---|----------|---------|----------|
-| M1-1 | go2rtc v1.9.13 runs strict-confined as a snap daemon? | YES — first try, 0 new denial arms; network+network-bind cover ports 1984/8554/8555 | spike/results/go2rtc-streams.json (`snap services frigate.go2rtc` active), spike/results/denials.txt (17 total, 0 unexpected) |
+| M1-1 | go2rtc v1.9.13 runs strict-confined as a snap daemon? | YES — first try, 0 new denial arms; network+network-bind cover ports 1984/8554/8555 | spike/results/go2rtc-streams.json (`snap services frigate.go2rtc` active), spike/results/denials.txt (10 total, 0 unexpected) |
 | M1-2 | Consumer-side readiness gate works, measured? | YES — waited_ms=600–606 ms across runs; includes ~600 ms python3.11 startup floor for two timing calls (two poll iterations each spawning python3.11); gate proves provider ANSWERED (`/api/streams` returned 200), distinct from systemd start-order; consumer-side pattern confirmed for M3/M4 reuse | spike/results/spike-results/ordering-svc-a.json (waited_ms=606 final run; task-3 run=600), spike/bin/lib-wait.sh (overhead comment) |
 | M1-3 | go2rtc spawns ffmpeg (exec:) under strict confinement? | YES — exec producer active; ffmpeg path `/snap/frigate/x1/usr/lib/ffmpeg/8.0/bin/ffmpeg` appears in go2rtc stream state under key `producers[0]` | spike/results/go2rtc-producer.json |
 | M1-4 | RTSP restream consumable end-to-end? | YES — H.264 High profile, 1280×720, 15 fps consumed by the snap's own ffprobe (frigate.ffprobe, n8.1.1 tree) via `rtsp://127.0.0.1:8554/test` | spike/results/rtsp-probe.json (codec_name=h264, profile=High, width=1280, height=720, r_frame_rate=15/1) |
 | M1-5 | WebRTC ports + WHEP under strict confinement? | SDP-answer branch — HTTP 201 with full SDP (ICE ufrag/pwd + DTLS fingerprint + H264/90000 sendonly) to the canned WHEP offer; TCP 8555 LISTEN + UDP 8555 UNCONN bound across all interfaces; 0 new denials. Manual browser media-flow / LAN-ICE check NOT performed — automated SDP proof supersedes for confinement purposes; media-flow and LAN-ICE check pending operator | spike/results/whep-status.txt (201), spike/results/whep-response.txt (full SDP) |
-| M1-6 | mDNS multicast under network+network-bind alone? | YES — multicast group join (224.0.0.251:5353) OK, PTR query sent, 5–10 responses from 4 unique senders within 3 s, 0 AppArmor denials; avahi-observe and network-control are NOT required | spike/results/spike-results/mdns.json (status=complete, multicast_join.ok=true, responses=5–10, unique_senders=4) |
+| M1-6 | mDNS multicast under network+network-bind alone? | YES — multicast group join (224.0.0.251:5353) OK, PTR query sent, 16 responses (prior run observed 5) from 5 unique senders = 4 external LAN responders (192.168.254.1, .126, .154, .246) + 1 self (192.168.254.16, host avahi) — true LAN multicast reach, not self-echo; within 3 s, 0 AppArmor denials; avahi-observe and network-control are NOT required | spike/results/spike-results/mdns.json (status=complete, multicast_join.ok=true, responses=16, unique_senders=5) |
 
 ## Decisions unlocked for M2+
 
@@ -50,5 +50,5 @@ ALL PASS except 3 coral checks (Coral USB device physically absent; M0-verified 
 - `spike/results/rtsp-probe.json` — ffprobe JSON output: H.264 High, 1280×720, 15 fps
 - `spike/results/whep-status.txt` — WHEP HTTP status code: 201
 - `spike/results/whep-response.txt` — WHEP SDP answer body: ICE credentials, DTLS fingerprint, H264/90000 sendonly
-- `spike/results/spike-results/mdns.json` — mDNS probe result: join ok, responses 5–10, 4 unique senders, 0 denials
+- `spike/results/spike-results/mdns.json` — mDNS probe result: join ok, responses 16 (prior run observed 5), 5 unique senders = 4 external LAN responders (192.168.254.1, .126, .154, .246) + 1 self (192.168.254.16, host avahi) — true LAN multicast reach, not self-echo, 0 denials
 - `spike/results/spike-results/ordering-svc-a.json` — svc-a ordering record: waited_ms=606 (final run)

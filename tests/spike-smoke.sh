@@ -8,6 +8,9 @@ RESULTS=/var/snap/$SNAP_NAME/common/spike-results
 EVIDENCE=spike/results
 FAIL=0
 mkdir -p "$EVIDENCE"
+# Evidence dir is created by the root harness but must stay writable by the invoking user
+# (agents capture run transcripts here). chown to SUDO_USER when run via sudo.
+[ -n "${SUDO_USER:-}" ] && chown -R "$SUDO_USER" "$EVIDENCE" 2>/dev/null || true
 
 pass_() { echo "PASS: $1"; }
 fail_() { echo "FAIL: $1"; FAIL=1; }
