@@ -127,6 +127,18 @@ check "go2rtc API lists test stream" sh -c "jq -e '.test' \"$EVIDENCE/go2rtc-str
 check "readiness: svc-a waited_ms recorded (>=0)" sh -c "WMS=\$(jq -r '.waited_ms' \"$RESULTS/ordering-svc-a.json\" 2>/dev/null); [ -n \"\$WMS\" ] && [ \"\$WMS\" -ge 0 ]"
 echo "  readiness finding: svc-a waited_ms=$(jqr ordering-svc-a '.waited_ms')"
 
+# --- M1: RTSP end-to-end (Task 4) ---
+# ffprobe is BOTH the verifier and the first consumer: it triggers go2rtc's
+# exec: source, which spawns the staged ffmpeg INSIDE confinement.
+timeout 30 snap run frigate.ffprobe -v error -print_format json -show_streams \
+  -rtsp_transport tcp "rtsp://127.0.0.1:8554/test" > "$EVIDENCE/rtsp-probe.json" 2>/dev/null || true
+check "rtsp: stream is h264" sh -c "jq -e '.streams[0].codec_name == \"h264\"' \"$EVIDENCE/rtsp-probe.json\""
+check "rtsp: 1280x720" sh -c "jq -e '.streams[0].width == 1280 and .streams[0].height == 720' \"$EVIDENCE/rtsp-probe.json\""
+# Confined subprocess evidence: the exec producer must appear in go2rtc's stream state.
+curl -sf --max-time 5 "http://127.0.0.1:1984/api/streams?src=test" > "$EVIDENCE/go2rtc-producer.json" 2>/dev/null || true
+check "go2rtc exec producer active (confined ffmpeg spawned)" sh -c "jq -e '.producers[0]' \"$EVIDENCE/go2rtc-producer.json\""
+echo "  subprocess finding: exec producer state captured in go2rtc-producer.json"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
