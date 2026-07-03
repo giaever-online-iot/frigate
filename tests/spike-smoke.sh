@@ -114,6 +114,9 @@ snap run $SNAP_NAME.npu-probe 2>> "$EVIDENCE/npu-connect.txt" || true
 check "npu probe produced evidence" sh -c "test -s $RESULTS/npu.json -o -s $EVIDENCE/npu-connect.txt"
 echo "  npu finding: open=$(jqr npu '.open_accel0.ok // "no-json"') connect-err=$(head -c120 "$EVIDENCE/npu-connect.txt" 2>/dev/null)"
 
+# --- M1: ffmpeg tree (Task 1) ---
+check "ffprobe (8.0 tree) runs" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n8'"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true

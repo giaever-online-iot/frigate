@@ -61,6 +61,9 @@ apps:
   npu-probe:
     command: bin/npu-probe
     plugs: [npu]
+  ffprobe:
+    command: usr/lib/ffmpeg/8.0/bin/ffprobe
+    plugs: [network]
 
 parts:
   python311:
@@ -94,13 +97,17 @@ parts:
       "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
         --root "$CRAFT_PART_INSTALL" --prefix /usr \
         -r requirements-spike.txt
-      # Remove packages already staged by python311 (ensurepip) to avoid staging conflicts
+      # Remove packages already staged by python311 (ensurepip) to avoid staging conflicts.
+      # Guard: pip reports "already satisfied" on re-runs (packages found in stage); in that
+      # case CRAFT_PART_INSTALL/site-packages is absent and the cleanup is a no-op.
       SP="$CRAFT_PART_INSTALL/usr/lib/python3.11/site-packages"
-      rm -rf "$SP/setuptools" "$SP/_distutils_hack" "$SP/pkg_resources"
-      find "$SP" -maxdepth 1 \( \
-        -name 'setuptools-*.dist-info' -o \
-        -name 'distutils-precedence.pth' \
-      \) -exec rm -rf {} +
+      if [ -d "$SP" ]; then
+        rm -rf "$SP/setuptools" "$SP/_distutils_hack" "$SP/pkg_resources"
+        find "$SP" -maxdepth 1 \( \
+          -name 'setuptools-*.dist-info' -o \
+          -name 'distutils-precedence.pth' \
+        \) -exec rm -rf {} +
+      fi
   probes:
     plugin: dump
     source: probes
@@ -134,3 +141,12 @@ parts:
     source: bin
     organize:
       '*': bin/
+  ffmpeg:
+    plugin: nil
+    build-packages: [wget, xz-utils]
+    override-build: |
+      wget -O /tmp/ffmpeg.tar.xz "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linux64-gpl-8.1.tar.xz"
+      echo "9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9  /tmp/ffmpeg.tar.xz" | sha256sum -c -
+      mkdir -p /tmp/ffmpeg-x && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-x --strip-components=1
+      install -D -m 0755 /tmp/ffmpeg-x/bin/ffmpeg  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
+      install -D -m 0755 /tmp/ffmpeg-x/bin/ffprobe "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
