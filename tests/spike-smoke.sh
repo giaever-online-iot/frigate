@@ -117,8 +117,12 @@ snap run $SNAP_NAME.npu-probe 2>> "$EVIDENCE/npu-connect.txt" || true
 check "npu probe produced evidence" sh -c "test -s $RESULTS/npu.json -o -s $EVIDENCE/npu-connect.txt"
 echo "  npu finding: open=$(jqr npu '.open_accel0.ok // "no-json"') connect-err=$(head -c120 "$EVIDENCE/npu-connect.txt" 2>/dev/null)"
 
-# --- M1: ffmpeg tree (Task 1) ---
-check "ffprobe (8.0 tree) runs" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n8'"
+# --- M2: ffmpeg matrix (Task 1) --- ffprobe app follows the tag-default 7.0 tree
+check "ffprobe app runs tag-default 7.0" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n7'"
+# static builds run directly from the mounted squashfs (no confinement needed for -version)
+for V in 5.0 7.0 8.0; do
+  check "ffmpeg tree $V present+runs" sh -c "/snap/frigate/current/usr/lib/ffmpeg/$V/bin/ffprobe -version | head -1 | grep -q '^ffprobe version'"
+done
 
 # --- M1: go2rtc daemon (Task 2) ---
 check "go2rtc service active" sh -c "snap services frigate.go2rtc | grep -q ' active'"
