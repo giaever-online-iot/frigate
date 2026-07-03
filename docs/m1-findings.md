@@ -19,7 +19,7 @@
 
 - **No new denial arms added in M1:** go2rtc, the exec: ffmpeg subprocess, and the mDNS probe all operated within the existing denial filter. The M1 snapcraft.yaml adds `network` + `network-bind` for go2rtc; nothing beyond that.
 
-- **ffmpeg version matrix — M2 decision required:** The snap stages ffmpeg labeled `8.0` but built from Frigate MASTER HEAD commit `n8.1.1-9-g58d4114d36-20260602` (not the v0.17.2 tagged release, which pins only 5.0/7.0). M2 must decide: track the tag-exact matrix (5.0/7.0) or follow MASTER-style (n8.1.x). Current build is MASTER-style; if tag-exact is required, a rebuild and snapcraft.yaml pin update are needed.
+- **ffmpeg version matrix — M2 decision required:** The snap stages the NickM-27 FFmpeg-Builds 8.x autobuild (ffmpeg `n8.1.1-9-g58d4114d36-20260602` — that string is FFmpeg's own git-describe, not a Frigate commit), matching what Frigate master's `DEFAULT_FFMPEG_VERSION=8.0` resolves to; the v0.17.2 tag instead pins only 5.0/7.0. M2 must decide: track the tag-exact matrix (5.0/7.0) or follow master-style (n8.1.x). Current build is master-style; if tag-exact is required, a rebuild and snapcraft.yaml pin update are needed.
 
 - **Config template pattern for M3:** go2rtc is started via `go2rtc-run`, a shell wrapper that substitutes `__SNAP__` with `$SNAP` before writing the config and exec'ing go2rtc. The same `__SNAP__` / `__SNAP_DATA__` substitution pattern is appropriate for `create_config.py` in M3 where Frigate's `config.yml` will need runtime snap path injection.
 
