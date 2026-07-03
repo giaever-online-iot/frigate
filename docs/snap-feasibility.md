@@ -4,6 +4,8 @@
 **Scope:** Native snapcraft packaging of [Frigate NVR](https://github.com/blakeblackshear/frigate) — **not** a Docker-in-snap wrapper and **not** running Frigate's official container image. Target: **strict confinement**, falling back to **classic** only where strict is provably impossible.
 **Ground truth:** Frigate `master` @ `ea131e1` (≈ v0.17.x), Debian 12 (bookworm) base, Python 3.11.
 
+> **Updated 2026-07-03 with M0 spike results** ([`docs/spike-findings.md`](spike-findings.md) — empirical, on-hardware verification of this report's claims on **core26**/snapd 2.75.2). Corrections are marked "**M0:**" inline. Headline changes: the layout strategy for `/config`+`/media/frigate` is **impossible** (→ `const.py` patch required), while `custom-device` for NPU/Coral-PCIe **works** on classic Ubuntu (blocker downgraded to Store-approval-only).
+
 ---
 
 ## 1. Verdict
@@ -13,14 +15,14 @@ A **strict-confined native snap of Frigate is feasible for a defined feature sub
 | Feature path | Strict-confined? | Mechanism |
 |---|---|---|
 | CPU detection (tflite) | ✅ Yes | no devices needed |
-| OpenVINO on Intel iGPU | ⚠️ Mostly | `/dev/dri` via `opengl` + `gpu-2404` extension |
-| Intel/AMD VAAPI decode | ⚠️ Mostly | `gpu-2404` extension (Mesa content snap) |
-| Coral **USB** | ⚠️ Yes, with caveats | `raw-usb` (manual-connect, **needs root + udev**) |
+| OpenVINO on Intel iGPU | ✅ **M0-verified** | `opengl` + `gpu` extension (mesa-2604) — **plus** intel-opencl-icd staging + OpenCL layouts + runtime `LD_LIBRARY_PATH` (recipe in spike findings; not turn-key) |
+| Intel/AMD VAAPI decode | ✅ **M0-verified** | `gpu` extension (mesa-2604): iHD 26.1.2, AV1/HEVC10/VP9 on Meteor Lake |
+| Coral **USB** | ✅ **M0-verified** | `raw-usb` as root (manual-connect); live firmware re-enumeration survives confinement |
 | Raspberry Pi V4L2 decode | ✅ Yes | `camera` interface (`/dev/video*`) |
 | Recordings to external disk | ⚠️ Yes, with caveats | `removable-media` (manual-connect, `/media` `/mnt` only) |
 | Networking (RTSP/MQTT/WebUI) | ✅ Yes | `network` + `network-bind` (auto-connect) |
-| Coral **PCIe/M.2** (`/dev/apex_0`) | ❌ Blocker | no interface → `custom-device` (super-privileged, Store-gated) |
-| Intel **NPU** (`/dev/accel`) | ❌ Blocker | same as above |
+| Coral **PCIe/M.2** (`/dev/apex_0`) | ⚠️ **M0-downgraded** | `custom-device` self-slot **works on classic Ubuntu** (proven via NPU, same mechanism); super-privileged → Store approval needed only for *distribution* |
+| Intel **NPU** (`/dev/accel`) | ⚠️ **M0-downgraded** | `custom-device` self-slot verified: connect OK, `open(/dev/accel/accel0)` OK |
 | **NVIDIA** TensorRT/CUDA/NVDEC | ❌ Blocker | Mesa passthrough carries GL/Vulkan only, not CUDA |
 | Rockchip / Hailo / MemryX / Axengine | ❌ Blocker | proprietary device nodes, "privileged mode" upstream |
 
@@ -76,15 +78,15 @@ The Python core (`frigate`) is the orchestrator: it spawns **ffmpeg** as subproc
 
 | Path | Purpose | Snap target |
 |---|---|---|
-| `/opt/frigate` | app code + built web UI (read-only) | `$SNAP/opt/frigate` (layout bind) |
-| `/config` | config.yml, `frigate.db`, model cache, secrets | `$SNAP_DATA/config` (layout bind) |
-| `/media/frigate` | recordings, clips, exports (large) | `$SNAP_COMMON/media/frigate` (layout bind) |
-| `/tmp/cache` | recording segment cache, birdseye pipe, ZMQ IPC sockets | snap's **private `/tmp`** — works as-is |
-| `/dev/shm` | raw decoded frames, logs, go2rtc.yaml | see §4 — **needs care** |
-| `/usr/local/nginx`, `/usr/local/go2rtc`, `/usr/lib/ffmpeg` | bundled binaries | `$SNAP/...` (layout bind) |
-| `/etc/letsencrypt` | TLS certs (writable at runtime) | `$SNAP_DATA/letsencrypt` (layout bind) |
+| `/opt/frigate` | app code + built web UI (read-only) | `$SNAP/opt/frigate` (layout bind — `/opt` exists in base, expected valid; untested in M0) |
+| `/config` | config.yml, `frigate.db`, model cache, secrets | **M0: layout IMPOSSIBLE** (pack-time rejection: *"defines a new top-level directory /config"*) → patch `const.py` to env-driven path → `$SNAP_DATA/config` |
+| `/media/frigate` | recordings, clips, exports (large) | **M0: layout IMPOSSIBLE** (same rejection class for `/media`) → patch `const.py` → `$SNAP_COMMON/media/frigate` |
+| `/tmp/cache` | recording segment cache, birdseye pipe, ZMQ IPC sockets | snap's **private `/tmp`** — **M0-verified**, works as-is |
+| `/dev/shm` | raw decoded frames, logs, go2rtc.yaml | see §4 — **M0: prefix patch required & proven** |
+| `/usr/local/nginx`, `/usr/local/go2rtc`, `/usr/lib/ffmpeg` | bundled binaries | `$SNAP/...` (layout bind — `/usr` base-rooted, valid) |
+| `/etc/letsencrypt` | TLS certs (writable at runtime) | `$SNAP_DATA/letsencrypt` (layout bind — **M0-verified working**) |
 
-**Strategy:** use snap **`layout:`** entries to remap absolute paths into `$SNAP`/`$SNAP_DATA`/`$SNAP_COMMON`. Layouts apply to the whole snap mount namespace, so go2rtc, ffmpeg, nginx, and python **all** see the same remapped paths consistently — avoiding a fork of `const.py`. (Patching `const.py` to read env vars is the fallback if layouts prove leaky.)
+**Strategy (corrected by M0):** snap **layouts cannot create new top-level directories** — snapd's pack-time validator rejects any layout whose target root is absent from the base filesystem (deterministic error: `layout "<path>" defines a new top-level directory "<dir>"`). The original claim here that layouts could mint `/config` and `/media/frigate` was **wrong**. Layouts remain valid only for base-rooted paths (`/etc/*`, `/usr/*`, `/opt/*`…). Consequence: **patching `frigate/const.py` to env-driven base paths is the required strategy** (not a fallback) for `/config` and `/media/frigate` — it pairs naturally with the mandatory shm-prefix patch (§4.1) in a single small carried patch.
 
 **SQLite constraint:** `frigate.db` must stay on **local** storage — Frigate throws `database is locked` on NFS/SMB (POSIX advisory-locking limitation). So `/config` (→ `$SNAP_DATA`) must not be redirected to a network/removable mount.
 
@@ -126,25 +128,22 @@ Frigate's multi-stage Dockerfile maps to these parts (no stock apt packages can 
 
 **Auto-connection model (verified):** snapd applies built-in *base-declaration* rules, which a per-snap *snap-declaration* (Store policy) can override. So a polished Frigate snap **can request Store grants to auto-connect** `raw-usb` / `camera` / `removable-media`, sparing users the manual `snap connect`. Precedence: snap-plug > snap-slot > built-in-plug > built-in-slot.
 
-**GPU extension:** `gpu-2404` (core24) / `gpu-2204` (core22) adds a `graphics-coreXX` *content* plug (default-provider `mesa-coreXX`) plus a command-chain wrapper, delivering Mesa + OpenGL/Vulkan **and VA-API/VDPAU** from the provider snap — the correct strict mechanism for Intel/AMD decode (not turn-key: Frigate's custom ffmpeg needs `LIBVA_DRIVERS_PATH` wiring, and Mesa version/codec mismatches are documented).
+**GPU extension (M0-verified on core26):** the snapcraft-9 `gpu` extension adds a `gpu-2604` *content* plug (default-provider `mesa-2604`) plus a command-chain wrapper, delivering Mesa + OpenGL/Vulkan **and VA-API** from the provider snap. **M0 confirmed VAAPI is turn-key** (iHD 26.1.2 enumerated with full Meteor Lake profiles) **but OpenVINO-GPU is not**: it additionally requires `intel-opencl-icd` + `libigdgmm12` + `ocl-icd-libopencl1` staged, `/etc/OpenCL` + `intel-opencl` layouts, and runtime `LD_LIBRARY_PATH` including the mesa-2604 mount (the extension's cleanup strips `libGL.so.1` from the snap) — each element counterfactual-proven necessary. Full recipe in the spike findings.
 
 ---
 
 ## 4. Strict-confinement blockers (the limitations you asked about)
 
-### 4.1 `/dev/shm` shared memory — **needs an upstream patch** ⚠️
-Frigate stores raw decoded frames via Python `multiprocessing.shared_memory` (`SharedMemoryFrameManager`). CPython creates these at `/dev/shm/psm_<random>`. **snapd's AppArmor template only permits `/dev/shm/snap.<instance>.*`** — generic `psm_*` names are **denied**. This breaks the frame pipeline under strict confinement. Resolution requires either:
-- patching Frigate's SHM name prefix to `snap.<instance>.…`, or
-- a `LD_PRELOAD`/shim, or
-- verifying whether a snap layout can satisfy it (it cannot change AppArmor SHM rules).
+### 4.1 `/dev/shm` shared memory — **needs an upstream patch** ✅ M0-VERIFIED
+Frigate stores raw decoded frames via Python `multiprocessing.shared_memory` (`SharedMemoryFrameManager`). CPython creates these at `/dev/shm/psm_<random>`. **M0 confirmed on real snapd/AppArmor:** `psm_*` creation is denied (`mknod` AppArmor denial, `PermissionError`), while a **`snap.<instance>.*`-prefixed segment is allowed** — the fix shape is a **source patch of the SHM name prefix** and its viability is proven (spike probe A1). Layouts cannot address this (AppArmor rule, not a path issue); an `LD_PRELOAD` shim is unnecessary given how small the prefix patch is.
 
-Additionally, Frigate needs a **large `/dev/shm`** (formula: `(W×H×1.5×20+270480)/1048576` MB per camera + 40 MB logs; 128 MB ≈ two 720p cams). Whether snapd provisions a sufficiently large writable `/dev/shm` under confinement is an **open verification item**. *This is the single biggest strict-confinement risk and must be prototyped first.*
+Remaining for M3: Frigate needs a **large `/dev/shm`** (formula: `(W×H×1.5×20+270480)/1048576` MB per camera + 40 MB logs; 128 MB ≈ two 720p cams). The spike validated small-segment creation only; sizing behavior under many-camera load is still to be measured when the real frame pipeline lands.
 
-### 4.2 Coral USB — works, but `raw-usb` does **not** override Unix permissions
-`raw-usb` grants the AppArmor/udev access to `/dev/bus/usb/NNN/NNN`, and snapd's wildcard usb udev tags cover **hotplug** re-enumeration. **But** it does *not* supersede classic file permissions — the snap must run **as root** (snap daemons do by default) or rely on the libedgetpu `plugdev` udev rule. Manual-connect; auto-connect needs a Store grant.
+### 4.2 Coral USB — works ✅ M0-VERIFIED end-to-end
+`raw-usb` grants the AppArmor/udev access to `/dev/bus/usb/NNN/NNN`, and snapd's wildcard usb udev tags cover **hotplug** re-enumeration — **M0 proved this live**: delegate load, firmware upload, the `1a6e:089a → 18d1:9302` re-enumeration (new device number mid-session), and inference all succeeded strict-confined. `raw-usb` does *not* supersede classic file permissions — the snap must run **as root** (snap daemons do by default) or rely on the libedgetpu `plugdev` udev rule. Manual-connect; auto-connect needs a Store grant. One benign, labeled `CAP_NET_ADMIN` denial during libedgetpu USB init.
 
-### 4.3 Coral PCIe `/dev/apex_0` & Intel NPU `/dev/accel` — **hard blockers**
-**No built-in snapd interface** exists for these nodes. The only strict path is the **super-privileged `custom-device`** interface (explicit device-path attributes, auto-generated udev rules), which **requires Store approval** and is gadget/Ubuntu-Core-oriented — awkward for a widely-distributed classic-Ubuntu snap. Practically: ship these only via a `custom-device` declaration or a separate classic/devmode build.
+### 4.3 Coral PCIe `/dev/apex_0` & Intel NPU `/dev/accel` — **downgraded: mechanism works** ⚠️ M0-VERIFIED
+**No built-in snapd interface** exists for these nodes; the strict path is the **super-privileged `custom-device`** interface. **M0 (probe C3) proved the mechanism works on classic Ubuntu**: a snap can declare its own `custom-device` slot (`devices: [/dev/accel/accel0]`), install with `--dangerous`, self-connect, and open the device under strict confinement — no gadget snap needed. The blocker is therefore **only Store approval for distribution** (super-privileged slots need a snap-declaration to ship via the Store). An advisory `CAP_SYS_ADMIN` denial fires once per device init and does not block the open. Non-root daemon access would need udev tagging/render-group membership (snap daemons run as root, so moot for the current design).
 
 ### 4.4 NVIDIA CUDA/TensorRT/NVDEC — **hard blocker**
 The Mesa passthrough (`mesa-coreXX`) only forwards **host NVIDIA GL/Vulkan userspace** installed as Debian packages — **not** CUDA/TensorRT/NVDEC, which Frigate's TensorRT detector and NVDEC decode require. snapd's own NVIDIA support is documented as *"fragile and complex"*; the driver is never bundled. NVIDIA acceleration is therefore **not achievable under strict confinement** and is the strongest candidate for a separate **classic** snap (or staying on Docker).
@@ -156,10 +155,10 @@ go2rtc's WebRTC uses UDP + ICE/STUN. `network-bind` permits binding fixed ports,
 Frigate, nginx (`user root;`), and go2rtc all run as root and write `/usr/local/nginx/conf`, `/etc/letsencrypt`. Snap daemons are root by default (helps), but those writable paths must be relocated under `$SNAP_DATA`/`$SNAP_COMMON` via layouts, and nginx's startup config-rewrite (sed + tempio) needs a writable nginx prefix.
 
 ### 4.7 Recordings to arbitrary disks
-`removable-media` covers **only** `/media`, `/run/media`, `/mnt` — **not** `/srv` or `/data` (those need `system-files`, even harder to get approved). Because Frigate hardcodes `RECORD_DIR=/media/frigate/recordings` (which we layout-bind to `$SNAP_COMMON`), pointing recordings at an external disk requires the user to bind-mount/symlink that disk under `$SNAP_COMMON/media/frigate` — a documented limitation, not a clean config toggle.
+`removable-media` covers **only** `/media`, `/run/media`, `/mnt` — **not** `/srv` or `/data` (those need `system-files`, even harder to get approved). Because Frigate hardcodes `RECORD_DIR=/media/frigate/recordings` (**M0: routed to `$SNAP_COMMON` via the `const.py` env patch — a layout is impossible for `/media`**, §2.3), pointing recordings at an external disk requires the user to bind-mount/symlink that disk under `$SNAP_COMMON/media/frigate` — a documented limitation, not a clean config toggle.
 
-### 4.8 Python 3.11 vs base
-Frigate pins **Python 3.11** and downloads prebuilt wheels tagged `cp311`. core22 ships 3.10, core24 ships 3.12. Rebuilding tensorflow/onnxruntime/opencv wheels for a different ABI is impractical, so the snap must **build/stage Python 3.11** (as the Dockerfile does on bookworm). This is a build-complexity cost, not a confinement blocker.
+### 4.8 Python 3.11 vs base ✅ M0-VERIFIED
+Frigate pins **Python 3.11** and downloads prebuilt wheels tagged `cp311`. core22 ships 3.10, core24 ships 3.12, **core26 ships 3.14 (M0)**. Rebuilding tensorflow/onnxruntime/opencv wheels for a different ABI is impractical, so the snap must **build/stage Python 3.11**. **M0 proved this works on core26:** 3.11.9 compiles clean on GCC 15.2.0 (~1m22s; note `g++` is absent from the build env — add to `build-packages` if any part compiles C++), and all 6 upstream cp311 wheels import under strict confinement. This is a build-complexity cost, not a confinement blocker.
 
 ---
 
@@ -170,12 +169,14 @@ Frigate pins **Python 3.11** and downloads prebuilt wheels tagged `cp311`. core2
 
 ---
 
-## 6. Open questions to resolve via prototype (priority order)
+## 6. Open questions — M0 spike status
 
-1. **`/dev/shm`** — does the `psm_*` AppArmor denial (§4.1) require patching Frigate, and can snapd provision a large-enough writable `/dev/shm`? *(highest risk — prototype first)*
-2. **Layouts** — do they cleanly remap `/config`, `/media/frigate`, `/tmp/cache`, `/opt/frigate` for all four daemons without patching upstream?
-3. **WebRTC/UDP + ONVIF/mDNS** — do they work on `network`+`network-bind` alone, or is `avahi-observe`/`network-control` needed?
-4. **Coral PCIe/NPU** — is `custom-device`+Store approval truly the only strict path on classic Ubuntu, or is there a udev/device-cgroup workaround?
+1. **`/dev/shm`** — ✅ **ANSWERED (M0-A1):** yes, patching Frigate's SHM name prefix is required and proven viable. Large-shm sizing under real load remains an M3 measurement.
+2. **Layouts** — ✅ **ANSWERED (M0-A2):** NO for `/config` and `/media/frigate` (pack-time rejections — `const.py` patch required); YES for base-rooted paths (`/etc/letsencrypt` verified); `/tmp/cache` works in the private tmp with no layout.
+3. **WebRTC/UDP + ONVIF/mDNS** — ⏳ **still open**, deliberately deferred to M1 where go2rtc provides a real workload.
+4. **Coral PCIe/NPU** — ✅ **ANSWERED (M0-C3):** `custom-device` self-slot works on classic Ubuntu without a gadget snap (`--dangerous` install + manual connect); Store approval is needed only to distribute. No udev/device-cgroup workaround needed.
+
+Full evidence: [`docs/spike-findings.md`](spike-findings.md).
 
 ---
 

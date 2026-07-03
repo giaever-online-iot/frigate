@@ -50,12 +50,13 @@ layout:
     bind: $SNAP/usr/local/go2rtc
   /usr/lib/ffmpeg:
     bind: $SNAP/usr/lib/ffmpeg         # the 5.0/7.0/8.0 ffmpeg trees
-  /config:
-    bind: $SNAP_DATA/config            # config.yml, frigate.db (MUST stay local — §2.3)
-  /media/frigate:
-    bind: $SNAP_COMMON/media/frigate   # recordings/clips/exports (large)
+  # M0 SPIKE CORRECTION (docs/spike-findings.md): layouts for /config and
+  # /media/frigate are IMPOSSIBLE — snapd rejects layouts that define a new
+  # top-level directory at pack time. Frigate's const.py must instead be
+  # patched to env-driven base paths (CONFIG dir -> $SNAP_DATA/config,
+  # media root -> $SNAP_COMMON/media/frigate). Pairs with the shm-prefix patch.
   /etc/letsencrypt:
-    bind: $SNAP_DATA/letsencrypt       # TLS certs written at runtime
+    bind: $SNAP_DATA/letsencrypt       # TLS certs written at runtime (M0-verified working)
 
 # =============================================================================
 # PLUGS  — manual-connect interfaces declared once, referenced per-app below.
