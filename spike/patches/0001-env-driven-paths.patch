@@ -1,0 +1,27 @@
+diff --git a/frigate/const.py b/frigate/const.py
+index 41c24f0..fe82271 100644
+--- a/frigate/const.py
++++ b/frigate/const.py
+@@ -2,18 +2,18 @@ import os
+ import re
+ 
+ INSTALL_DIR = "/opt/frigate"
+-CONFIG_DIR = "/config"
++CONFIG_DIR = os.environ.get("FRIGATE_CONFIG_DIR", "/config")
+ DEFAULT_DB_PATH = f"{CONFIG_DIR}/frigate.db"
+ MODEL_CACHE_DIR = f"{CONFIG_DIR}/model_cache"
+-BASE_DIR = "/media/frigate"
++BASE_DIR = os.environ.get("FRIGATE_BASE_DIR", "/media/frigate")
+ CLIPS_DIR = f"{BASE_DIR}/clips"
+ EXPORT_DIR = f"{BASE_DIR}/exports"
+ FACE_DIR = f"{CLIPS_DIR}/faces"
+ THUMB_DIR = f"{CLIPS_DIR}/thumbs"
+ RECORD_DIR = f"{BASE_DIR}/recordings"
+ TRIGGER_DIR = f"{CLIPS_DIR}/triggers"
+-BIRDSEYE_PIPE = "/tmp/cache/birdseye"
+-CACHE_DIR = "/tmp/cache"
++CACHE_DIR = os.environ.get("FRIGATE_CACHE_DIR", "/tmp/cache")
++BIRDSEYE_PIPE = f"{CACHE_DIR}/birdseye"
+ FRIGATE_LOCALHOST = "http://127.0.0.1:5000"
+ PLUS_ENV_VAR = "PLUS_API_KEY"
+ PLUS_API_HOST = "https://api.frigate.video"

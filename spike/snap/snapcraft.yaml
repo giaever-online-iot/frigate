@@ -14,6 +14,8 @@ layout:
   # NOTE: /media/frigate ALSO REJECTED at pack time — same error: "defines a new top-level directory /media".
   # Implication for M3: recordings dir cannot use a /media/frigate layout; must configure Frigate's
   # BASE_DIR or recordings path directly to a $SNAP_COMMON path.
+  /opt/frigate:
+    bind: $SNAP/opt/frigate
   /etc/letsencrypt:
     bind: $SNAP_DATA/letsencrypt
   /etc/OpenCL:
@@ -185,3 +187,12 @@ parts:
     source: config
     organize:
       '*': config/
+  frigate-src:
+    plugin: nil
+    source: https://github.com/blakeblackshear/frigate.git
+    source-tag: v0.17.2
+    source-depth: 1
+    override-build: |
+      patch -p1 < "$CRAFT_PROJECT_DIR/patches/0001-env-driven-paths.patch"
+      mkdir -p "$CRAFT_PART_INSTALL/opt/frigate"
+      cp -r frigate migrations "$CRAFT_PART_INSTALL/opt/frigate/"

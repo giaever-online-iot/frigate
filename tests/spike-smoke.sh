@@ -124,6 +124,11 @@ for V in 5.0 7.0 8.0; do
   check "ffmpeg tree $V present+runs" sh -c "/snap/frigate/current/usr/lib/ffmpeg/$V/bin/ffprobe -version | head -1 | grep -q '^ffprobe version'"
 done
 
+# --- M2: frigate source + carried patch (Task 2) ---
+check "frigate source staged" test -f /snap/frigate/current/opt/frigate/frigate/const.py
+check "carried patch applied (env-driven paths)" grep -q 'FRIGATE_CONFIG_DIR' /snap/frigate/current/opt/frigate/frigate/const.py
+check "migrations staged" test -d /snap/frigate/current/opt/frigate/migrations
+
 # --- M1: go2rtc daemon (Task 2) ---
 check "go2rtc service active" sh -c "snap services frigate.go2rtc | grep -q ' active'"
 curl -sf --max-time 5 http://127.0.0.1:1984/api/streams > "$EVIDENCE/go2rtc-streams.json" 2>/dev/null || true
