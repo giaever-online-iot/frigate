@@ -68,6 +68,9 @@ apps:
   npu-probe:
     command: bin/npu-probe
     plugs: [npu]
+  mdns-probe:
+    command: bin/mdns-probe
+    plugs: [network, network-bind]
   ffprobe:
     command: usr/lib/ffmpeg/8.0/bin/ffprobe
     plugs: [network]

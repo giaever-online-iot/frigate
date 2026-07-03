@@ -156,6 +156,11 @@ else
   echo "  webrtc finding: WHEP status=$(cat "$EVIDENCE/whep-status.txt") - SDP answer not automated; manual browser check required (see docs/m1-findings.md)"
 fi
 
+# --- M1: mDNS multicast (Task 6) ---
+snap run frigate.mdns-probe || true
+check "mdns probe complete" test "$(jqr mdns '.status')" = "complete"
+echo "  mdns finding: join=$(jqr mdns '.multicast_join.ok') sent=$(jqr mdns '.query_sent.ok') responses=$(jqr mdns '.responses')"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
