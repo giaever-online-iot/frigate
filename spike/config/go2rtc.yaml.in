@@ -1,0 +1,14 @@
+# M1 static config — rendered by bin/go2rtc-run (__SNAP__ -> $SNAP).
+# Frigate's create_config.py replaces this in M3.
+log:
+  level: info
+api:
+  listen: ":1984"
+rtsp:
+  listen: ":8554"
+webrtc:
+  listen: ":8555"
+streams:
+  # Synthetic camera: staged ffmpeg pushes lavfi testsrc2 as H.264 RTSP.
+  # Also proves go2rtc can spawn ffmpeg subprocesses under strict confinement.
+  test: exec:__SNAP__/usr/lib/ffmpeg/8.0/bin/ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=15 -c:v libx264 -preset veryfast -tune zerolatency -g 30 -f rtsp {output}

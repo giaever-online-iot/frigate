@@ -1,0 +1,5 @@
+#!/bin/sh
+# Render the static M1 config and exec go2rtc (strict-confined daemon).
+set -e
+sed "s|__SNAP__|$SNAP|g" "$SNAP/config/go2rtc.yaml.in" > "$SNAP_DATA/go2rtc.yaml"
+exec "$SNAP/usr/local/go2rtc/bin/go2rtc" -config "$SNAP_DATA/go2rtc.yaml"

@@ -117,6 +117,11 @@ echo "  npu finding: open=$(jqr npu '.open_accel0.ok // "no-json"') connect-err=
 # --- M1: ffmpeg tree (Task 1) ---
 check "ffprobe (8.0 tree) runs" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n8'"
 
+# --- M1: go2rtc daemon (Task 2) ---
+check "go2rtc service active" sh -c "snap services frigate.go2rtc | grep -q ' active'"
+curl -sf --max-time 5 http://127.0.0.1:1984/api/streams > "$EVIDENCE/go2rtc-streams.json" 2>/dev/null || true
+check "go2rtc API lists test stream" sh -c "jq -e '.test' \"$EVIDENCE/go2rtc-streams.json\""
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true

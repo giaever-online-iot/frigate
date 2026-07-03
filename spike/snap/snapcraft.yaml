@@ -37,6 +37,11 @@ platforms:
   amd64:
 
 apps:
+  go2rtc:
+    command: bin/go2rtc-run
+    daemon: simple
+    restart-condition: on-failure
+    plugs: [network, network-bind]
   svc-a:
     command: bin/svc-a
     daemon: simple
@@ -150,3 +155,15 @@ parts:
       mkdir -p /tmp/ffmpeg-x && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-x --strip-components=1
       install -D -m 0755 /tmp/ffmpeg-x/bin/ffmpeg  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
       install -D -m 0755 /tmp/ffmpeg-x/bin/ffprobe "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
+  go2rtc:
+    plugin: nil
+    build-packages: [wget]
+    override-build: |
+      wget -O /tmp/go2rtc "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.13/go2rtc_linux_amd64"
+      echo "dce491325c28890ad0b85e83090753dc111b903ef83f43b834798f9114520dba  /tmp/go2rtc" | sha256sum -c -
+      install -D -m 0755 /tmp/go2rtc "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+  go2rtc-config:
+    plugin: dump
+    source: config
+    organize:
+      '*': config/
