@@ -173,6 +173,13 @@ snap run frigate.mdns-probe || true
 check "mdns probe complete" test "$(jqr mdns '.status')" = "complete"
 echo "  mdns finding: join=$(jqr mdns '.multicast_join.ok') sent=$(jqr mdns '.query_sent.ok') responses=$(jqr mdns '.responses')"
 
+# --- M2: VAAPI hardware decode (Task 4) ---
+# -hwaccel_output_format vaapi FORBIDS silent software fallback: rc=0 proves the hw path.
+check "vaapi: hw decode of synthetic stream (rc=0, no sw fallback)" snap run frigate.vaapi-probe
+cp /var/snap/frigate/common/spike-results/vaapi-decode.txt "$EVIDENCE/" 2>/dev/null || true
+check "vaapi: evidence captured" test -s "$EVIDENCE/vaapi-decode.txt"
+echo "  vaapi finding: $(grep -m1 -iE 'vaapi|hwaccel' "$EVIDENCE/vaapi-decode.txt" 2>/dev/null || echo 'see vaapi-decode.txt')"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
@@ -185,7 +192,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_name"|share/fonts' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_name"|share/fonts|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -212,6 +219,12 @@ echo "  coral-probe finding: CAP_NET_ADMIN denial during firmware upload (libedg
 #                 applies to Coral-PCIe /dev/apex_0 via custom-device slot.
 # NOTE: this denial fires once per NPU device init (observed 2026-07-02 06:41 run, journal-verified); it may be absent from later runs' capture windows.
 echo "  npu-probe finding: CAP_SYS_ADMIN denial at accel open (advisory, non-blocking) — branch (d) open OK, custom-device works on classic Ubuntu"
+# FINDING (Task 4): vaapi-probe additional expected denials:
+#   vaapi-probe.*capname="sys_admin" - ffmpeg VAAPI init queries DRM GPU capabilities (CAP_SYS_ADMIN);
+#                 denied but hw decode succeeds — rc=0 confirmed; same mechanism as vainfo in gpu-probe.
+#   vaapi-probe.*capname="perfmon"   - ffmpeg VAAPI queries performance counters (CAP_PERFMON);
+#                 denied but non-blocking. Production snap does NOT need these caps for VAAPI decode.
+echo "  vaapi-probe finding: CAP_SYS_ADMIN + CAP_PERFMON denials at VAAPI DRM init (advisory, non-blocking) — hw decode rc=0 confirmed"
 # FINDING (Task 3): matplotlib font-scan denials — matplotlib (transitive dep of norfair→filterpy)
 #   enumerates system font directories at import time. Denied paths: /usr/share/fonts/ and
 #   /usr/local/share/fonts/. Non-blocking: cv2 + matplotlib work correctly without font access.

@@ -1,0 +1,8 @@
+#!/bin/sh
+# M2: prove VAAPI hardware decode under strict confinement. -hwaccel_output_format vaapi
+# makes ffmpeg FAIL (non-zero) if the hw path is unavailable - no silent software fallback.
+mkdir -p "$SNAP_COMMON/spike-results"
+exec "$SNAP/usr/lib/ffmpeg/7.0/bin/ffmpeg" -hide_banner \
+  -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi \
+  -rtsp_transport tcp -i rtsp://127.0.0.1:8554/test \
+  -frames:v 30 -f null - 2> "$SNAP_COMMON/spike-results/vaapi-decode.txt"

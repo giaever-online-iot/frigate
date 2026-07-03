@@ -76,6 +76,10 @@ apps:
   ffprobe:
     command: usr/lib/ffmpeg/7.0/bin/ffprobe
     plugs: [network]
+  vaapi-probe:
+    command: bin/vaapi-probe
+    extensions: [gpu]
+    plugs: [opengl, network]
 
 parts:
   python311:
