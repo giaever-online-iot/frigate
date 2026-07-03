@@ -1,6 +1,7 @@
 """Runtime probes: interpreter identity, wheel imports, native-lib loading."""
 import ctypes
 import importlib
+import importlib.metadata
 import os
 import sys
 
@@ -24,8 +25,14 @@ def imports_probe() -> dict:
             # importlib.import_module handles dotted names correctly
             # (ruamel.yaml, paho.mqtt.client) returning the named submodule.
             m = importlib.import_module(mod)
-            out["imports"][mod] = {"ok": True,
-                                   "version": getattr(m, "__version__", "?")}
+            _ver = getattr(m, "__version__", "?")
+            if _ver == "?":
+                try:
+                    _ver = importlib.metadata.version(
+                        mod.split(".")[0].replace("_", "-"))
+                except Exception:
+                    pass
+            out["imports"][mod] = {"ok": True, "version": _ver}
         except Exception as e:
             out["imports"][mod] = {"ok": False,
                                    "error": f"{type(e).__name__}: {e}"}

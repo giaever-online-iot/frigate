@@ -192,7 +192,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_name"|share/fonts|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_name"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -226,8 +226,10 @@ echo "  npu-probe finding: CAP_SYS_ADMIN denial at accel open (advisory, non-blo
 #                 denied but non-blocking. Production snap does NOT need these caps for VAAPI decode.
 echo "  vaapi-probe finding: CAP_SYS_ADMIN + CAP_PERFMON denials at VAAPI DRM init (advisory, non-blocking) — hw decode rc=0 confirmed"
 # FINDING (Task 3): matplotlib font-scan denials — matplotlib (transitive dep of norfair→filterpy)
-#   enumerates system font directories at import time. Denied paths: /usr/share/fonts/ and
-#   /usr/local/share/fonts/. Non-blocking: cv2 + matplotlib work correctly without font access.
+#   enumerates system font directories at import time. Profile: snap.frigate.svc-c (imports probe).
+#   Denied paths: /usr/share/fonts/ and /usr/local/share/fonts/ (comm="python3.11", operation="open").
+#   Arm is profile+name-bound: svc-c.*name="/usr(/local)?/share/fonts/ — matches both observed paths.
+#   Non-blocking: norfair import succeeds; matplotlib works without font access.
 #   Production snap: add AppArmor font-dir read rules OR exclude matplotlib from site-packages.
 echo "  wheels finding: matplotlib font-dir scan denials (/usr/share/fonts/, /usr/local/share/fonts/) — benign, non-blocking (Task 3 finding)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi

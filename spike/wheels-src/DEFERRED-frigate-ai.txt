@@ -2,8 +2,8 @@
 # Optional AI/ALPR/transcription + dev/NVIDIA-only entries excluded from the core snap.
 # Lines below are VERBATIM from v0.17.2 docker/main/requirements-wheels.txt.
 mypy == 1.6.1
-git+https://github.com/fbcotter/py3nvml#egg=py3nvml
 pandas == 2.2.*
+git+https://github.com/fbcotter/py3nvml#egg=py3nvml
 transformers == 4.45.*
 google-genai == 1.58.*
 ollama == 0.6.*
