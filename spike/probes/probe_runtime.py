@@ -1,5 +1,6 @@
 """Runtime probes: interpreter identity, wheel imports, native-lib loading."""
 import ctypes
+import importlib
 import os
 import sys
 
@@ -15,10 +16,14 @@ def runtime_probe() -> dict:
 
 def imports_probe() -> dict:
     out: dict = {"status": "complete", "imports": {}}
-    for mod in ("numpy", "cv2", "onnxruntime", "tflite_runtime",
-                "tensorflow", "openvino"):
+    for mod in ("numpy", "cv2", "onnxruntime", "tflite_runtime", "tensorflow",
+                "openvino", "fastapi", "uvicorn", "starlette", "peewee",
+                "pydantic", "scipy", "norfair", "zmq", "cryptography",
+                "ruamel.yaml", "paho.mqtt.client"):
         try:
-            m = __import__(mod)
+            # importlib.import_module handles dotted names correctly
+            # (ruamel.yaml, paho.mqtt.client) returning the named submodule.
+            m = importlib.import_module(mod)
             out["imports"][mod] = {"ok": True,
                                    "version": getattr(m, "__version__", "?")}
         except Exception as e:

@@ -1,0 +1,16 @@
+# DEFERRED to the frigate-ai companion content-snap (plan-of-record: docs/m2-findings.md).
+# Optional AI/ALPR/transcription + dev/NVIDIA-only entries excluded from the core snap.
+# Lines below are VERBATIM from v0.17.2 docker/main/requirements-wheels.txt.
+mypy == 1.6.1
+git+https://github.com/fbcotter/py3nvml#egg=py3nvml
+pandas == 2.2.*
+transformers == 4.45.*
+google-genai == 1.58.*
+ollama == 0.6.*
+openai == 1.65.*
+sherpa-onnx==1.12.*
+faster-whisper==1.1.*
+librosa==0.11.*
+soundfile==0.13.*
+degirum == 0.16.*
+memray == 1.15.*

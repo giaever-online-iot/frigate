@@ -108,7 +108,7 @@ parts:
       export LD_LIBRARY_PATH="$CRAFT_STAGE/usr/lib:${LD_LIBRARY_PATH:-}"
       "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
         --root "$CRAFT_PART_INSTALL" --prefix /usr \
-        -r requirements-spike.txt
+        -r requirements-core.txt
       # Remove packages already staged by python311 (ensurepip) to avoid staging conflicts.
       # Guard: pip reports "already satisfied" on re-runs (packages found in stage); in that
       # case CRAFT_PART_INSTALL/site-packages is absent and the cleanup is a no-op.

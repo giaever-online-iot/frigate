@@ -1,9 +1,0 @@
-tensorflow == 2.19.* ; platform_machine == 'aarch64'
-tensorflow-cpu == 2.19.* ; platform_machine == 'x86_64'
-numpy == 1.26.*
-opencv-python-headless == 4.11.0.*
-opencv-contrib-python == 4.11.0.*
-openvino == 2025.3.*
-onnxruntime == 1.22.*
-tflite_runtime @ https://github.com/frigate-nvr/TFlite-builds/releases/download/v2.17.1/tflite_runtime-2.17.1-cp311-cp311-linux_x86_64.whl; platform_machine == 'x86_64'
-tflite_runtime @ https://github.com/feranick/TFlite-builds/releases/download/v2.17.1/tflite_runtime-2.17.1-cp311-cp311-linux_aarch64.whl; platform_machine == 'aarch64'
