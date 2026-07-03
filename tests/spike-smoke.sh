@@ -124,7 +124,7 @@ check "go2rtc API lists test stream" sh -c "jq -e '.test' \"$EVIDENCE/go2rtc-str
 
 # --- M1: readiness gate evidence (Task 3) ---
 # Note: jqr is a shell function not available in subshells; inline jq with the expanded $RESULTS path.
-check "readiness: svc-a waited_ms recorded (>=0)" sh -c "WMS=\$(jq -r '.waited_ms' \"$RESULTS/ordering-svc-a.json\" 2>/dev/null); [ -n \"\$WMS\" ] && [ \"\$WMS\" -ge 0 ]"
+check "readiness: svc-a waited_ms recorded (>=0)" sh -c "WMS=\$(jq -r '.waited_ms // -2' \"$RESULTS/ordering-svc-a.json\" 2>/dev/null); [ -n \"\$WMS\" ] && [ \"\$WMS\" -ge 0 ]"
 echo "  readiness finding: svc-a waited_ms=$(jqr ordering-svc-a '.waited_ms')"
 
 # --- M1: RTSP end-to-end (Task 4) ---
