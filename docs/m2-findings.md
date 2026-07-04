@@ -1,12 +1,12 @@
 # M2 Findings — Frigate source, core wheels, ffmpeg matrix, VAAPI
 
-**Date:** 2026-07-04  **Snap:** frigate 0.0.1-spike (core26, strict), 1.1 GB  **Frigate:** v0.17.2 (patched)
+**Date:** 2026-07-04  **Snap:** frigate 0.0.1-spike (core26, strict), 1.11 GB  **Frigate:** v0.17.2 (patched)
 
 | # | Question | Verdict | Evidence |
 |---|----------|---------|----------|
 | M2-1 | ffmpeg matrix tag-exact (n5.1 + n7.0.2, default 7.0) + kept n8.1.1? | YES — three trees present; tag-exact n5.1 + n7.0.2; default app retargeted to 7.0; n8.1.1 kept for VAAPI+go2rtc; bzip2-mislabeled-as-xz tarball on 7.0 resolved via `tar` auto-detect | m2-final-run.txt (`PASS: ffprobe app runs tag-default 7.0`, `PASS: ffmpeg tree 5.0/7.0/8.0 present+runs`); task-1-report.md (sha256 hashes, tarball-layout findings) |
 | M2-2 | Carried env-paths patch: upstream no-op + env override proven? | YES — 4 independent literals changed (`CONFIG_DIR`, `BASE_DIR`, `CACHE_DIR` env-driven, `BIRDSEYE_PIPE` reordered to derive from `CACHE_DIR`); no-op and override both verified | task-2-report.md (verbatim: no-op → `/config /media/frigate /tmp/cache /config/frigate.db /media/frigate/recordings`; override → `/X /Y /Z /X/frigate.db /Y/recordings`); m2-final-run.txt (`PASS: carried patch applied`) |
-| M2-3 | Core wheels (~58) import strict-confined? | YES — 58 core + 7 validate-deps additions import clean under confinement; 1 expected denial arm (matplotlib font-scan via norfair→filterpy, non-blocking) | m2-final-run.txt (all 17 module import PASS); spike/results/spike-results/imports.json (all ok=true); task-3-report.md |
+| M2-3 | Core wheels (~58) import strict-confined? | YES — 58 core + 7 validate-deps additions import clean under confinement; 1 expected denial arm (matplotlib font-scan via norfair→filterpy, non-blocking); arm narrowed to profile snap.frigate.svc-c + name-anchored to /usr(/local)?/share/fonts/ after review escalation | m2-final-run.txt (all 17 module import PASS); spike/results/spike-results/imports.json (all ok=true); task-3-report.md |
 | M2-4 | VAAPI hw decode (no sw fallback) of the synthetic stream? | YES ADJUDICATED — `vaapi(progressive)` pixel-format is dispositive (frames in VAAPI memory); no `-hwupload` in command; `h264 (native)` is a decoder-naming artifact, not a sw-decode indicator; `-hwaccel_output_format vaapi` hard-fails if hw surface is unavailable (rc≠0 path); rc=0 therefore constitutes hw-decode proof | spike/results/vaapi-decode.txt (`vaapi(progressive), 1280x720`, `frame= 30 fps= 27`, `rc=0`); task-4-report.md (adjudication chain, incl. cap denials non-blocking) |
 | M2-5 | `frigate.validate-config` exits 0 (real code, real config)? | YES — `__main__.py:39` registers `--validate-config`; line 110 gates the `"Your config file is valid."` print + `sys.exit(0)` path; config template required only `version: "0.17-0"` + `labelmap_path: /opt/frigate/labelmap.txt` (both confinement-driven, not schema-driven) | spike/results/validate-config.txt (tail: `"Your config file is valid."`, rc=0); m2-final-run.txt (`PASS: frigate validate-config exits 0`, `validate finding: rc=0`); task-5-report.md (step 1 code trace: `__main__.py:39,110`) |
 
@@ -29,7 +29,7 @@ six fire unconditionally at startup; `faster_whisper` is lazy (inside methods, s
 boundary holds for that one).
 
 Six entries were therefore re-added to the core snap via the `validate-deps` part with exact
-upstream-pin versions. The snap grew from 927 MB (58 wheels, Task 3) to 1.1 GB.
+upstream-pin versions. The snap grew from 927 MB (58 wheels, Task 3) to 1.11 GB.
 
 The DEFERRED-frigate-ai.txt file now lists 7 still-deferred entries (mypy, google-genai, ollama,
 openai, faster-whisper, degirum, memray).
@@ -37,16 +37,23 @@ openai, faster-whisper, degirum, memray).
 **Options for the companion-snap plan:**
 
 1. **Accept in core (current state):** Six AI wheels remain in the core snap. No upstream patch
-   needed. Snap stays at 1.1 GB. The remaining 7 are genuinely optional (NVIDIA-only, dev, or
+   needed. Snap stays at 1.11 GB. The remaining 7 are genuinely optional (NVIDIA-only, dev, or
    method-level imports only). Clean and shippable immediately.
 
-2. **Upstream lazy-import patches:** Wrap `frigate/embeddings/__init__.py`, `data_processing/
+2. **snap-local lazy-import patch (no upstream involvement):** carry a second downstream patch
+   (alongside 0001-env-driven-paths) that wraps the six module-level imports in lazy/deferred
+   guards inside the snap build only. Pros: restores the slim core snap + companion-snap
+   architecture immediately; no upstream coordination or review latency. Cons: grows the
+   carried-patch burden (rebase per release, and import-graph patches are more invasive than
+   the const.py env patch); risk of drift from upstream behavior if guards diverge.
+
+3. **Upstream lazy-import patches:** Wrap `frigate/embeddings/__init__.py`, `data_processing/
    types.py`, `data_processing/real_time/whisper_online.py`, and `api/review.py` so those six
    imports are inside guard blocks (`try/except ImportError` or `TYPE_CHECKING` gates). Then the
    six wheels can move back to the companion snap and the core returns to ~927 MB. Requires
    upstream PR and version-tracking discipline.
 
-3. **Hybrid:** Accept sherpa-onnx and librosa/soundfile in core (audio inference) but push pandas
+4. **Hybrid:** Accept sherpa-onnx and librosa/soundfile in core (audio inference) but push pandas
    and transformers back behind a lazy gate (they are the heaviest at ~100 MB combined).
 
 The user decision is required before the companion-snap prototype (planned post-M7).
@@ -253,7 +260,7 @@ If the user decision is "accept in core" (option 1 above), the companion-snap pl
   rebuild on every iteration while the validate-config import chain was being explored.
 
 - **Snap size exceeded initial 927 MB estimate:** Core-58 snap was 927 MB; adding the 7
-  validate-deps packages (dominated by transformers ~80 MB + pandas ~30 MB) brought it to 1.1 GB.
+  validate-deps packages (dominated by transformers ~80 MB + pandas ~30 MB) brought it to 1.11 GB.
   This is the M2-close size for the core snap.
 
 - **network-bind on validate-config:** counterintuitive for a "validation" app, but forced by
@@ -261,16 +268,18 @@ If the user decision is "accept in core" (option 1 above), the companion-snap pl
   `forkserver.py:141`). Production daemon needs it anyway; no new surface added.
 
 - **Task 5 process note:** The Task-5 implementer died once (API error, 66 min, zero durable
-  progress) and stalled once (~17 h on a monitor that never fired after rebuild completed at
-  01:47). Both recovered via transcript-resume with incremental wip-checkpoint commits. The
-  durability discipline (incremental report writes, wip commits) proved itself and is recommended
-  for all future long-running implementer dispatches.
+  progress) and stalled twice: stall #1: ~17 h (monitor never fired after the rebuild completed
+  at 01:47); stall #2: ~15 min (monitor missed again after the harness run completed at 18:54;
+  controller woke the agent with the on-disk evidence). Both recovered via transcript-resume
+  with incremental wip-checkpoint commits. The durability discipline (incremental report writes,
+  wip commits) proved itself and is recommended for all future long-running implementer
+  dispatches.
 
 ---
 
 ## Raw evidence
 
-- `spike/results/m2-final-run.txt` — Final M2 harness run (2026-07-04): SPIKE SMOKE: ALL PASS (61 checks, 36 denials, 0 unexpected; Coral present — delegate loaded, inference ran)
+- `spike/results/m2-final-run.txt` — Final M2 harness run (2026-07-04): SPIKE SMOKE: ALL PASS (61 checks, 36 denials, 0 unexpected; Coral present — delegate loaded, inference ran) (first attempt produced 2 coral FAILs — long-idle 18d1 USB session-state artifact, self-resolved on rerun without code change; M3 CI should include a warm-up probe)
 - `spike/results/validate-config.txt` — `frigate.validate-config` run: rc=0, "Your config file is valid."
 - `spike/results/vaapi-decode.txt` — VAAPI decode run: `vaapi(progressive)`, 1280x720, 30 frames, rc=0
 - `spike/results/vainfo.txt` — `vainfo` output: iHD 26.1.2 driver, MTL AV1/HEVC10/VP9 decode profiles
