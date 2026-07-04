@@ -223,11 +223,26 @@ If the user decision is "accept in core" (option 1 above), the companion-snap pl
   further import-chain surprises expected for the production `frigate.daemon` app — the full
   `frigate.app` import executes to completion under confinement with rc=0.
 
-- **Env contract proven:** `FRIGATE_CONFIG_DIR`/`FRIGATE_BASE_DIR`/`FRIGATE_CACHE_DIR` override
-  the three root paths. M3 daemon wrappers set these to `$SNAP_COMMON/config`,
-  `$SNAP_COMMON/media` (or operator-configured path), and `$SNAP_DATA/cache` (or
-  `$SNAP_COMMON/cache`) respectively. Default values remain upstream-identical (no-op when
+- **Env contract proven:** `FRIGATE_CONFIG_DIR`, `FRIGATE_BASE_DIR`, and `FRIGATE_CACHE_DIR`
+  are proven to override the three root paths at rc=0. The validate-config wrapper exercised
+  these values exactly:
+  - `FRIGATE_CONFIG_DIR=$SNAP_DATA/config`
+  - `FRIGATE_BASE_DIR=$SNAP_COMMON/media/frigate`
+  - `FRIGATE_CACHE_DIR=/tmp/cache` (snap-private tmpfs)
+
+  These are the values M3 inherits as fact; default values remain upstream-identical (no-op when
   unset), so the patch is rebasing-safe.
+
+- **Open considerations for M3 (design questions, NOT proven facts):**
+  - **CACHE:** `/tmp/cache` lives in the snap's private tmp; note the interaction with strategic
+    finding (b)'s private `/dev/shm` tmpfs RAM ceiling — M3 should benchmark whether
+    recording-segment cache belongs on RAM-backed tmp or on disk (`$SNAP_DATA/cache`) under
+    live streams.
+  - **CONFIG:** `$SNAP_DATA` is per-revision (duplicated on refresh, rollback-friendly) vs
+    `$SNAP_COMMON` (shared across revisions) — M3 must choose deliberately for config+DB
+    placement.
+  - **BASE:** the proven value keeps upstream's `/media/frigate` suffix shape under
+    `$SNAP_COMMON`; any change is an M3 design choice.
 
 - **M3 daemon plug requirements (from M2 evidence):**
   - `plugs: [network, network-bind]` — network for loopback/RTSP, network-bind for `mp.forkserver
