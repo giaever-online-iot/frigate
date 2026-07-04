@@ -37,6 +37,8 @@ plugs:
   # Task 5 finding: glibc sem_open(O_CREAT) mknods a RANDOM /dev/shm/sem.XXXXXX tempfile,
   # so the sem.snap.<name>.* AppArmor rule can never match (python multiprocessing SemLock
   # -> PermissionError). private:true gives the snap its own /dev/shm tmpfs — the canonical fix.
+  # SIZING NOTE: the private /dev/shm tmpfs uses the system default sizing (~50% RAM);
+  # flag for M3 frame-buffer capacity planning (see task-5-report.md Fix round 1).
   shm-private:
     interface: shared-memory
     private: true
@@ -218,6 +220,8 @@ parts:
       # Upstream Dockerfile COPYs labelmap.txt / audio-labelmap.txt to the image root; / is
       # not writable in a snap, so stage them with the source; the config template points
       # model.labelmap_path at /opt/frigate/labelmap.txt (reachable via the Task-2 layout).
+      # audio-labelmap.txt: runtime-only (events/audio.py:373); staged proactively mirroring
+      # upstream Dockerfile — not forced by a validation error.
       cp labelmap.txt audio-labelmap.txt "$CRAFT_PART_INSTALL/opt/frigate/"
   # Task 5 import-chain additions: modules hard-imported (module level) by the
   # `python3 -m frigate --validate-config` chain but absent from the core-58 wheel set.
@@ -228,6 +232,7 @@ parts:
   # directly imported by frigate.embeddings. NOTE: all of these are DEFERRED-frigate-ai.txt
   # entries — the deferred-AI companion-snap plan does not survive frigate's import graph
   # (module-level imports in embeddings/data_processing/api); recorded as an M2 finding.
+  # Pins below use RESOLVED exact versions from the installed snap (M2 fix round 1).
   validate-deps:
     plugin: nil
     after: [python311, spike-wheels]
@@ -235,9 +240,9 @@ parts:
       export LD_LIBRARY_PATH="$CRAFT_STAGE/usr/lib:${LD_LIBRARY_PATH:-}"
       "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
         --root "$CRAFT_PART_INSTALL" --prefix /usr \
-        "py3nvml==0.2.7" "regex==2024.11.6" "sherpa-onnx==1.12.*" \
-        "librosa==0.11.*" "soundfile==0.13.*" \
-        "transformers==4.45.*" "pandas==2.2.*"
+        "py3nvml==0.2.7" "regex==2024.11.6" "sherpa-onnx==1.12.40" \
+        "librosa==0.11.0" "soundfile==0.13.1" \
+        "transformers==4.45.2" "pandas==2.2.3"
       # Same dedupe guard as spike-wheels: drop packages already staged by python311.
       SP="$CRAFT_PART_INSTALL/usr/lib/python3.11/site-packages"
       if [ -d "$SP" ]; then
