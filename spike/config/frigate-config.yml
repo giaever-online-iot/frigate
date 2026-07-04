@@ -1,0 +1,21 @@
+# M2 Task 5: minimal real config for `python3 -m frigate --validate-config`.
+# version pinned to CURRENT_CONFIG_VERSION (0.17-0) so migrate_frigate_config()
+# does not rewrite the file mid-validation.
+version: "0.17-0"
+mqtt:
+  enabled: false
+model:
+  # /labelmap.txt (upstream Docker default) does not exist under strict confinement;
+  # the file is staged with the frigate source and reachable via the /opt/frigate layout.
+  labelmap_path: /opt/frigate/labelmap.txt
+cameras:
+  test:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/test
+          roles: [detect]
+    detect:
+      enabled: true
+      width: 1280
+      height: 720
+      fps: 5

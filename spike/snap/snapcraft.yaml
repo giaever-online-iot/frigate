@@ -34,6 +34,12 @@ plugs:
   npu:
     interface: custom-device
     custom-device: intel-npu
+  # Task 5 finding: glibc sem_open(O_CREAT) mknods a RANDOM /dev/shm/sem.XXXXXX tempfile,
+  # so the sem.snap.<name>.* AppArmor rule can never match (python multiprocessing SemLock
+  # -> PermissionError). private:true gives the snap its own /dev/shm tmpfs — the canonical fix.
+  shm-private:
+    interface: shared-memory
+    private: true
 
 platforms:
   amd64:
@@ -80,6 +86,12 @@ apps:
     command: bin/vaapi-probe
     extensions: [gpu]
     plugs: [opengl, network]
+  validate-config:
+    command: bin/validate-config
+    # network-bind: snapd seccomp gates listen(2) behind it (type=1326 syscall=50 evidence) —
+    # python mp.forkserver's AF_UNIX control socket needs listen even without inet sockets.
+    # shm-private: POSIX named semaphores (mp.Manager) need a writable private /dev/shm.
+    plugs: [network, network-bind, shm-private]
 
 parts:
   python311:
@@ -198,5 +210,40 @@ parts:
     source-depth: 1
     override-build: |
       patch -p1 < "$CRAFT_PROJECT_DIR/patches/0001-env-driven-paths.patch"
+      # frigate/version.py is generated at build time upstream (Makefile `version` target:
+      # echo 'VERSION = "$(VERSION)-$(COMMIT_HASH)"' > frigate/version.py) — not in the git tree.
+      echo "VERSION = \"0.17.2-$(git rev-parse --short HEAD)\"" > frigate/version.py
       mkdir -p "$CRAFT_PART_INSTALL/opt/frigate"
       cp -r frigate migrations "$CRAFT_PART_INSTALL/opt/frigate/"
+      # Upstream Dockerfile COPYs labelmap.txt / audio-labelmap.txt to the image root; / is
+      # not writable in a snap, so stage them with the source; the config template points
+      # model.labelmap_path at /opt/frigate/labelmap.txt (reachable via the Task-2 layout).
+      cp labelmap.txt audio-labelmap.txt "$CRAFT_PART_INSTALL/opt/frigate/"
+  # Task 5 import-chain additions: modules hard-imported (module level) by the
+  # `python3 -m frigate --validate-config` chain but absent from the core-58 wheel set.
+  # Separate part so the big spike-wheels part stays cached. Upstream pins from
+  # docker/main/requirements-wheels.txt: sherpa-onnx==1.12.*, librosa==0.11.*,
+  # soundfile==0.13.*, transformers==4.45.*, pandas==2.2.*; py3nvml is an unpinned git dep
+  # upstream -> nearest pinned release; regex is transitive upstream (via transformers) but
+  # directly imported by frigate.embeddings. NOTE: all of these are DEFERRED-frigate-ai.txt
+  # entries — the deferred-AI companion-snap plan does not survive frigate's import graph
+  # (module-level imports in embeddings/data_processing/api); recorded as an M2 finding.
+  validate-deps:
+    plugin: nil
+    after: [python311, spike-wheels]
+    override-build: |
+      export LD_LIBRARY_PATH="$CRAFT_STAGE/usr/lib:${LD_LIBRARY_PATH:-}"
+      "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
+        --root "$CRAFT_PART_INSTALL" --prefix /usr \
+        "py3nvml==0.2.7" "regex==2024.11.6" "sherpa-onnx==1.12.*" \
+        "librosa==0.11.*" "soundfile==0.13.*" \
+        "transformers==4.45.*" "pandas==2.2.*"
+      # Same dedupe guard as spike-wheels: drop packages already staged by python311.
+      SP="$CRAFT_PART_INSTALL/usr/lib/python3.11/site-packages"
+      if [ -d "$SP" ]; then
+        rm -rf "$SP/setuptools" "$SP/_distutils_hack" "$SP/pkg_resources"
+        find "$SP" -maxdepth 1 \( \
+          -name 'setuptools-*.dist-info' -o \
+          -name 'distutils-precedence.pth' \
+        \) -exec rm -rf {} +
+      fi

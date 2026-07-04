@@ -180,6 +180,16 @@ cp /var/snap/frigate/common/spike-results/vaapi-decode.txt "$EVIDENCE/" 2>/dev/n
 check "vaapi: evidence captured" test -s "$EVIDENCE/vaapi-decode.txt"
 echo "  vaapi finding: $(grep -m1 -iE 'vaapi|hwaccel' "$EVIDENCE/vaapi-decode.txt" 2>/dev/null || echo 'see vaapi-decode.txt')"
 
+# --- M2: frigate config validation (Task 5 - THE M2 EXIT CRITERION) ---
+# shm-private (shared-memory, private:true): python mp named semaphores need a writable
+# /dev/shm — glibc sem_open creates random sem.XXXXXX tempfiles no AppArmor rule can match.
+snap connect frigate:shm-private 2>/dev/null || true
+snap run frigate.validate-config > "$EVIDENCE/validate-config.txt" 2>&1
+VC_RC=$?
+check "frigate validate-config exits 0" test "$VC_RC" = "0"
+check "validate-config evidence captured" test -s "$EVIDENCE/validate-config.txt"
+echo "  validate finding: rc=$VC_RC $(tail -1 "$EVIDENCE/validate-config.txt" 2>/dev/null)"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
@@ -192,7 +202,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_name"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_(name|version)"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -232,6 +242,22 @@ echo "  vaapi-probe finding: CAP_SYS_ADMIN + CAP_PERFMON denials at VAAPI DRM in
 #   Non-blocking: norfair import succeeds; matplotlib works without font access.
 #   Production snap: add AppArmor font-dir read rules OR exclude matplotlib from site-packages.
 echo "  wheels finding: matplotlib font-dir scan denials (/usr/share/fonts/, /usr/local/share/fonts/) — benign, non-blocking (Task 3 finding)"
+# FINDING (Task 5): validate-config / Task-5 wheel additions — three new benign patterns:
+#   svc-c.*name="/dev/shm/sem\.  - joblib (new transitive dep: librosa->scikit-learn), imported
+#                 during the tensorflow/keras import in the imports probe, creates a TEST semaphore
+#                 at import (glibc sem_open mknods random /dev/shm/sem.XXXXXX). Denied -> joblib
+#                 warns "[Errno 13] ... joblib will operate in serial mode" and falls back; all
+#                 import checks PASS. (validate-config app is immune: shm-private private /dev/shm.)
+#   svc-c.*name="/usr/bin/lscpu" - joblib/loky physical-core detection execs lscpu in the same
+#                 import window; denied, graceful core-count fallback, non-blocking.
+#   validate-config.*cpu\.max    - the full frigate.app import chain reads its own cgroup
+#                 /sys/fs/cgroup/.../cpu.max + parent slice (cgroup v2 CPU quota probing; fires in
+#                 both the main and forkserver-preload interpreters). EACCES tolerated - validation
+#                 rc=0 in the same run. Not reproducible from any single library import in isolation
+#                 (numpy/cv2/ort/tf/openvino/sherpa/transformers/pandas/librosa each tested clean).
+#   product_(name|version)       - gpu-probe DMI arm widened: OpenVINO reads product_version next
+#                 to product_name (2026-07-04 run; same OpenVINO system-info probing, varies run-to-run).
+echo "  validate finding: joblib sem/lscpu import probes (svc-c, serial-mode fallback) + frigate chain cgroup cpu.max reads (validate-config) — benign, non-blocking (Task 5 finding)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true
