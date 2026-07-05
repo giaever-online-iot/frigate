@@ -1,0 +1,12 @@
+--- a/vod/avc_hevc_parser.c       2022-06-27 11:38:10.000000000 +0000
++++ b/vod/avc_hevc_parser.c       2023-01-16 11:25:10.900521298 +0000
+@@ -3,6 +3,9 @@
+ bool_t
+ avc_hevc_parser_rbsp_trailing_bits(bit_reader_state_t* reader)
+ {
++	// https://github.com/blakeblackshear/frigate/issues/4572
++	return TRUE;
++
+ 	uint32_t one_bit;
+
+ 	if (reader->stream.eof_reached)

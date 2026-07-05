@@ -1,0 +1,15 @@
+MAX_CLIPS 128 -> 1080: allow more clips per vod playlist than the default.
+Upstream frigate applies this via sed in docker/main/build_nginx.sh; expressed
+as a deterministic patch against nginx-vod-module 1.31 (M4 Task 1).
+
+--- a/vod/media_set.h	2022-12-15 10:42:47.000000000 +0100
++++ b/vod/media_set.h	2026-07-06 00:26:03.787509518 +0200
+@@ -16,7 +16,7 @@
+ #define MAX_LOOK_AHEAD_SEGMENTS (2)
+ #define MAX_NOTIFICATIONS (1024)
+ #define MAX_CLOSED_CAPTIONS (67)
+-#define MAX_CLIPS (128)
++#define MAX_CLIPS (1080)
+ #define MAX_CLIPS_PER_REQUEST (16)
+ #define MAX_SEQUENCES (32)
+ #define MAX_SEQUENCE_IDS (4)

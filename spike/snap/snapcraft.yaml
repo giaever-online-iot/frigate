@@ -218,6 +218,57 @@ parts:
     source: config
     organize:
       '*': config/
+  # M4 Task 1: upstream's exact nginx recipe (docker/main/build_nginx.sh @ v0.17.2) as a part.
+  # nginx 1.27.4 + kaltura vod 1.31 (2 upstream patches, committed under patches/nginx/) +
+  # secure-token 1.5 + set-misc v0.33 + ngx_devel_kit v0.3.3; upstream configure flags verbatim.
+  # THIRD-PARTY build patches (nginx-vod-module, not Frigate source) — outside the
+  # docs/patches.md Frigate register scope; provenance documented in the patch headers.
+  # No ccache (one-shot part build). html/ + conf/*.default removed per upstream.
+  nginx:
+    plugin: nil
+    build-packages:
+      - build-essential
+      - libpcre2-dev
+      - zlib1g-dev
+      - libssl-dev
+      - wget
+    override-build: |
+      cd "$CRAFT_PART_BUILD"
+      wget -nv -O nginx.tar.gz "https://nginx.org/download/nginx-1.27.4.tar.gz"
+      echo "294816f879b300e621fa4edd5353dd1ec00badb056399eceb30de7db64b753b2  nginx.tar.gz" | sha256sum -c -
+      mkdir -p nginx && tar -zxf nginx.tar.gz -C nginx --strip-components=1
+      wget -nv -O vod.tar.gz "https://github.com/kaltura/nginx-vod-module/archive/refs/tags/1.31.tar.gz"
+      echo "ace04201cf2d2b1a3e5e732a22b92225b8ce61a494df9cc7f79d97efface8952  vod.tar.gz" | sha256sum -c -
+      mkdir -p nginx-vod-module && tar -zxf vod.tar.gz -C nginx-vod-module --strip-components=1
+      wget -nv -O secure-token.tar.gz "https://github.com/kaltura/nginx-secure-token-module/archive/refs/tags/1.5.tar.gz"
+      echo "9809b7797e049429627a2c9e78c78e4b27bf4a2d0c7274a126cb6bb16ddd4215  secure-token.tar.gz" | sha256sum -c -
+      mkdir -p nginx-secure-token-module && tar -zxf secure-token.tar.gz -C nginx-secure-token-module --strip-components=1
+      wget -nv -O ngx-devel-kit.tar.gz "https://github.com/vision5/ngx_devel_kit/archive/refs/tags/v0.3.3.tar.gz"
+      echo "faa2fcd5168b10764d35081356511d5f84db5c526a1aa4b6add2db94b6853b2b  ngx-devel-kit.tar.gz" | sha256sum -c -
+      mkdir -p ngx_devel_kit && tar -zxf ngx-devel-kit.tar.gz -C ngx_devel_kit --strip-components=1
+      wget -nv -O set-misc.tar.gz "https://github.com/openresty/set-misc-nginx-module/archive/refs/tags/v0.33.tar.gz"
+      echo "cd5e2cc834bcfa30149e7511f2b5a2183baf0b70dc091af717a89a64e44a2985  set-misc.tar.gz" | sha256sum -c -
+      mkdir -p nginx-set-misc-module && tar -zxf set-misc.tar.gz -C nginx-set-misc-module --strip-components=1
+      # vod patches: MAX_CLIPS 128->1080; rbsp-trailing-bits tolerance (frigate#4572)
+      patch -d nginx-vod-module -p1 < "$CRAFT_PROJECT_DIR/patches/nginx/0001-vod-max-clips-1080.patch"
+      patch -d nginx-vod-module -p1 < "$CRAFT_PROJECT_DIR/patches/nginx/0002-vod-rbsp-trailing-bits.patch"
+      cd nginx
+      ./configure --prefix=/usr/local/nginx \
+        --with-file-aio \
+        --with-http_sub_module \
+        --with-http_ssl_module \
+        --with-http_v2_module \
+        --with-http_auth_request_module \
+        --with-http_realip_module \
+        --with-threads \
+        --add-module=../ngx_devel_kit \
+        --add-module=../nginx-set-misc-module \
+        --add-module=../nginx-vod-module \
+        --add-module=../nginx-secure-token-module \
+        --with-cc-opt="-O3 -Wno-error=implicit-fallthrough -Wno-incompatible-pointer-types"
+      make -j"$(nproc)"
+      make install DESTDIR="$CRAFT_PART_INSTALL"
+      rm -rf "$CRAFT_PART_INSTALL/usr/local/nginx/html" "$CRAFT_PART_INSTALL/usr/local/nginx/conf"/*.default
   frigate-src:
     plugin: nil
     source: https://github.com/blakeblackshear/frigate.git

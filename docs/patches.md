@@ -32,3 +32,18 @@ pedestrian test clip. Both routes are recorded here so they are not re-litigated
   detection_fps=43.4, recordings on disk, 0 unexpected denials — evidence preserved in
   `.superpowers/sdd/task-5-report.md` (Fix rounds 1–2). The detection pipeline itself is not
   in doubt; only the synthetic clip's inability to exit stock calibration is.
+
+## Upstream-recipe build patches (nginx/vod)
+
+These patches are applied to `nginx-vod-module 1.31` during the nginx snap part build (M4
+Task 1). They are NOT downstream divergences from Frigate — they are carried verbatim from
+Frigate's own Docker build recipe (`docker/main/build_nginx.sh` @ v0.17.2), expressed as
+committed patch files for determinism (upstream uses inline `sed` and a heredoc `patch`).
+
+| Patch file | Source in upstream recipe | Purpose |
+|---|---|---|
+| `spike/patches/nginx/0001-vod-max-clips-1080.patch` | `sed -i 's/MAX_CLIPS (128)/MAX_CLIPS (1080)/g' vod/media_set.h` in `build_nginx.sh` | Raise the per-playlist clip cap from 128 to 1080 to support longer HLS recordings. |
+| `spike/patches/nginx/0002-vod-rbsp-trailing-bits.patch` | heredoc `patch -p1` in `build_nginx.sh` (references kaltura/nginx-vod-module#4572) | Return `TRUE` early in `avc_hevc_parser_rbsp_trailing_bits` to tolerate non-conforming RBSP trailing bits in H.264/H.265 streams (Frigate issue #4572). |
+
+Rebase: re-apply against the nginx-vod-module version pinned in snapcraft.yaml; upstream
+Frigate's `build_nginx.sh` is the authority — check it on each Frigate tag bump.
