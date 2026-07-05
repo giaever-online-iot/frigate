@@ -1,21 +1,43 @@
-# M2 Task 5: minimal real config for `python3 -m frigate --validate-config`.
-# version pinned to CURRENT_CONFIG_VERSION (0.17-0) so migrate_frigate_config()
-# does not rewrite the file mid-validation.
-version: "0.17-0"
+# M3 Task 3: Frigate daemon real config. Rendered fresh EVERY start by frigate-run
+# (sed replaces __SNAP_COMMON__ and __SNAP__ tokens).
+# version pinned to CURRENT_CONFIG_VERSION (0.17-0) so migrate_frigate_config() does not rewrite.
 mqtt:
   enabled: false
+database:
+  path: __SNAP_COMMON__/db/frigate.db
+detectors:
+  ov:
+    type: openvino
+    device: GPU
 model:
-  # /labelmap.txt (upstream Docker default) does not exist under strict confinement;
-  # the file is staged with the frigate source and reachable via the /opt/frigate layout.
-  labelmap_path: /opt/frigate/labelmap.txt
+  # OV SSDLite MobileNet V2: converted via openvino-dev 2024.6 with reverse_input_channels=True
+  # (model accepts BGR; TF model originally RGB, MO adds channel-reversal preprocessing).
+  # Labelmap: 91-class COCO bkgr variant (coco_91cl_bkgr.txt) as upstream Dockerfile pairs
+  # with this model (90-class labelmap.txt would mismap outputs).
+  path: /opt/frigate/models/openvino/ssdlite_mobilenet_v2.xml
+  labelmap_path: /opt/frigate/models/openvino/coco_91cl_bkgr.txt
+  width: 300
+  height: 300
+  input_tensor: nhwc
+  input_pixel_format: bgr
+  model_type: ssd
 cameras:
-  test:
+  testclip:
     ffmpeg:
       inputs:
-        - path: rtsp://127.0.0.1:8554/test
-          roles: [detect]
+        - path: rtsp://127.0.0.1:8554/testclip
+          roles: [detect, record]
     detect:
       enabled: true
+      # Detect at 1280x720 (downscale from 1920x1080 source; Frigate resizes to model 300x300 anyway).
+      # Documented downscale: reduces frame-buffer memory and FFmpeg scaling load during spike.
       width: 1280
       height: 720
       fps: 5
+    objects:
+      track: [person, car]
+record:
+  enabled: true
+  continuous:
+    days: 1
+version: "0.17-0"

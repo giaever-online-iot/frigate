@@ -1,0 +1,32 @@
+#!/bin/sh
+# M3: the Frigate daemon under strict confinement.
+set -e
+. "$SNAP/bin/lib-wait.sh"
+
+export FRIGATE_CONFIG_DIR="$SNAP_DATA/config"
+export FRIGATE_BASE_DIR="$SNAP_COMMON/media/frigate"
+export FRIGATE_CACHE_DIR="/tmp/cache"
+export CONFIG_FILE="$SNAP_DATA/config/config.yml"
+export DEFAULT_FFMPEG_VERSION="7.0"
+export INCLUDED_FFMPEG_VERSIONS="8.0:7.0:5.0"
+
+mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" "$SNAP_COMMON/db" /tmp/cache
+
+# MESA content mount (gpu extension cleanup strips libGL from the snap)
+MESA_LIB="$SNAP/gpu-2604/usr/lib/x86_64-linux-gnu"
+if [ -d "$MESA_LIB" ]; then export LD_LIBRARY_PATH="$MESA_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
+
+# Render config fresh EVERY start (generated-config phase; snap-set configurability lands at M7)
+sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
+    "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
+
+# Readiness gate on go2rtc (provider-answered, not just unit-started)
+wait_for_url "http://127.0.0.1:1984/api/streams" 60 || true
+echo "frigate-run: go2rtc gate waited_ms=${WAITED_MS:--1}"
+
+# Downgrade-restore check happens BEFORE the sidecar write (Task 4 adds the restore block here)
+CUR_VERSION=$(sed -n 's/^VERSION *= *"\([^"+-]*\).*/\1/p' "$SNAP/opt/frigate/frigate/version.py" | head -1)
+printf '%s %s\n' "${CUR_VERSION:-0.17.2}" "$SNAP_REVISION" > "$SNAP_COMMON/db/.last-writer"
+
+cd /opt/frigate
+exec "$SNAP/usr/bin/python3.11" -u -m frigate

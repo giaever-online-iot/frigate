@@ -33,8 +33,11 @@ if [ "${1:-}" != "--skip-install" ]; then
   snap install mesa-2604 2>/dev/null || true
   snap install --dangerous "$SNAP_FILE" || { fail_ "snap install"; exit 1; }
   snap connect $SNAP_NAME:gpu-2604 mesa-2604:gpu-2604 2>/dev/null || true
+  # mount-observe: not auto-connected for --dangerous installs; required by frigate daemon so
+  # psutil.disk_partitions() can read /proc/<pid>/mounts for /dev/shm fs-type detection.
+  snap connect $SNAP_NAME:mount-observe 2>/dev/null || true
   pass_ "snap install --dangerous ($SNAP_FILE)"
-  sleep 20  # let daemons start and probes write (tensorflow import needs ~12s observed, up to 15s allowed)
+  sleep 30  # let daemons start and probes write; frigate needs extra time for Python imports (~12s) + startup
 fi
 
 check "svc-a active" sh -c "snap services $SNAP_NAME.svc-a | grep -q ' active'"
@@ -80,6 +83,8 @@ echo "  edgetpu finding: dlopen ok=$(jqr edgetpu-dlopen '.dlopen.ok') err=$(jqr 
 # Ensure mesa-2604 is installed and connected (idempotent; also handles --skip-install path)
 snap install mesa-2604 2>/dev/null || true
 snap connect $SNAP_NAME:gpu-2604 mesa-2604:gpu-2604 2>/dev/null || true
+# mount-observe: connect idempotently (not auto-connected for --dangerous installs)
+snap connect $SNAP_NAME:mount-observe 2>/dev/null || true
 snap connections $SNAP_NAME > "$EVIDENCE/connections.txt"
 snap run $SNAP_NAME.gpu-probe || true
 check "gpu probe complete" test "$(jqr gpu '.status')" = "complete"
@@ -199,6 +204,20 @@ check "coco labelmap staged" test -s /snap/frigate/current/opt/frigate/models/la
 check "test clip staged" test -s /snap/frigate/current/media-samples/testclip.mp4
 check "go2rtc has testclip stream" sh -c "jq -e '.testclip' \"$EVIDENCE/go2rtc-streams.json\""
 
+# --- M3: frigate daemon (Task 3 - THE MILESTONE) ---
+check "frigate service active" sh -c "snap services frigate.frigate | grep -q ' active'"
+# Wait up to 90s for API (OV model GPU compilation can take 30-60s at first inference;
+# boot failures land in journalctl; the service active check above confirms it started).
+# NOTE: v0.17.2 routes /version at the root (no /api/ prefix); upstream changed the API
+# structure vs older Frigate versions where /api/version was the path.
+for _i in $(seq 1 18); do
+  curl -sf --max-time 5 http://127.0.0.1:5001/version > "$EVIDENCE/frigate-version.txt" 2>/dev/null && break
+  sleep 5
+done
+check "frigate API answers" test -s "$EVIDENCE/frigate-version.txt"
+check "db at split path" test -f /var/snap/frigate/common/db/frigate.db
+check "sidecar written" sh -c "grep -qE '^0\.17\.2' /var/snap/frigate/common/db/.last-writer"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
@@ -211,7 +230,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_(name|version)"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_(name|version)"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate"|frigate\.frigate.*name="/proc/[^"]*/cmdline"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -267,6 +286,28 @@ echo "  wheels finding: matplotlib font-dir scan denials (/usr/share/fonts/, /us
 #   product_(name|version)       - gpu-probe DMI arm widened: OpenVINO reads product_version next
 #                 to product_name (2026-07-04 run; same OpenVINO system-info probing, varies run-to-run).
 echo "  validate finding: joblib sem/lscpu import probes (svc-c, serial-mode fallback) + frigate chain cgroup cpu.max reads (validate-config) — benign, non-blocking (Task 5 finding)"
+# FINDING (Task 3): frigate daemon cgroup reads — multiple cgroup v2 paths read by the daemon
+#   and its subprocesses (comm="python3.11" main process, comm="frigate.detecto" OpenVINO detector,
+#   etc.). Two patterns observed:
+#   (a) frigate.frigate.*name="/sys/fs/cgroup/.../cpu.max" — CPU quota check per-slice (same as
+#       validate-config Task 5 finding); main python3.11 and forkserver preload read their own slice.
+#   (b) frigate.frigate.*name="/sys/fs/cgroup/cgroup.controllers" — top-level cgroup v2 controller
+#       list read by the OpenVINO detector subprocess (comm="frigate.detecto") at inference init;
+#       checks which controllers (cpu, memory, io) are available. EACCES tolerated, inference succeeds.
+#   Both arms are profile+name-bound; benign; API and detector boot correctly despite denials.
+echo "  frigate finding: frigate.frigate cgroup reads (cpu.max per-slice + top-level cgroup.controllers) — benign, EACCES tolerated, API + detector up"
+# FINDING (Task 3): frigate.frigate ptrace + /proc/<pid>/cmdline denials — psutil.process_iter()
+#   in the recording subprocess (comm="frigate.recordi") scans ALL processes to find spawned ffmpeg
+#   instances. Ptrace denied against every process peer: unconfined system processes AND other snap
+#   profiles (snap.frigate.go2rtc, snap.frigate.svc-a/b/c, snap.frigate.coral-probe,
+#   snap.snapcraft.snapcraft etc. — whatever else runs on the host during the capture window).
+#   Same root cause as the unconfined case; psutil.process_iter() sends a ptrace read to every PID.
+#   Benign: recording degrades gracefully; ffmpeg is tracked via its own subprocess handle.
+#   mount-observe plug grants /proc/<pid>/mounts (disk_partitions()), but NOT ptrace for any peer.
+#   Arm: operation="ptrace".*profile="snap.frigate.frigate" — covers all ptrace from the daemon
+#   profile regardless of peer (tightest possible per-operation arm given process_iter() behaviour).
+#   Production snap: add process-control interface only if ffmpeg subprocess tracking is needed.
+echo "  frigate finding: recording process ptrace+cmdline denials (psutil.process_iter scans all PIDs — unconfined + any snap peer on host) — benign, non-blocking"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true

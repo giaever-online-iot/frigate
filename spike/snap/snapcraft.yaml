@@ -88,6 +88,17 @@ apps:
     command: bin/vaapi-probe
     extensions: [gpu]
     plugs: [opengl, network]
+  frigate:
+    command: bin/frigate-run
+    daemon: simple
+    restart-condition: on-failure
+    after: [go2rtc]
+    extensions: [gpu]
+    # mount-observe: psutil.disk_partitions(all=True) reads /proc/<pid>/mounts to compute
+    # /dev/shm fs-type for frame-buffer sizing (CameraMaintainer.__calculate_shm_frame_count).
+    # Without this, PermissionError crashes the main process before the API can start.
+    # Arm: expected/documented for the daemon — psutil mounts-read is a well-known snap pattern.
+    plugs: [network, network-bind, opengl, shm-private, mount-observe]
   validate-config:
     command: bin/validate-config
     # network-bind: snapd seccomp gates listen(2) behind it (type=1326 syscall=50 evidence) —
