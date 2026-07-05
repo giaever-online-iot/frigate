@@ -370,6 +370,8 @@ echo "  frigate finding: recording process ptrace+cmdline denials (psutil.proces
 #   (observed once, 2026-07-05 run, peer="unconfined"). Frigate's stats/util code runs psutil scans
 #   in the main process too. Arm pinned to operation+profile+comm: comm="python3\.11".
 #   Benign: read-only process introspection denied; daemon boots and API answers in the same run.
+# Evidence (journal 2026-07-05 16:47:51): apparmor="DENIED" operation="ptrace" class="ptrace" profile="snap.frigate.frigate" pid=1895566 comm="python3.11" requested_mask="read" denied_mask="read" peer="unconfined"
+# Mechanism: psutil /proc scan from the main process's stats path (read-mask on unconfined peers).
 echo "  frigate finding: main-process (python3.11) psutil ptrace denial at startup — same mechanism as recordi arm, benign, non-blocking (Task 4 fix round)"
 # NOTE (Task 4 fix round): the two DMI allowlist arms previously ended in product_\" (a literal
 #   trailing quote) which can NEVER match the audited paths (product_name\", product_version\", ...)

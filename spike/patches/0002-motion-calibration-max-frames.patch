@@ -1,0 +1,28 @@
+From: Spike patch
+Subject: [PATCH] motion: force calibration exit after 60 frames for constant-motion scenes
+
+Frigate's ImprovedMotionDetector requires pct_motion < 5% to exit
+calibration. With a looping pedestrian test clip this condition is never
+met (constant motion), so detection_fps stays 0 forever.
+
+Fix: also exit calibration when frame_counter reaches 60 (12 s at 5 fps).
+The background model has already converged via the alpha=0.2 fast-update
+path; forcing calibration exit lets the existing motion boxes reach the
+object detector. The lightning_threshold guard still protects against true
+scene-change storms.
+
+Spike-only patch -- production Frigate cameras are static with natural
+quiet intervals; this code path is only a problem for looping test clips.
+
+--- a/frigate/motion/improved_motion.py
++++ b/frigate/motion/improved_motion.py
+@@ -178,7 +178,10 @@ class ImprovedMotionDetector(MotionDetector):
+
+-        # once the motion is less than 5% and the number of contours is < 4, assume its calibrated
+-        if pct_motion < 0.05 and len(motion_boxes) <= 4:
++        # once the motion is less than 5% and the number of contours is < 4,
++        # assume its calibrated; also force exit after 60 frames so constant-
++        # motion scenes (looping test clips) can still reach the object detector.
++        if (pct_motion < 0.05 and len(motion_boxes) <= 4) or self.frame_counter >= 60:
+             self.calibrating = False
+

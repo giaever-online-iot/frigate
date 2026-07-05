@@ -22,6 +22,8 @@ layout:
     bind: $SNAP/etc/OpenCL
   /usr/lib/x86_64-linux-gnu/intel-opencl:
     bind: $SNAP/usr/lib/x86_64-linux-gnu/intel-opencl
+  /usr/lib/ffmpeg:
+    bind: $SNAP/usr/lib/ffmpeg
 
 slots:
   npu-dev:
@@ -223,6 +225,12 @@ parts:
     source-depth: 1
     override-build: |
       patch -p1 < "$CRAFT_PROJECT_DIR/patches/0001-env-driven-paths.patch"
+      # 0002: ImprovedMotionDetector calibration max-frame exit.
+      # Frigate's calibration requires pct_motion < 5% which never happens with a looping
+      # pedestrian test clip (constant motion). Force calibration exit after 60 frames (12s
+      # at 5fps) so the background model has time to converge and motion boxes reach the
+      # object detector. Production cameras have natural quiet intervals; spike-only concern.
+      /usr/bin/python3 "$CRAFT_PROJECT_DIR/patches/0002-motion-fix.py"
       # frigate/version.py is generated at build time upstream (Makefile `version` target:
       # echo 'VERSION = "$(VERSION)-$(COMMIT_HASH)"' > frigate/version.py) — not in the git tree.
       echo "VERSION = \"0.17.2-$(git rev-parse --short HEAD)\"" > frigate/version.py
