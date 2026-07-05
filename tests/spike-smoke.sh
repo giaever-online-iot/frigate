@@ -256,7 +256,7 @@ check "detection: corroborated in split db" test -s "$EVIDENCE/db-events.txt"
 # GPU evidence via frigate's own stats (route: /stats, not /api/stats)
 curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
   http://127.0.0.1:5001/stats > "$EVIDENCE/frigate-stats.json" 2>/dev/null || true
-check "gpu: openvino detector reporting in stats" sh -c "jq -e '.detectors.ov.inference_speed != null' \"$EVIDENCE/frigate-stats.json\""
+check "gpu: openvino detector reporting + camera pipeline alive" sh -c "jq -e '.detectors.ov.inference_speed != null and .cameras.testclip.ffmpeg_pid > 0' \"$EVIDENCE/frigate-stats.json\""
 echo "  gpu finding: ov inference_speed=$(jq -r '.detectors.ov.inference_speed' "$EVIDENCE/frigate-stats.json" 2>/dev/null)ms"
 # Recordings on disk
 check "recordings: files under SNAP_COMMON" sh -c "find /var/snap/frigate/common/media/frigate/recordings -name '*.mp4' 2>/dev/null | head -1 | grep -q mp4"
