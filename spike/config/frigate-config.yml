@@ -25,8 +25,9 @@ cameras:
   # LIVECAM-BEGIN
   # Live camera (M3 re-arm): rendered ONLY when the operator has provisioned
   # $SNAP_COMMON/livecam-url (single line: full stream URL incl. any credentials; root:root 0600).
-  # frigate-run/validate-config substitute __LIVECAM_URL__ at render time and chmod 600 the
-  # rendered config; when the file is absent this marker-delimited block is stripped.
+  # frigate-run/validate-config substitute the URL token below at render time (umask 077 render;
+  # M4 Task 0 NOTE: keep the literal token text OUT of comments — sed would inject the credential
+  # into the comment too); when the file is absent this marker-delimited block is stripped.
   # The URL must never appear in committed files, harness output, or evidence (harness scrubs).
   # The harness preserves the file across its remove --purge/reinstall cycle.
   # Caveat: render uses sed with '|' delimiter — a literal '|' in credentials is unsupported.

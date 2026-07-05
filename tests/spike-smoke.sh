@@ -42,7 +42,9 @@ if [ "${1:-}" != "--skip-install" ]; then
   [ -n "$SNAP_FILE" ] || { echo "ERROR: no spike/${SNAP_NAME}_*.snap file found - build first (cd spike && snapcraft pack)"; exit 1; }
   # Live camera secret ($SNAP_COMMON/livecam-url, provisioned once by the operator) must survive
   # the purge/reinstall cycle: stash before remove, restore after install. Never echo its content.
+  # M4 Task 0 hardening: EXIT trap — on mid-run abort the root-0600 copy must not persist in /tmp.
   LIVECAM_STASH=""
+  trap '[ -n "${LIVECAM_STASH:-}" ] && rm -f "$LIVECAM_STASH"' EXIT
   if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
     LIVECAM_STASH=$(mktemp)
     cp -p "/var/snap/$SNAP_NAME/common/livecam-url" "$LIVECAM_STASH"
@@ -278,11 +280,18 @@ LIVECAM_URL=""
 LIVECAM_SKIP_REASON="no livecam provisioned ($LIVECAM_FILE absent)"
 if [ -f "$LIVECAM_FILE" ]; then
   LIVECAM_URL=$(head -1 "$LIVECAM_FILE" | tr -d '[:space:]')
-  # Reachability probe via the snap's own ffprobe; ALL output discarded (URL must not leak).
-  if timeout 20 snap run $SNAP_NAME.ffprobe -v error -rtsp_transport tcp -show_streams "$LIVECAM_URL" >/dev/null 2>&1; then
+  # Reachability: bash /dev/tcp port probe. M4 Task 0 hardening: host/port parsed IN-shell and
+  # passed via ENV (root-only /proc/<pid>/environ), never argv — the previous ffprobe probe held
+  # the full URL (credentials included) in /proc/<pid>/cmdline for up to 20 s. Port-open is a
+  # weaker signal than an RTSP handshake but leak-free; a dead stream behind an open port then
+  # surfaces as a real MONEY TEST failure, the correct signal for that condition.
+  LC_HP="${LIVECAM_URL#*://}"; LC_HP="${LC_HP#*@}"; LC_HP="${LC_HP%%/*}"
+  LC_HOST="${LC_HP%%:*}"; LC_PORT="${LC_HP##*:}"
+  [ "$LC_PORT" = "$LC_HOST" ] && LC_PORT=554   # no explicit port -> rtsp default
+  if [ -n "$LC_HOST" ] && LC_H="$LC_HOST" LC_P="$LC_PORT" timeout 5 bash -c 'exec 3<>"/dev/tcp/$LC_H/$LC_P"' 2>/dev/null; then
     LIVECAM=yes
   else
-    LIVECAM_SKIP_REASON="livecam-url present but stream unreachable at harness start"
+    LIVECAM_SKIP_REASON="livecam-url present but camera port unreachable at harness start"
   fi
 fi
 CACHE_PEAK=0
