@@ -40,7 +40,7 @@ for r,d,fs in os.walk(base):
 ")
 
 # Convert
-/tmp/ov-conv-venv/bin/python3 - <<'EOF'
+/tmp/ov-conv-venv/bin/python3 - <<EOF
 import openvino as ov
 from openvino.tools import mo
 
@@ -62,10 +62,10 @@ EOF
 | `ssdlite_mobilenet_v2.xml` | `1de65ab321104005ae89713cd062432bb49663f84c69756a80e565acb0b8e4c4` |
 | `ssdlite_mobilenet_v2.bin` | `e9ae61499b401144f6fa3bc08785d55bdfbb8ab706b58c870755830cc04663d3` |
 | `coco_91cl_bkgr.txt`       | `710061971626db24bab3bae6ff4e9ce6e66650565990123f3f86f12d385b37d1` |
-| `labelmap.txt`              | `6884be1f4f35344c499f944a1c168a34d837f7f7578f203fba95b3ede42fac09` |
+| `labelmap.txt`              | `e23585f859d6a93827443fde9fe99ece7195dd856648af9ecb6bc6cf05f9b4d2` |
 
 Source TF model tarball sha256: `542445cce834dbfbb7df1991425d475e85a2d7ec68c60a4f262bb18aac10c8b2`
 
 CPU tflite (downloaded at build time):
 `90bb33a634e041914cc1819aa5df99818e6c396c4d2db952c0fd7a9cffc4724f`
-(url: https://github.com/google-coral/test_data/raw/release-frogfish/ssdlite_mobiledet_coco_qat_postprocess.tflite)
+(url: https://github.com/google-coral/test_data/raw/c21de4450f88a20ac5968628d375787745932a5a/ssdlite_mobiledet_coco_qat_postprocess.tflite)
