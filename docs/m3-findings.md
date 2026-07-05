@@ -8,8 +8,27 @@
 | M3-2 | Real object detection on iGPU (OpenVINO), inference speed? | YES — 5 person events detected on the `testclip` stream (top_scores **0.947–0.984**, final run, spike/results/frigate-events.json; earlier Task-5 fix-round run observed a wider 0.78–0.97 spread, prior-run observation, file since overwritten); `detectors.ov.inference_speed` = **5.86 ms** (final run — both spike/results/frigate-stats.json and m3-final-run.txt agree; 5.74 ms noted in an intermediate run, stats file since overwritten); `detection_fps` = **38.7** (final run, spike/results/frigate-stats.json 2026-07-05 19:11:28; earlier Task-5 fix-round run observed 43.4 — run-to-run variance on a looping clip); `ffmpeg_pid` nonzero (pipeline-alive assertion confirmed). | spike/results/frigate-events.json (5 events, all camera=testclip label=person; final-run top_scores 0.947–0.984); spike/results/frigate-stats.json (`inference_speed`:5.86 ms, `detection_fps`:38.7, `ffmpeg_pid` > 0 — all final run 2026-07-05 19:11:28); m3-final-run.txt (`PASS: MONEY TEST`, `gpu finding: ov inference_speed=5.86ms`) |
 | M3-3 | Detection events corroborated in split DB? | YES — 5 person events in the `event` table of `$SNAP_COMMON/db/frigate.db`, IDs matching the API response. | spike/results/db-events.txt (5 rows: id timestamp label camera); m3-final-run.txt (`PASS: detection: corroborated in split db`) |
 | M3-4 | Recordings written to disk under SNAP_COMMON? | YES — `.mp4` segments present under `$SNAP_COMMON/media/frigate/recordings/` during live run; harness asserts file presence. | m3-final-run.txt (`PASS: recordings: files under SNAP_COMMON`) |
-| M3-5 | Rollback machinery — both proofs green? | YES — Proof 1: pre-refresh hook fires, backup written to `$SNAP_COMMON/db/backups/frigate-pre-x1.db`, `hook.log` line appended (`pre-refresh: backed up …`). Proof 2: forged-sidecar downgrade detected, incompatible DB preserved as `frigate.db.incompatible-<ts>`, backup restored, frigate healthy on next start. `sort -V` logic verified for all 4 version scenarios; `hook.log` bounded at 100 lines (rotation capped). Note: hook stdout only reaches journald within the hook's execution scope — `hook.log` exists precisely because journald retention for hook scopes is not a durable audit trail; the file is the durable record, journald is transient. | m3-final-run.txt (`PASS: rollback: pre-refresh backup created`, `PASS: rollback: hook logged`, `PASS: rollback: downgrade detected + restored`, `PASS: rollback: incompatible db preserved`, `PASS: rollback: frigate healthy after restore`); task-4-report.md (verbatim journal lines) |
-| M3-6 | Cache peak and multi-camera headroom? | Two measurements at `/tmp/snap-private-tmp/snap.frigate/tmp/cache` (OpenVINO compiled kernel cache, first-load cost, single camera): **8596 KiB** (final run, spike/results/cache-peak.txt 2026-07-05 19:11:28) and **10576 KiB** (Task-5 fix-round run, task-5-report.md §Cache). Run-to-run variance is expected: OpenVINO GPU kernel-cache compile state and warm-vs-cold cache differences produce different peak readings across runs. This is a model-level amortized cost shared across all cameras on the same detector instance; per-camera frame memory sits in `/dev/shm` (private tmpfs, sized to 50% of physical RAM by kernel default). | spike/results/cache-peak.txt (`8596 KiB peak`, final run); task-5-report.md §Cache (`10576 KiB`, Task-5 fix-round run); m2-findings.md §(b) (shared-memory private: true; /dev/shm sizing) |
+| M3-5 | Rollback machinery — both proofs green? | YES — same-version proofs; cross-version compat not exercised, see §Rollback scope below. Note: hook stdout only reaches journald within the hook's execution scope — `hook.log` exists precisely because journald retention for hook scopes is not a durable audit trail; the file is the durable record, journald is transient. | m3-final-run.txt (`PASS: rollback: pre-refresh backup created`, `PASS: rollback: hook logged`, `PASS: rollback: downgrade detected + restored`, `PASS: rollback: incompatible db preserved`, `PASS: rollback: frigate healthy after restore`); task-4-report.md (verbatim journal lines) |
+| M3-6 | Cache peak and multi-camera headroom? | Two measurements of Frigate cache-dir usage (FRIGATE_CACHE_DIR — frame/segment staging cache; recording segments staged here before move to disk) at `/tmp/snap-private-tmp/snap.frigate/tmp/cache`, single camera: **8596 KiB** (final run, spike/results/cache-peak.txt 2026-07-05 19:11:28) and **10576 KiB** (Task-5 fix-round run, task-5-report.md §Cache). Run-to-run variance is expected: segment-staging timing varies with when the sampler catches the cache between segment moves. The spec's multi-camera headroom math applies to this staging cache; per-camera frame memory sits in `/dev/shm` (private tmpfs, sized to 50% of physical RAM by kernel default). Note: OpenVINO's model/kernel cache lives under the config dir (`model_cache`), which was NOT what was measured here. | spike/results/cache-peak.txt (`8596 KiB peak`, final run); task-5-report.md §Cache (`10576 KiB`, Task-5 fix-round run); m2-findings.md §(b) (shared-memory private: true; /dev/shm sizing) |
+
+---
+
+## Rollback scope (M3-5)
+
+**Proven**
+- Pre-refresh hook fires on `snap refresh` and writes a consistent sqlite backup to `$SNAP_COMMON/db/backups/frigate-pre-x1.db`; `hook.log` line appended.
+- Downgrade detection via forged sidecar: `sort -V` comparison verified across 4 version-pair scenarios.
+- Restore path executes with its guards and frigate boots healthy after a same-version restore (Proof 2 restored a backup created by the same 0.17.2 code).
+
+**Not exercised**
+- Restoring an older-schema DB into newer code (cross-version schema compatibility). The backup restored in Proof 2 was created by the same 0.17.2 code, so schema compatibility was never at stake.
+
+**Known limitations (schema-blind, revision-keyed selection/retention)**
+- `snap install --dangerous <older>.snap` fires pre-refresh on the NEWER revision first, so the newest backup may carry a newer schema — restoring it into the older code would reinstate an incompatible DB.
+- Keep-newest-2 retention can prune the only older-schema backup after two schema-advancing refreshes.
+- A failed restore under `restart: on-failure` means crash-loop (availability loss; no data loss — the DB is preserved as `.incompatible-<ts>`).
+
+The PRIMARY documented scenario (`snap revert`) is unaffected: revert does not fire pre-refresh on the reverted-to revision.
 
 ---
 
@@ -125,6 +144,16 @@ Content: daytime pedestrian scene, multiple persons in frame throughout, well-su
 
 - **No additional confinement plugs required by the daemon** beyond what is already declared. The denial arms added in M3 are all labeled non-blocking (mount-observe class, cgroup reads, ptrace read from psutil). M4 nginx fronting adds only `network-bind` for port 80/443 and `network` for upstream proxying; the iGPU and Coral paths are already proven.
 
+### M7 hardening items (from final review)
+
+- Version-stamp DB backups (`frigate-pre-<version>-<rev>.db`) and restore newest-COMPATIBLE (version <= current code), replacing schema-blind revision selection; extend harness with a true cross-version restore proof.
+- `pre-refresh` runs under `set -e`: a locked/failed/slow backup fails the hook and blocks the refresh (fail-closed). Decide intent + bound for large DBs (spec Risk 6).
+- Model IR provenance: committed OpenVINO blobs rest on documented-procedure trust (openvino-dev 2024.6.0 conversion); revisit reproducible conversion.
+- Build hygiene: go2rtc/libedgetpu parts use `/tmp` temp paths (→ `$CRAFT_PART_BUILD`); coral test model fetched from mutable master URL (sha256-pinned).
+- `frigate-run`'s MESA_LIB block is a dead no-op (wrong path, superseded by the gpu extension command-chain) — delete or fix.
+- Reconcile detect width/height (1280x720) with the actual 1920x1080 testclip stream, or add an explicit go2rtc scale; fix the misleading downscale comment.
+- Document the CPU tflite fallback as a commented detector block in the config template (spec §3.2 "documented config fallback").
+
 ---
 
 ## Deviations
@@ -143,12 +172,12 @@ Content: daytime pedestrian scene, multiple persons in frame throughout, well-su
 
 | File | Content |
 |---|---|
-| `spike/results/m3-final-run.txt` | Final M3 harness run (2026-07-05): ALL PASS, 272 denials, 0 unexpected (local-only; never committed — untracked per m1/m2 convention) |
+| `spike/results/m3-final-run.txt` | Final M3 harness run (2026-07-05): ALL PASS, 272 denials, 0 unexpected (not tracked (local-only per m1/m2 convention; briefly committed in dd1da7c, untracked in 53ee754)) |
 | `spike/results/frigate-events.json` | 5 person events from `/events` API: camera=testclip, top_scores 0.947–0.984 (final run; earlier fix-round run observed 0.78–0.97, file since overwritten) |
 | `spike/results/frigate-stats.json` | Stats from `/stats` API: inference_speed, detection_fps, ffmpeg_pid (nonzero = pipeline alive) |
 | `spike/results/frigate-version.txt` | `/version` response: `0.17.2-3d4dd3a` |
 | `spike/results/db-events.txt` | 5 rows from `event` table of split SQLite DB (id, timestamp, label, camera) |
-| `spike/results/cache-peak.txt` | OpenVINO model cache peak: `8596 KiB` at `/tmp/snap-private-tmp/snap.frigate/tmp/cache` |
+| `spike/results/cache-peak.txt` | Frigate cache-dir peak (FRIGATE_CACHE_DIR): `8596 KiB` at `/tmp/snap-private-tmp/snap.frigate/tmp/cache` |
 | `spike/results/denials.txt` | Full AppArmor denial log from final run (272 entries, all allowlisted) |
 | `spike/results/m2-final-run.txt` | M2 final run (reference: all 61 checks, Coral present) |
 | `spike/results/m1-final-run.txt` | M1 final run (reference: all M1 checks, Coral absent) |
