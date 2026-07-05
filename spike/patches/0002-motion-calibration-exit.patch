@@ -1,0 +1,31 @@
+From: M3 spike <spike@local>
+Date: 2026-07-05
+Subject: [PATCH 0002] ImprovedMotionDetector calibration max-frame exit
+
+Frigate's calibration requires pct_motion < 5%, which never happens with a
+looping pedestrian test clip (constant motion keeps the background model from
+converging). Force calibration exit after 60 frames (12 s at 5 fps) so motion
+boxes reach the object detector.
+
+Production cameras have natural quiet intervals; this is a spike-only concern.
+See docs/patches.md for rebase and upstreaming notes.
+---
+ frigate/motion/improved_motion.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/frigate/motion/improved_motion.py b/frigate/motion/improved_motion.py
+--- a/frigate/motion/improved_motion.py
++++ b/frigate/motion/improved_motion.py
+@@ -176,8 +176,10 @@
+             motion_boxes = []
+             pct_motion = 0
+
+-        # once the motion is less than 5% and the number of contours is < 4, assume its calibrated
+-        if pct_motion < 0.05 and len(motion_boxes) <= 4:
++        # once the motion is less than 5% and the number of contours is < 4,
++        # assume its calibrated; also force exit after 60 frames for constant-motion
++        # scenes (looping test clips) so the object detector receives frames.
++        if (pct_motion < 0.05 and len(motion_boxes) <= 4) or self.frame_counter >= 60:
+             self.calibrating = False
+
+         # if calibrating or the motion contours are > 80% of the image area (lightning, ir, ptz) recalibrate

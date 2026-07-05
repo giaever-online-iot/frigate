@@ -230,7 +230,10 @@ parts:
       # pedestrian test clip (constant motion). Force calibration exit after 60 frames (12s
       # at 5fps) so the background model has time to converge and motion boxes reach the
       # object detector. Production cameras have natural quiet intervals; spike-only concern.
-      /usr/bin/python3 "$CRAFT_PROJECT_DIR/patches/0002-motion-fix.py"
+      # Note: motion.enabled=false was ruled out — Frigate v0.17.2 hard-rejects that config
+      # when detect.enabled=true (ValidationError: "motion detection disabled and object
+      # detection enabled but object detection requires motion detection").
+      patch -p1 < "$CRAFT_PROJECT_DIR/patches/0002-motion-calibration-exit.patch"
       # frigate/version.py is generated at build time upstream (Makefile `version` target:
       # echo 'VERSION = "$(VERSION)-$(COMMIT_HASH)"' > frigate/version.py) — not in the git tree.
       echo "VERSION = \"0.17.2-$(git rev-parse --short HEAD)\"" > frigate/version.py
