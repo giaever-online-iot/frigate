@@ -16,5 +16,10 @@ EOF
 MSG="pre-refresh: backed up $DB -> $DEST"
 echo "$MSG"
 echo "$MSG" >> "$SNAP_COMMON/db/backups/hook.log"
-# retention: keep newest 2
-ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | tail -n +3 | xargs -r rm -f
+# retention: keep newest 2 (version-sort for determinism when mtimes tie)
+ls -1 "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | sort -V | head -n -2 | xargs -r rm -f
+# retention: keep hook.log bounded (one line per refresh would otherwise grow forever)
+if [ -f "$SNAP_COMMON/db/backups/hook.log" ]; then
+    tail -n 100 "$SNAP_COMMON/db/backups/hook.log" > "$SNAP_COMMON/db/backups/hook.log.tmp" \
+      && mv "$SNAP_COMMON/db/backups/hook.log.tmp" "$SNAP_COMMON/db/backups/hook.log"
+fi

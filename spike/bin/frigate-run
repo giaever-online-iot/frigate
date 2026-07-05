@@ -35,12 +35,17 @@ if [ -f "$SIDECAR" ]; then
     NEWEST=$(printf '%s\n%s\n' "$LAST_VERSION" "$CUR_VERSION" | sort -V | tail -1)
     if [ "$NEWEST" = "$LAST_VERSION" ] && [ "$LAST_VERSION" != "$CUR_VERSION" ]; then
         echo "frigate-run: DOWNGRADE detected (db last written by $LAST_VERSION, code is $CUR_VERSION)"
-        BACKUP=$(ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | head -1)
+        BACKUP=$(ls -1 "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | sort -V | tail -1)
         if [ -n "$BACKUP" ]; then
             TS=$(date +%s)
             mv "$SNAP_COMMON/db/frigate.db" "$SNAP_COMMON/db/frigate.db.incompatible-$TS" 2>/dev/null || true
-            cp "$BACKUP" "$SNAP_COMMON/db/frigate.db"
-            echo "frigate-run: restored $BACKUP (incompatible db preserved as frigate.db.incompatible-$TS)"
+            if cp "$BACKUP" "$SNAP_COMMON/db/frigate.db"; then
+                echo "frigate-run: restored $BACKUP (incompatible db preserved as frigate.db.incompatible-$TS)"
+            else
+                echo "frigate-run: ERROR restore cp failed - attempting to move the incompatible db back"
+                mv "$SNAP_COMMON/db/frigate.db.incompatible-$TS" "$SNAP_COMMON/db/frigate.db" 2>/dev/null || \
+                  echo "frigate-run: WARNING no database present - frigate will create a fresh one"
+            fi
         else
             echo "frigate-run: WARNING no backup available - proceeding with the newer-schema db"
         fi
