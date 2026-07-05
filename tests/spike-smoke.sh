@@ -199,6 +199,7 @@ echo "  validate finding: rc=$VC_RC $(tail -1 "$EVIDENCE/validate-config.txt" 2>
 check "openvino model staged" sh -c "ls /snap/frigate/current/opt/frigate/models/openvino/*.xml"
 check "cpu tflite fallback staged" sh -c "ls /snap/frigate/current/opt/frigate/models/cpu/*.tflite"
 check "coco labelmap staged" test -s /snap/frigate/current/opt/frigate/models/labelmap.txt
+check "openvino 91-class labelmap staged" test -s /snap/frigate/current/opt/frigate/models/openvino/coco_91cl_bkgr.txt
 
 # --- M3: real-object test clip + stream (Task 2) ---
 check "test clip staged" test -s /snap/frigate/current/media-samples/testclip.mp4
@@ -246,7 +247,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -320,9 +321,9 @@ echo "  frigate finding: frigate.frigate cgroup reads (cpu.max per-slice + top-l
 #   Same root cause as the unconfined case; psutil.process_iter() sends a ptrace read to every PID.
 #   Benign: recording degrades gracefully; ffmpeg is tracked via its own subprocess handle.
 #   mount-observe plug grants /proc/<pid>/mounts (disk_partitions()), but NOT ptrace for any peer.
-#   Arm: operation="ptrace".*profile="snap.frigate.frigate" — covers all ptrace from the daemon
-#   profile regardless of peer (tightest possible per-operation arm given process_iter() behaviour).
-#   Production snap: add process-control interface only if ffmpeg subprocess tracking is needed.
+#   Arm (PINNED to recording subprocess only): operation="ptrace".*profile="snap.frigate.frigate".*comm="frigate.recordi"
+#   — ptrace denials from other frigate subprocesses now fail the scan (expected: unconfined process enumeration is
+#   specific to recording subprocess). Production snap: add process-control interface only if ffmpeg subprocess tracking is needed.
 echo "  frigate finding: recording process ptrace+cmdline denials (psutil.process_iter scans all PIDs — unconfined + any snap peer on host) — benign, non-blocking"
 # FINDING (Task 4): frigate.frigate OpenVINO detector (comm="frigate.detecto") GPU cap + DMI probes —
 #   same mechanism as gpu-probe and vaapi-probe, emitted by the OpenVINO GPU plugin initialised inside
