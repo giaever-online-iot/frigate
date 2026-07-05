@@ -260,6 +260,21 @@ check "frigate API answers" test -s "$EVIDENCE/frigate-version.txt"
 check "db at split path" test -f /var/snap/frigate/common/db/frigate.db
 check "sidecar written" sh -c "grep -qE '^0\.17\.2' /var/snap/frigate/common/db/.last-writer"
 
+# --- M4: nginx reverse-proxy (Task 2) ---
+check "nginx service active" sh -c "snap services frigate.nginx | grep -q ' active'"
+# Verify: /api/version via nginx (:5000) returns same body as direct :5001/version.
+# Route: nginx strips /api prefix, proxies to frigate_api (:5001) via rewrite ^/api(/.*)$ $1.
+# No auth headers sent — auth.enabled=false in config makes /auth return 202 Accepted for any request.
+NGINX_VER=$(curl -sf --max-time 5 http://127.0.0.1:5000/api/version 2>/dev/null)
+FRIGATE_VER=$(curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" http://127.0.0.1:5001/version 2>/dev/null)
+check "nginx proxies /api/version == :5001/version (no auth headers)" test "$NGINX_VER" = "$FRIGATE_VER"
+echo "  nginx finding: /api/version=$NGINX_VER (== :5001/version; no auth headers required)"
+# /auth endpoint: 202 Accepted confirms auth.enabled=false anonymous-accept path
+AUTH_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5001/auth 2>/dev/null)
+check "nginx: /auth returns 202 (anonymous accept with auth.enabled=false)" test "$AUTH_STATUS" = "202"
+echo "  nginx finding: /auth status=$AUTH_STATUS (202 Accepted = anonymous auth path confirmed)"
+echo "  nginx finding: error_log/access_log → files in \$SNAP_DATA/nginx/logs/ (deviation: /dev/stderr not openable in systemd snap unit — journal socket, not pipe; ENXIO on open)"
+
 # --- M3: money test (Task 5) ---
 # Routes verified against live daemon (v0.17.2): /events and /stats (NO /api/ prefix).
 # Auth: allow_any_authenticated() checks Remote-User header; global admin_checker checks
@@ -364,7 +379,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -472,6 +487,15 @@ echo "  frigate finding: recordi CAP_SYS_PTRACE capability denial — capability
 #   frigate.frigate.*name=".../dmi/id/product_*"  - OpenVINO reads system model (name/version/serial/uuid) for GPU selection
 #   All EACCES-tolerant; detector boots and inference runs correctly despite denials.
 echo "  frigate finding: frigate.detecto OpenVINO GPU cap (sys_admin, perfmon) + DMI id probes — same mechanism as gpu-probe, benign, non-blocking (Task 4 finding)"
+# FINDING (M4 Task 2): nginx worker processes CAP_SETGID denial — nginx calls setgid() as part
+#   of its worker process privilege setup, even when `user root;` is set in nginx.conf. With
+#   `user root;`, the setgid call is to gid 0 (a no-op), but AppArmor denies CAP_SETGID before
+#   the call completes. Non-blocking: nginx worker processes start and serve requests correctly.
+#   One denial fires per worker process at startup (worker_processes auto; => one per CPU core).
+#   Arm (profile+capname): nginx.*capname="setgid" — matches snap.frigate.nginx comm=nginx.
+#   Production snap: add `setgid` to the nginx app's capability grants if worker user!=root.
+# Evidence (journal 2026-07-06 01:47:46): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.nginx" pid=2810997 comm="nginx" capability=6  capname="setgid"
+echo "  nginx finding: nginx worker CAP_SETGID denial at startup (worker privilege setup; benign, non-blocking, one per CPU core) — nginx active and serving (M4 Task 2)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true

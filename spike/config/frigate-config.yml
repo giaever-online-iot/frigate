@@ -3,6 +3,11 @@
 # version pinned to CURRENT_CONFIG_VERSION (0.17-0) so migrate_frigate_config() does not rewrite.
 mqtt:
   enabled: false
+# M4 Task 2: anonymous auth so nginx's auth_request /auth subrequest always succeeds.
+# Placed OUTSIDE the LIVECAM-BEGIN/END cameras block so both render branches keep it.
+# With auth.enabled=false the /auth endpoint returns anonymous-user headers (no login required).
+auth:
+  enabled: false
 database:
   path: __SNAP_COMMON__/db/frigate.db
 detectors:

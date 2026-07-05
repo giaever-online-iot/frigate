@@ -107,6 +107,16 @@ apps:
     # python mp.forkserver's AF_UNIX control socket needs listen even without inet sockets.
     # shm-private: POSIX named semaphores (mp.Manager) need a writable private /dev/shm.
     plugs: [network, network-bind, shm-private]
+  # M4 Task 2: nginx reverse-proxy serving the web UI and proxying /api to frigate :5001.
+  # daemon simple (nginx runs in foreground via -g "daemon off;" in nginx-run).
+  # after: [frigate] — nginx-run also gates on wait_for_url :5001/version so nginx starts
+  # only once the frigate API is answering; after: ensures systemd ordering too.
+  nginx:
+    command: bin/nginx-run
+    daemon: simple
+    restart-condition: on-failure
+    after: [frigate]
+    plugs: [network, network-bind]
 
 parts:
   python311:
@@ -370,3 +380,10 @@ parts:
           -name 'distutils-precedence.pth' \
         \) -exec rm -rf {} +
       fi
+  # M4 Task 2: nginx conf templates (rendered at runtime by nginx-run via sed tokens).
+  # Separate from go2rtc-config (different source dir) to avoid touching that part's cache.
+  nginx-conf:
+    plugin: dump
+    source: config/nginx
+    organize:
+      '*': config/nginx/

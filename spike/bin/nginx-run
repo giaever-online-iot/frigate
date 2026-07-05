@@ -1,0 +1,35 @@
+#!/bin/sh
+# M4 Task 2: Render nginx conf templates and exec nginx (strict-confined daemon).
+# Rendering: umask 077; all conf files from $SNAP/config/nginx/ are sed-rendered
+# (tokens __SNAP__, __SNAP_COMMON__, __SNAP_DATA__) into $SNAP_DATA/nginx/conf/.
+# Readiness gate: waits up to 60s for frigate API on :5001/version before exec.
+set -e
+. "$SNAP/bin/lib-wait.sh"
+
+# Create required directories before rendering (umask 077 for conf files)
+umask 077
+mkdir -p "$SNAP_DATA/nginx/conf" "$SNAP_DATA/nginx/logs" /tmp/nginx-tmp /tmp/nginx-cache
+
+# Render all conf templates into $SNAP_DATA/nginx/conf/
+# .in suffix marks the main template (nginx.conf.in -> nginx.conf); plain .conf files
+# are passed through sed unchanged (no tokens) for token-bearing includes (auth_location.conf
+# has __SNAP_DATA__ token for proxy_trusted_headers include path).
+for _src in "$SNAP/config/nginx/"*; do
+    _base="${_src##*/}"
+    # strip .in suffix so nginx.conf.in -> nginx.conf
+    _dst="${_base%.in}"
+    sed -e "s|__SNAP__|$SNAP|g" \
+        -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" \
+        -e "s|__SNAP_DATA__|$SNAP_DATA|g" \
+        "$_src" > "$SNAP_DATA/nginx/conf/$_dst"
+done
+umask 022
+
+# Readiness gate: wait for frigate API before starting nginx
+wait_for_url "http://127.0.0.1:5001/version" 60 || true
+echo "nginx-run: frigate gate waited_ms=${WAITED_MS:--1}"
+
+exec "$SNAP/usr/local/nginx/sbin/nginx" \
+    -p "$SNAP_DATA/nginx" \
+    -c "$SNAP_DATA/nginx/conf/nginx.conf" \
+    -g "daemon off;"

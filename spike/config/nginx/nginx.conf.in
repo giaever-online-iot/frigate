@@ -1,0 +1,351 @@
+# M4 Task 2: nginx conf template. Rendered fresh EVERY start by nginx-run.
+# Tokens: __SNAP__ (snap mount), __SNAP_COMMON__ (var/snap/.../common),
+#         __SNAP_DATA__ (var/snap/.../current, writable at runtime).
+# Dropped from upstream: tempio/base_path, TLS/listen.conf, BASE_PATH sub_filters,
+#   user root (snap runs as root), /dev/shm cache (no shm-private plug for nginx),
+#   http2 on (no TLS), listen.conf include, daemon off (passed via -g in nginx-run exec).
+# Kept: full proxy chain (auth_request), vod module settings, gzip, caching.
+# /dev/shm/nginx_cache -> /tmp/nginx-cache (private tmp; no shm-private plug needed).
+# /media/frigate roots -> __SNAP_COMMON__/media/frigate.
+# pid + logs dir -> __SNAP_DATA__/nginx/.
+# error_log -> /dev/stderr, access_log -> /dev/stdout (journald capture).
+# NOTE: daemon off; is NOT in this file — it is passed to nginx via -g "daemon off;" in
+# nginx-run. Setting it here too would trigger "daemon directive is duplicate" fatal error.
+# user root: snap daemons run as root; without this nginx defaults workers to "nobody" (uid
+# 65534) and tries to chown cache/tmp dirs to that user — chown fails in strict confinement.
+user root;
+worker_processes auto;
+
+error_log __SNAP_DATA__/nginx/logs/error.log warn;
+pid __SNAP_DATA__/nginx/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    map_hash_bucket_size 256;
+
+    include __SNAP__/usr/local/nginx/conf/mime.types;
+    default_type application/octet-stream;
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for" '
+                    'request_time="$request_time" upstream_response_time="$upstream_response_time"';
+
+    # NOTE: /dev/stdout and /dev/stderr are journal sockets (not pipes) in snap systemd
+    # units — nginx open() on them gives ENXIO. Write to files in $SNAP_DATA/nginx/logs/
+    # instead (created by nginx-run before exec). Deviation from brief's /dev/stdout goal;
+    # logs are inspectable via `sudo ls /var/snap/frigate/current/nginx/logs/`.
+    access_log __SNAP_DATA__/nginx/logs/access.log main;
+
+    # send headers in one piece, it is better than sending them one by one
+    tcp_nopush on;
+
+    sendfile on;
+
+    keepalive_timeout 65;
+
+    gzip on;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css application/json application/x-javascript application/javascript text/javascript image/svg+xml image/x-icon image/bmp;
+    gzip_proxied no-cache no-store private expired auth;
+    gzip_vary on;
+
+    # proxy_cache: /tmp/nginx-cache (private tmp) instead of upstream's /dev/shm/nginx_cache
+    # (nginx app has no shm-private plug; private tmp is per-app and always writable)
+    proxy_cache_path /tmp/nginx-cache levels=1:2 keys_zone=api_cache:10m max_size=10m inactive=1m use_temp_path=off;
+
+    # Temp dirs under private /tmp (created by nginx-run before exec)
+    client_body_temp_path /tmp/nginx-tmp/client_body;
+    proxy_temp_path /tmp/nginx-tmp/proxy;
+
+    map $sent_http_content_type $should_not_cache {
+        'application/json' 0;
+        default 1;
+    }
+
+    upstream frigate_api {
+        server 127.0.0.1:5001;
+        keepalive 1024;
+    }
+
+    upstream mqtt_ws {
+        server 127.0.0.1:5002;
+        keepalive 1024;
+    }
+
+    upstream jsmpeg {
+        server 127.0.0.1:8082;
+        keepalive 1024;
+    }
+
+    include __SNAP_DATA__/nginx/conf/go2rtc_upstream.conf;
+
+    server {
+        listen 5000;
+
+        # vod settings
+        vod_base_url '';
+        vod_segments_base_url '';
+        vod_mode mapped;
+        vod_max_mapping_response_size 1m;
+        vod_upstream_location /api;
+        vod_align_segments_to_key_frames on;
+        vod_manifest_segment_durations_mode accurate;
+        vod_ignore_edit_list on;
+        vod_segment_duration 10000;
+
+        # MPEG-TS settings (not used when fMP4 is enabled, kept for reference)
+        vod_hls_mpegts_align_frames off;
+        vod_hls_mpegts_interleave_frames on;
+
+        # file handle caching / aio
+        open_file_cache max=1000 inactive=5m;
+        open_file_cache_valid 2m;
+        open_file_cache_min_uses 1;
+        open_file_cache_errors on;
+        aio on;
+
+        # file upload size
+        client_max_body_size 20M;
+
+        # https://github.com/kaltura/nginx-vod-module#vod_open_file_thread_pool
+        vod_open_file_thread_pool default;
+
+        # vod caches
+        vod_metadata_cache metadata_cache 512m;
+        vod_mapping_cache mapping_cache 5m 10m;
+
+        # gzip manifests
+        gzip on;
+        gzip_types application/vnd.apple.mpegurl;
+
+        include __SNAP_DATA__/nginx/conf/auth_location.conf;
+
+        location /vod/ {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            aio threads;
+            vod hls;
+
+            # Use fMP4 (fragmented MP4) instead of MPEG-TS for better performance
+            vod_hls_container_format fmp4;
+
+            secure_token $args;
+            secure_token_types application/vnd.apple.mpegurl;
+
+            add_header Cache-Control "no-store";
+            expires off;
+
+            keepalive_disable safari;
+
+            # vod module returns 502 for non-existent media
+            error_page 502 =404 /vod-not-found;
+        }
+
+        location = /vod-not-found {
+            return 404;
+        }
+
+        location /stream/ {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            add_header Cache-Control "no-store";
+            expires off;
+
+            types {
+                application/dash+xml mpd;
+                application/vnd.apple.mpegurl m3u8;
+                video/mp2t ts;
+                image/jpeg jpg;
+            }
+
+            root /tmp;
+        }
+
+        location /clips/ {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            types {
+                video/mp4 mp4;
+                image/jpeg jpg;
+            }
+
+            expires 7d;
+            add_header Cache-Control "public";
+            autoindex on;
+            root __SNAP_COMMON__/media/frigate;
+        }
+
+        location /cache/ {
+            internal; # This tells nginx it's not accessible from the outside
+            alias /tmp/cache/;
+        }
+
+        location /recordings/ {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            types {
+                video/mp4 mp4;
+            }
+
+            autoindex on;
+            autoindex_format json;
+            root __SNAP_COMMON__/media/frigate;
+        }
+
+        location /exports/ {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            types {
+                video/mp4 mp4;
+            }
+
+            autoindex on;
+            autoindex_format json;
+            root __SNAP_COMMON__/media/frigate;
+        }
+
+        location /ws {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            proxy_pass http://mqtt_ws/;
+            include __SNAP_DATA__/nginx/conf/proxy.conf;
+        }
+
+        location /live/jsmpeg/ {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            proxy_pass http://jsmpeg/;
+            include __SNAP_DATA__/nginx/conf/proxy.conf;
+        }
+
+        # frigate lovelace card uses this path
+        location /live/mse/api/ws {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            limit_except GET {
+                deny  all;
+            }
+            proxy_pass http://go2rtc/api/ws;
+            include __SNAP_DATA__/nginx/conf/proxy.conf;
+        }
+
+        location /live/webrtc/api/ws {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            limit_except GET {
+                deny  all;
+            }
+            proxy_pass http://go2rtc/api/ws;
+            include __SNAP_DATA__/nginx/conf/proxy.conf;
+        }
+
+        # pass through go2rtc player
+        location /live/webrtc/webrtc.html {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            limit_except GET {
+                deny  all;
+            }
+            proxy_pass http://go2rtc/webrtc.html;
+            include __SNAP_DATA__/nginx/conf/proxy.conf;
+        }
+
+        # integration uses this to add webrtc candidate
+        location /api/go2rtc/webrtc {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            limit_except POST {
+                deny  all;
+            }
+            proxy_pass http://go2rtc/api/webrtc;
+            include __SNAP_DATA__/nginx/conf/proxy.conf;
+        }
+
+        location ~* /api/.*\.(jpg|jpeg|png|webp|gif)$ {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            rewrite ^/api/(.*)$ /$1 break;
+            proxy_pass http://frigate_api;
+            include __SNAP_DATA__/nginx/conf/proxy.conf;
+        }
+
+        location /api/ {
+            include __SNAP_DATA__/nginx/conf/auth_request.conf;
+            add_header Cache-Control "no-store";
+            expires off;
+            proxy_pass http://frigate_api/;
+            include __SNAP_DATA__/nginx/conf/proxy.conf;
+
+            proxy_cache api_cache;
+            proxy_cache_key "$scheme$proxy_host$request_uri|$role|$groups|$user";
+            proxy_cache_lock on;
+            proxy_cache_use_stale updating;
+            proxy_cache_valid 200 5s;
+            proxy_cache_bypass $http_x_cache_bypass;
+            proxy_no_cache $should_not_cache;
+            add_header X-Cache-Status $upstream_cache_status;
+
+            location /api/vod/ {
+                include __SNAP_DATA__/nginx/conf/auth_request.conf;
+                proxy_pass http://frigate_api/vod/;
+                include __SNAP_DATA__/nginx/conf/proxy.conf;
+                proxy_cache off;
+            }
+
+            location /api/login {
+                auth_request off;
+                rewrite ^/api(/.*)$ $1 break;
+                proxy_pass http://frigate_api;
+                include __SNAP_DATA__/nginx/conf/proxy.conf;
+            }
+
+            # Allow unauthenticated access to the first_time_login endpoint
+            location /api/auth/first_time_login {
+                auth_request off;
+                limit_except GET {
+                    deny all;
+                }
+                rewrite ^/api(/.*)$ $1 break;
+                proxy_pass http://frigate_api;
+                include __SNAP_DATA__/nginx/conf/proxy.conf;
+            }
+
+            location /api/stats {
+                include __SNAP_DATA__/nginx/conf/auth_request.conf;
+                access_log off;
+                rewrite ^/api(/.*)$ $1 break;
+                proxy_pass http://frigate_api;
+                include __SNAP_DATA__/nginx/conf/proxy.conf;
+            }
+
+            location /api/version {
+                include __SNAP_DATA__/nginx/conf/auth_request.conf;
+                access_log off;
+                rewrite ^/api(/.*)$ $1 break;
+                proxy_pass http://frigate_api;
+                include __SNAP_DATA__/nginx/conf/proxy.conf;
+            }
+        }
+
+        location / {
+            # do not require auth for static assets
+            add_header Cache-Control "no-store";
+            expires off;
+
+            location /assets/ {
+                access_log off;
+                expires 1y;
+                add_header Cache-Control "public";
+            }
+
+            location /fonts/ {
+                access_log off;
+                expires 1y;
+                add_header Cache-Control "public";
+            }
+
+            location /locales/ {
+                access_log off;
+                add_header Cache-Control "public";
+            }
+
+            # Web root: /opt/frigate is a snap layout bind ($SNAP/opt/frigate -> /opt/frigate).
+            # Task 3 stages the built UI into $SNAP/opt/frigate/web; missing web root does NOT
+            # stop nginx from proxying /api (separate location block takes priority).
+            root /opt/frigate/web;
+            try_files $uri $uri.html $uri/ /index.html;
+        }
+    }
+}
