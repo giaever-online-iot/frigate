@@ -247,7 +247,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -325,6 +325,17 @@ echo "  frigate finding: frigate.frigate cgroup reads (cpu.max per-slice + top-l
 #   — ptrace denials from other frigate subprocesses now fail the scan (expected: unconfined process enumeration is
 #   specific to recording subprocess). Production snap: add process-control interface only if ffmpeg subprocess tracking is needed.
 echo "  frigate finding: recording process ptrace+cmdline denials (psutil.process_iter scans all PIDs — unconfined + any snap peer on host) — benign, non-blocking"
+# FINDING (Task 4 fix round): frigate.frigate main-process ptrace — same psutil mechanism as the
+#   recording subprocess, but emitted by the MAIN daemon process (comm="python3.11") during startup
+#   (observed once, 2026-07-05 run, peer="unconfined"). Frigate's stats/util code runs psutil scans
+#   in the main process too. Arm pinned to operation+profile+comm: comm="python3\.11".
+#   Benign: read-only process introspection denied; daemon boots and API answers in the same run.
+echo "  frigate finding: main-process (python3.11) psutil ptrace denial at startup — same mechanism as recordi arm, benign, non-blocking (Task 4 fix round)"
+# NOTE (Task 4 fix round): the two DMI allowlist arms previously ended in product_\" (a literal
+#   trailing quote) which can NEVER match the audited paths (product_name\", product_version\", ...)
+#   — the arms were dead regexes and earlier runs passed only when the DMI probes didn't fire in the
+#   capture window (probing varies run-to-run, as documented above). Trailing quote removed so the
+#   arms match product_name/version/serial/uuid as the findings always intended.
 # FINDING (Task 4): frigate.frigate OpenVINO detector (comm="frigate.detecto") GPU cap + DMI probes —
 #   same mechanism as gpu-probe and vaapi-probe, emitted by the OpenVINO GPU plugin initialised inside
 #   the detector forkserver. Three patterns:
