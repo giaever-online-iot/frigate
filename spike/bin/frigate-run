@@ -27,6 +27,9 @@ LIVECAM_URL=""
 [ -f "$SNAP_COMMON/livecam-url" ] && LIVECAM_URL=$(head -1 "$SNAP_COMMON/livecam-url" | tr -d '[:space:]')
 if [ -n "$LIVECAM_URL" ]; then
     SEDF=$(mktemp)
+    # set -e would skip the rm below if sed/redirect fails - the trap guarantees the
+    # credential-bearing script file never outlives this process (rm -f is idempotent)
+    trap 'rm -f "${SEDF:-}"' EXIT
     # printf is a shell builtin: the URL reaches the script file without any process argv
     printf 's|__LIVECAM_URL__|%s|g\n' "$LIVECAM_URL" > "$SEDF"
     sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -f "$SEDF" \
