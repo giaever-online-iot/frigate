@@ -258,6 +258,19 @@ parts:
         "$CRAFT_PART_INSTALL/opt/frigate/models/labelmap.txt"
       echo "6884be1f4f35344c499f944a1c168a34d837f7f7578f203fba95b3ede42fac09  $CRAFT_PART_INSTALL/opt/frigate/models/labelmap.txt" | sha256sum -c -
 
+  # M3 Task 2: CC0 pedestrian clip for real-object detection testing.
+  # Source: Wikimedia Commons CC0 1.0 (see spike/LICENSE-testclip).
+  # The file is a pre-converted h264/mp4 (converted from the CC0 WebM source)
+  # committed to the spike source tree alongside the prebuilt model binaries.
+  # Conversion avoids Wikimedia rate-limiting during snap builds; provenance
+  # and sha256 of both source WebM and converted MP4 are in LICENSE-testclip.
+  test-clip:
+    plugin: nil
+    source: media-samples
+    override-build: |
+      echo "38df1538cd58333a55111579367b6150df62c2ae521969dd1c1bb5631a45c887  $CRAFT_PART_SRC/testclip.mp4" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_SRC/testclip.mp4" "$CRAFT_PART_INSTALL/media-samples/testclip.mp4"
+
   # Task 5 import-chain additions: modules hard-imported (module level) by the
   # `python3 -m frigate --validate-config` chain but absent from the core-58 wheel set.
   # Separate part so the big spike-wheels part stays cached. Upstream pins from

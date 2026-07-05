@@ -195,6 +195,10 @@ check "openvino model staged" sh -c "ls /snap/frigate/current/opt/frigate/models
 check "cpu tflite fallback staged" sh -c "ls /snap/frigate/current/opt/frigate/models/cpu/*.tflite"
 check "coco labelmap staged" test -s /snap/frigate/current/opt/frigate/models/labelmap.txt
 
+# --- M3: real-object test clip + stream (Task 2) ---
+check "test clip staged" test -s /snap/frigate/current/media-samples/testclip.mp4
+check "go2rtc has testclip stream" sh -c "jq -e '.testclip' \"$EVIDENCE/go2rtc-streams.json\""
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true

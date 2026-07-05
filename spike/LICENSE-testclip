@@ -1,0 +1,62 @@
+Test clip provenance for media-samples/testclip.mp4
+=====================================================
+
+Source URL:
+  https://upload.wikimedia.org/wikipedia/commons/a/ae/Video_Codec_Test_pedestrian_area_1080p25.y4m.webm
+
+Source page (Wikimedia Commons):
+  https://commons.wikimedia.org/wiki/File:Video_Codec_Test_pedestrian_area_1080p25.y4m.webm
+
+License: Creative Commons CC0 1.0 Universal Public Domain Dedication
+License URL: https://creativecommons.org/publicdomain/zero/1.0/deed.en
+
+License wording (from the source page):
+  "The person who associated a work with this deed has dedicated the work to
+   the public domain by waiving all of their rights to the work worldwide
+   under copyright law, including all related and neighboring rights, to the
+   extent allowed by law. You can copy, modify, distribute and perform the
+   work, even for commercial purposes, all without asking permission."
+
+Redistribution: Permitted without restriction. Suitable for shipping inside a snap.
+
+Technical details (source WebM from Wikimedia Commons):
+  Container:   WebM (Matroska)
+  Video codec: VP8
+  Audio codec: Vorbis (stereo 44100 Hz)
+  Resolution:  1920 × 1080 (Full HD)
+  Duration:    15.125 seconds
+  File size:   10.7 MB (11,215,394 bytes)
+  SHA-256:     bfadaa62cccb42db875d50bb842aa0964fbf72040432e4097c1df59e043e0c26
+
+Technical details (committed file: spike/media-samples/testclip.mp4):
+  Converted from the above WebM using:
+    ffmpeg -c:v libx264 -preset veryfast -crf 23 -an -movflags +faststart
+  Container:   MP4 (ISO Base Media File Format)
+  Video codec: H.264 (libx264)
+  Audio:       stripped (-an)
+  Resolution:  1920 × 1080
+  Duration:    15.000 seconds
+  File size:   7.0 MB
+  SHA-256:     38df1538cd58333a55111579367b6150df62c2ae521969dd1c1bb5631a45c887
+
+Build note: The pre-converted MP4 is committed to the spike source tree alongside
+  the prebuilt model binaries (models-prebuilt/). This avoids Wikimedia
+  rate-limiting during snap builds while maintaining full license traceability.
+  The go2rtc stream re-encodes the clip to h264 RTSP for consumer uniformity.
+
+Content description:
+  Munich pedestrian zone (Neuhauser Strasse), February 19, 2013. Low static
+  camera position in a busy shopping street. Multiple pedestrians walk through
+  the frame, some passing very close to the camera (filling ~50-70% of frame
+  height). People are clearly visible and large — suitable for SSDLite/MobileNet
+  person detection.  No vehicles in frame.
+
+Frame-extraction evidence:
+  Frames extracted with ffmpeg -vf fps=1 to scratchpad; frames 3 and 4 verified
+  visually — multiple pedestrians occupy significant portion of the 1920×1080
+  frame, upper bodies clearly visible, well-lit daytime scene.
+
+Author/Uploader: Taurus Media Technik (via Xiph.org Video Codec Test Suite)
+Original recorded: 2013-02-19
+Uploaded to Wikimedia: 2013-10-06
+SHA-1 (Wikimedia): 51e89a672896e45cca17aa46cd223630a6266e26
