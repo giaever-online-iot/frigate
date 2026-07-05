@@ -218,6 +218,22 @@ check "frigate API answers" test -s "$EVIDENCE/frigate-version.txt"
 check "db at split path" test -f /var/snap/frigate/common/db/frigate.db
 check "sidecar written" sh -c "grep -qE '^0\.17\.2' /var/snap/frigate/common/db/.last-writer"
 
+# --- M3: frigate money-test (Task 5) - section added when Task 5 lands ---
+
+# --- M3: rollback machinery (Task 4) ---
+# Proof 1: refresh fires the pre-refresh hook -> backup exists.
+snap install --dangerous "$SNAP_FILE" >/dev/null 2>&1 || fail_ "rollback: reinstall-refresh failed"
+sleep 25   # services restart; frigate re-gates on go2rtc
+check "rollback: pre-refresh backup created" sh -c "ls /var/snap/frigate/common/db/backups/frigate-pre-*.db"
+check "rollback: hook logged" sh -c "grep -q 'pre-refresh: backed up' /var/snap/frigate/common/db/backups/hook.log"
+# Proof 2: forged newer sidecar -> restore path fires on restart.
+echo "99.0.0 x999" > /var/snap/frigate/common/db/.last-writer
+snap restart frigate.frigate
+sleep 20
+check "rollback: downgrade detected + restored" sh -c "journalctl --since \"$MARK\" | grep -q 'frigate-run: restored'"
+check "rollback: incompatible db preserved" sh -c "ls /var/snap/frigate/common/db/frigate.db.incompatible-*"
+check "rollback: frigate healthy after restore" sh -c "snap services frigate.frigate | grep -q ' active'"
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
@@ -230,7 +246,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_(name|version)"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate"|frigate\.frigate.*name="/proc/[^"]*/cmdline"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_"|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -308,6 +324,14 @@ echo "  frigate finding: frigate.frigate cgroup reads (cpu.max per-slice + top-l
 #   profile regardless of peer (tightest possible per-operation arm given process_iter() behaviour).
 #   Production snap: add process-control interface only if ffmpeg subprocess tracking is needed.
 echo "  frigate finding: recording process ptrace+cmdline denials (psutil.process_iter scans all PIDs — unconfined + any snap peer on host) — benign, non-blocking"
+# FINDING (Task 4): frigate.frigate OpenVINO detector (comm="frigate.detecto") GPU cap + DMI probes —
+#   same mechanism as gpu-probe and vaapi-probe, emitted by the OpenVINO GPU plugin initialised inside
+#   the detector forkserver. Three patterns:
+#   frigate.frigate.*capname="sys_admin"           - OpenVINO GPU plugin DRM cap check (non-blocking)
+#   frigate.frigate.*capname="perfmon"             - OpenVINO GPU plugin perf counter probe (non-blocking)
+#   frigate.frigate.*name=".../dmi/id/product_*"  - OpenVINO reads system model (name/version/serial/uuid) for GPU selection
+#   All EACCES-tolerant; detector boots and inference runs correctly despite denials.
+echo "  frigate finding: frigate.detecto OpenVINO GPU cap (sys_admin, perfmon) + DMI id probes — same mechanism as gpu-probe, benign, non-blocking (Task 4 finding)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true

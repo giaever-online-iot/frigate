@@ -24,9 +24,29 @@ sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
 wait_for_url "http://127.0.0.1:1984/api/streams" 60 || true
 echo "frigate-run: go2rtc gate waited_ms=${WAITED_MS:--1}"
 
-# Downgrade-restore check happens BEFORE the sidecar write (Task 4 adds the restore block here)
+# CUR_VERSION computed once; used by both the restore block and the sidecar write below.
 CUR_VERSION=$(sed -n 's/^VERSION *= *"\([^"+-]*\).*/\1/p' "$SNAP/opt/frigate/frigate/version.py" | head -1)
-printf '%s %s\n' "${CUR_VERSION:-0.17.2}" "$SNAP_REVISION" > "$SNAP_COMMON/db/.last-writer"
+CUR_VERSION="${CUR_VERSION:-0.17.2}"
+# Downgrade-restore: if the DB was last written by a NEWER frigate than this code,
+# a migration may have advanced the schema - restore the newest backup instead.
+SIDECAR="$SNAP_COMMON/db/.last-writer"
+if [ -f "$SIDECAR" ]; then
+    LAST_VERSION=$(awk '{print $1}' "$SIDECAR")
+    NEWEST=$(printf '%s\n%s\n' "$LAST_VERSION" "$CUR_VERSION" | sort -V | tail -1)
+    if [ "$NEWEST" = "$LAST_VERSION" ] && [ "$LAST_VERSION" != "$CUR_VERSION" ]; then
+        echo "frigate-run: DOWNGRADE detected (db last written by $LAST_VERSION, code is $CUR_VERSION)"
+        BACKUP=$(ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | head -1)
+        if [ -n "$BACKUP" ]; then
+            TS=$(date +%s)
+            mv "$SNAP_COMMON/db/frigate.db" "$SNAP_COMMON/db/frigate.db.incompatible-$TS" 2>/dev/null || true
+            cp "$BACKUP" "$SNAP_COMMON/db/frigate.db"
+            echo "frigate-run: restored $BACKUP (incompatible db preserved as frigate.db.incompatible-$TS)"
+        else
+            echo "frigate-run: WARNING no backup available - proceeding with the newer-schema db"
+        fi
+    fi
+fi
+printf '%s %s\n' "$CUR_VERSION" "$SNAP_REVISION" > "$SNAP_COMMON/db/.last-writer"
 
 cd /opt/frigate
 exec "$SNAP/usr/bin/python3.11" -u -m frigate

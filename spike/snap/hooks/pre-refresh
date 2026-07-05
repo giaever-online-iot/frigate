@@ -1,0 +1,20 @@
+#!/bin/sh
+# Consistent DB snapshot before every refresh (sqlite backup API - the daemon may be mid-write).
+set -e
+DB="$SNAP_COMMON/db/frigate.db"
+if [ ! -f "$DB" ]; then echo "pre-refresh: no db, nothing to back up"; exit 0; fi
+mkdir -p "$SNAP_COMMON/db/backups"
+DEST="$SNAP_COMMON/db/backups/frigate-pre-${SNAP_REVISION}.db"
+"$SNAP/usr/bin/python3.11" - "$DB" "$DEST" <<'EOF'
+import sqlite3, sys
+src = sqlite3.connect(sys.argv[1])
+dst = sqlite3.connect(sys.argv[2])
+with dst:
+    src.backup(dst)
+dst.close(); src.close()
+EOF
+MSG="pre-refresh: backed up $DB -> $DEST"
+echo "$MSG"
+echo "$MSG" >> "$SNAP_COMMON/db/backups/hook.log"
+# retention: keep newest 2
+ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | tail -n +3 | xargs -r rm -f
