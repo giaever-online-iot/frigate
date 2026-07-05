@@ -21,8 +21,12 @@ pedestrian test clip. Both routes are recorded here so they are not re-litigated
   requires motion detection"). Frigate refuses to start.
 - **v0.17.2 has no config knob** for max calibration duration.
 - **Ruling**: no downstream behavior patches; run stock Frigate code. The detection money test
-  (events API, label/score, DB corroboration) is **POSTPONED until live cameras** replace the
-  looping clip. The harness marks these checks SKIP with this rationale (tests/spike-smoke.sh).
+  was briefly postponed pending live cameras, then **re-armed and GREEN on stock code**
+  (2026-07-05 evening, live indoor camera: person score 0.729, inference 7.08 ms iGPU) —
+  validating that the blocker was the synthetic clip, never the stock code. The harness gates
+  the live checks on `$SNAP_COMMON/livecam-url` being provisioned + the stream answering
+  ffprobe at harness start; unprovisioned/unreachable => explicit SKIP, suite stays green
+  (tests/spike-smoke.sh).
 - The trial patch proved the rest of the pipeline end-to-end on 2026-07-05: 5 person events
   (scores 0.78–0.97), inference_speed=5.82 ms (iGPU OpenVINO), ffmpeg_pid nonzero,
   detection_fps=43.4, recordings on disk, 0 unexpected denials — evidence preserved in

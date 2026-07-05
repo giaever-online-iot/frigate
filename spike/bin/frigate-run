@@ -16,9 +16,23 @@ mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" "$SNAP_COMMON/db" /tmp
 MESA_LIB="$SNAP/gpu-2604/usr/lib/x86_64-linux-gnu"
 if [ -d "$MESA_LIB" ]; then export LD_LIBRARY_PATH="$MESA_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
 
-# Render config fresh EVERY start (generated-config phase; snap-set configurability lands at M7)
-sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
-    "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
+# Render config fresh EVERY start (generated-config phase; snap-set configurability lands at M7).
+# Live camera: $SNAP_COMMON/livecam-url (0600, single-line stream URL) arms the LIVECAM block;
+# absent => the marker-delimited block is stripped. URL never logged (config chmod 600: it may
+# embed credentials). '|' in credentials unsupported (sed delimiter).
+LIVECAM_URL=""
+[ -f "$SNAP_COMMON/livecam-url" ] && LIVECAM_URL=$(head -1 "$SNAP_COMMON/livecam-url" | tr -d '[:space:]')
+if [ -n "$LIVECAM_URL" ]; then
+    sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
+        -e "s|__LIVECAM_URL__|$LIVECAM_URL|g" \
+        "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
+    echo "frigate-run: livecam armed (url redacted)"
+else
+    sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
+        -e '/# LIVECAM-BEGIN/,/# LIVECAM-END/d' \
+        "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
+fi
+chmod 600 "$CONFIG_FILE"
 
 # Readiness gate on go2rtc (provider-answered, not just unit-started)
 wait_for_url "http://127.0.0.1:1984/api/streams" 60 || true

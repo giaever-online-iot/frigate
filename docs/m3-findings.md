@@ -5,11 +5,11 @@
 | # | Question | Verdict | Evidence |
 |---|----------|---------|----------|
 | M3-1 | Frigate daemon boots strict-confined, API answers? | YES — `snap.frigate.frigate` service active; `GET /version` (127.0.0.1:5001) answered with `"0.17.2-3d4dd3a"`; split DB live at `$SNAP_COMMON/db/frigate.db`; sidecar `.last-writer` written at service start. Note: v0.17.2 serves `/version`, `/events`, `/stats` WITHOUT an `/api/` prefix (404 otherwise). Curl requires `-H "Remote-User: admin" -H "Remote-Role: admin"` headers; nginx normally injects these in production. | spike/results/frigate-version.txt (`0.17.2-3d4dd3a`); m3-final-run.txt (`PASS: frigate service active`, `PASS: frigate API answers`, `PASS: db at split path`, `PASS: sidecar written`); task-3-report.md |
-| M3-2 | Real object detection on iGPU (OpenVINO), inference speed? | YES, with the since-withdrawn trial patch (see §Patch adjudication — test now POSTPONED until live cameras; not reproducible with stock code + looping clip) — 5 person events detected on the `testclip` stream (top_scores **0.947–0.984**, final run, spike/results/frigate-events.json; earlier Task-5 fix-round run observed a wider 0.78–0.97 spread, prior-run observation, file since overwritten); `detectors.ov.inference_speed` = **5.86 ms** (final run — both spike/results/frigate-stats.json and m3-final-run.txt agree; 5.74 ms noted in an intermediate run, stats file since overwritten); `detection_fps` = **38.7** (final run, spike/results/frigate-stats.json 2026-07-05 19:11:28; earlier Task-5 fix-round run observed 43.4 — run-to-run variance on a looping clip); `ffmpeg_pid` nonzero (pipeline-alive assertion confirmed). | Trial-patch run 2026-07-05 19:11 — transcript preserved in git: `git show dd1da7c:spike/results/m3-final-run.txt` (`PASS: MONEY TEST`, `gpu finding: ov inference_speed=5.86ms`). The on-disk frigate-events.json / frigate-stats.json recorded that run (5 person events; 5.86 ms / 38.7 fps / ffmpeg_pid > 0) but have since been overwritten by stock re-runs (detection SKIPped → 0 events) |
-| M3-3 | Detection events corroborated in split DB? | YES, with the since-withdrawn trial patch (same caveat as M3-2) — 5 person events in the `event` table of `$SNAP_COMMON/db/frigate.db`, IDs matching the API response. | spike/results/db-events.txt (5 rows: id timestamp label camera — trial-patch run evidence, not regenerated since the DB check is SKIPped); dd1da7c transcript (`PASS: detection: corroborated in split db`) |
+| M3-2 | Real object detection on iGPU (OpenVINO), inference speed? | **YES — on 100% STOCK Frigate code with a live camera** (re-armed 2026-07-05 evening; supersedes the trial-patch caveat). `person` event on the `livecam` camera (indoor living-room scene, hevc 768x432 sub stream via HA-adjacent IP camera): score **0.729**, top_score **0.751**; `detectors.ov.inference_speed` = **7.08 ms** (real iGPU OpenVINO); `livecam` `ffmpeg_pid` nonzero, camera_fps 5.1, detection_fps 8.2. Stock calibration exited naturally on the live scene's quiet intervals — exactly the mechanism the looping clip could never satisfy. Historical: the trial-patch runs on `testclip` (5 person events, top_scores 0.947–0.984, 5.86 ms / 38.7 fps) remain preserved via `git show dd1da7c:spike/results/m3-final-run.txt`. | spike/results/frigate-events.json (person event, camera=livecam, score 0.729 / top 0.751 — live run 2026-07-05); spike/results/frigate-stats.json (`inference_speed`:7.08 ms, `cameras.livecam.ffmpeg_pid` > 0, camera_fps 5.1); spike/results/m3-final-run.txt (`PASS: MONEY TEST: real objects detected on live camera`, `gpu finding: ov inference_speed=7.08ms`, `SPIKE SMOKE: ALL PASS`) |
+| M3-3 | Detection events corroborated in split DB? | **YES — stock code, live camera**: `person` event row for camera=livecam in the `event` table of `$SNAP_COMMON/db/frigate.db`, ID matching the events-API response. | spike/results/db-events.txt (`1783288038.924275-bkz3uv person livecam` — live run 2026-07-05); m3-final-run.txt (`PASS: detection: corroborated in split db`) |
 | M3-4 | Recordings written to disk under SNAP_COMMON? | YES — `.mp4` segments present under `$SNAP_COMMON/media/frigate/recordings/` during live run; harness asserts file presence. | m3-final-run.txt (`PASS: recordings: files under SNAP_COMMON`) |
 | M3-5 | Rollback machinery — both proofs green? | YES — same-version proofs; cross-version compat not exercised, see §Rollback scope below. Note: hook stdout only reaches journald within the hook's execution scope — `hook.log` exists precisely because journald retention for hook scopes is not a durable audit trail; the file is the durable record, journald is transient. | m3-final-run.txt (`PASS: rollback: pre-refresh backup created`, `PASS: rollback: hook logged`, `PASS: rollback: downgrade detected + restored`, `PASS: rollback: incompatible db preserved`, `PASS: rollback: frigate healthy after restore`); task-4-report.md (verbatim journal lines) |
-| M3-6 | Cache peak and multi-camera headroom? | Two measurements of Frigate cache-dir usage (FRIGATE_CACHE_DIR — frame/segment staging cache; recording segments staged here before move to disk) at `/tmp/snap-private-tmp/snap.frigate/tmp/cache`, single camera: **8596 KiB** (final run, spike/results/cache-peak.txt 2026-07-05 19:11:28) and **10576 KiB** (Task-5 fix-round run, task-5-report.md §Cache). Run-to-run variance is expected: segment-staging timing varies with when the sampler catches the cache between segment moves. The spec's multi-camera headroom math applies to this staging cache; per-camera frame memory sits in `/dev/shm` (private tmpfs, sized to 50% of physical RAM by kernel default). Note: OpenVINO's model/kernel cache lives under the config dir (`model_cache`), which was NOT what was measured here. | spike/results/cache-peak.txt (`8596 KiB peak`, final run); task-5-report.md §Cache (`10576 KiB`, Task-5 fix-round run); m2-findings.md §(b) (shared-memory private: true; /dev/shm sizing) |
+| M3-6 | Cache peak and multi-camera headroom? | Three measurements of Frigate cache-dir usage (FRIGATE_CACHE_DIR — frame/segment staging cache; recording segments staged here before move to disk) at `/tmp/snap-private-tmp/snap.frigate/tmp/cache`: single camera **8596 KiB** (stock run 2026-07-05 19:11) and **10576 KiB** (Task-5 fix-round run, task-5-report.md §Cache); TWO cameras (livecam + testclip, live run 2026-07-05 evening) **31427 KiB** — first multi-camera data point; scaling is super-linear vs the single-camera runs (hevc 768x432 + h264 720p segments staging concurrently), which the multi-camera headroom math must absorb. Run-to-run variance is expected: segment-staging timing varies with when the sampler catches the cache between segment moves. The spec's multi-camera headroom math applies to this staging cache; per-camera frame memory sits in `/dev/shm` (private tmpfs, sized to 50% of physical RAM by kernel default). Note: OpenVINO's model/kernel cache lives under the config dir (`model_cache`), which was NOT what was measured here. | spike/results/cache-peak.txt (`8596 KiB peak`, final run); task-5-report.md §Cache (`10576 KiB`, Task-5 fix-round run); m2-findings.md §(b) (shared-memory private: true; /dev/shm sizing) |
 
 ---
 
@@ -80,14 +80,22 @@ The snap briefly carried **two** downstream patches under this fallback. The `do
 
 **FINAL RULING (2026-07-05, supersedes the fallback):** the user did not approve behavior
 patching. Patch 0002 was withdrawn entirely; the snap carries ONLY 0001 (build/packaging
-path patch) and runs 100% stock Frigate runtime code. The detection money test (M3-2/M3-3
-checks: events API, label/score, DB corroboration) is **POSTPONED until live cameras** with
-natural quiet intervals replace the looping clip — stock calibration can then exit normally.
-The harness marks these checks SKIP with this rationale. The detection evidence recorded in
-M3-2/M3-3 was obtained during the trial rounds WITH the since-withdrawn patch; it remains
-valid proof that the confined pipeline (ffmpeg → shm → OpenVINO iGPU → events → DB →
-recordings) works end-to-end, but it is not reproducible with the current stock-code snap
-and the synthetic clip.
+path patch) and runs 100% stock Frigate runtime code. The detection money test was briefly
+POSTPONED pending live cameras.
+
+**RE-ARMED AND GREEN (2026-07-05 evening):** the user provisioned a live IP camera (indoor
+living room; hevc 768x432 sub stream, consumed by Frigate directly over RTSP). The money
+test re-armed against the `livecam` camera and went **GREEN on stock code**: stock
+calibration exited naturally on the scene's quiet intervals, person detected (score 0.729),
+inference 7.08 ms iGPU, event corroborated in the split DB, ALL PASS with 0 unexpected
+denials. This validates the ruling: the blocker was the synthetic clip, never the pipeline
+or the stock code. Gate protocol: the harness arms the live checks only when
+`$SNAP_COMMON/livecam-url` is provisioned (root 0600, preserved across purge/reinstall)
+AND the stream answers ffprobe at harness start; otherwise it prints explicit SKIPs and
+the suite stays green (dev boxes without the camera are unaffected). Secret hygiene: URL
+(with credentials) lives only in the untracked secret file and the 0600 rendered config;
+the harness scrubs evidence and asserts absence (`PASS: livecam: no stream URL/credentials
+in evidence files`).
 
 ---
 
@@ -183,13 +191,13 @@ Content: daytime pedestrian scene, multiple persons in frame throughout, well-su
 
 | File | Content |
 |---|---|
-| `spike/results/m3-final-run.txt` | Final M3 harness run (2026-07-05, STOCK code post-d81acd5): ALL PASS with 3 detection SKIPs (postponed until live cameras), 264 denials, 0 unexpected. Not tracked (local-only per m1/m2 convention). The earlier trial-patch transcript (ALL PASS incl. `PASS: MONEY TEST`, 272 denials) is preserved in git history: `git show dd1da7c:spike/results/m3-final-run.txt` |
-| `spike/results/frigate-events.json` | Currently EMPTY (stock run — detection SKIPped, no events generated). The trial-patch run recorded 5 person events, camera=testclip, top_scores 0.947–0.984 (earlier fix-round run observed 0.78–0.97); see the dd1da7c transcript for the recorded PASS lines |
-| `spike/results/frigate-stats.json` | Stats from `/stats` API: inference_speed, detection_fps, ffmpeg_pid (nonzero = pipeline alive). Current file is from the stock run; the trial-patch figures (5.86 ms / 38.7 fps) are recorded in the dd1da7c transcript |
+| `spike/results/m3-final-run.txt` | Final M3 harness run (2026-07-05 evening, STOCK code + LIVE CAMERA): **ALL PASS incl. `PASS: MONEY TEST: real objects detected on live camera`**, 388 denials, 0 unexpected. Not tracked (local-only per m1/m2 convention). Earlier transcripts preserved in git history: trial-patch run `git show dd1da7c:spike/results/m3-final-run.txt` |
+| `spike/results/frigate-events.json` | Live-run evidence: person event, camera=livecam, score 0.729 / top_score 0.751 (stock code, 2026-07-05). Historical trial-patch evidence (5 person events on testclip, top_scores 0.947–0.984) in the dd1da7c transcript |
+| `spike/results/frigate-stats.json` | Stats from `/stats` API (live run): `inference_speed` 7.08 ms, `cameras.livecam.ffmpeg_pid` > 0, camera_fps 5.1, detection_fps 8.2 |
 | `spike/results/frigate-version.txt` | `/version` response: `0.17.2-3d4dd3a` |
-| `spike/results/db-events.txt` | 5 rows from `event` table of split SQLite DB (id, timestamp, label, camera) — trial-patch run evidence; not regenerated by stock runs (the DB corroboration check is SKIPped) |
-| `spike/results/cache-peak.txt` | Frigate cache-dir peak (FRIGATE_CACHE_DIR): `8596 KiB` at `/tmp/snap-private-tmp/snap.frigate/tmp/cache` |
-| `spike/results/denials.txt` | Full AppArmor denial log from the latest run (264 entries, all allowlisted; incl. the recordi CAP_SYS_PTRACE capability variant triaged at the final gate) |
+| `spike/results/db-events.txt` | Live-run DB corroboration: `1783288038.924275-bkz3uv person livecam` (event table, split SQLite DB) |
+| `spike/results/cache-peak.txt` | Frigate cache-dir peak (FRIGATE_CACHE_DIR): `31427 KiB` at `/tmp/snap-private-tmp/snap.frigate/tmp/cache` (live run, 2 cameras: livecam + testclip — vs 8596 KiB single-camera stock run; scales with camera count as the headroom math expects) |
+| `spike/results/denials.txt` | Full AppArmor denial log from the latest run (388 entries, all allowlisted — count growth vs 264 is the second camera's ffmpeg + extra frigate restart, no new arms; incl. the recordi CAP_SYS_PTRACE capability variant triaged at the final gate) |
 | `spike/results/m2-final-run.txt` | M2 final run (reference: all 61 checks, Coral present) |
 | `spike/results/m1-final-run.txt` | M1 final run (reference: all M1 checks, Coral absent) |
 | `spike/results/vaapi-decode.txt` | VAAPI hw decode proof: `vaapi(progressive)`, `frame= 30 fps= 27`, `rc=0` |

@@ -20,6 +20,19 @@ jqr()   { jq -r "$2" "$RESULTS/$1.json" 2>/dev/null; }
 
 command -v jq >/dev/null || { echo "jq required: sudo apt install -y jq"; exit 1; }
 
+# Operator provisioning for the live camera (see spike/config/frigate-config.yml LIVECAM block).
+# URL arrives on STDIN (never argv - visible in ps) and is written root-owned 0600:
+#   printf '%s' 'rtsp://user:pass@host:554/path' | sudo tests/spike-smoke.sh --provision-livecam
+if [ "${1:-}" = "--provision-livecam" ]; then
+  mkdir -p "/var/snap/$SNAP_NAME/common"
+  umask 077
+  head -1 > "/var/snap/$SNAP_NAME/common/livecam-url"
+  chown root:root "/var/snap/$SNAP_NAME/common/livecam-url"
+  chmod 600 "/var/snap/$SNAP_NAME/common/livecam-url"
+  echo "livecam-url provisioned (root 0600); next harness run arms the live-camera money test"
+  exit 0
+fi
+
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
 # Capture expanded snapcraft yaml (gpu extension evidence); use abs path since subshell cd's into spike/
 ABS_EVIDENCE="$(pwd)/$EVIDENCE"
@@ -27,6 +40,13 @@ ABS_EVIDENCE="$(pwd)/$EVIDENCE"
 
 if [ "${1:-}" != "--skip-install" ]; then
   [ -n "$SNAP_FILE" ] || { echo "ERROR: no spike/${SNAP_NAME}_*.snap file found - build first (cd spike && snapcraft pack)"; exit 1; }
+  # Live camera secret ($SNAP_COMMON/livecam-url, provisioned once by the operator) must survive
+  # the purge/reinstall cycle: stash before remove, restore after install. Never echo its content.
+  LIVECAM_STASH=""
+  if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
+    LIVECAM_STASH=$(mktemp)
+    cp -p "/var/snap/$SNAP_NAME/common/livecam-url" "$LIVECAM_STASH"
+  fi
   snap remove --purge "$SNAP_NAME" 2>/dev/null || true
   # Install mesa-2604 content provider BEFORE frigate so gpu-2604 plug is live when daemons start.
   # This ensures libGL.so.1 (removed from snap prime by gpu/cleanup) is available via content mount.
@@ -36,6 +56,13 @@ if [ "${1:-}" != "--skip-install" ]; then
   # mount-observe: not auto-connected for --dangerous installs; required by frigate daemon so
   # psutil.disk_partitions() can read /proc/<pid>/mounts for /dev/shm fs-type detection.
   snap connect $SNAP_NAME:mount-observe 2>/dev/null || true
+  # Restore the livecam secret (0600) and restart frigate so frigate-run re-renders the
+  # config with the LIVECAM block armed (daemons started at install without the file).
+  if [ -n "$LIVECAM_STASH" ]; then
+    install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url"
+    rm -f "$LIVECAM_STASH"
+    snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  fi
   pass_ "snap install --dangerous ($SNAP_FILE)"
   sleep 30  # let daemons start and probes write; frigate needs extra time for Python imports (~12s) + startup
 fi
@@ -239,29 +266,61 @@ check "sidecar written" sh -c "grep -qE '^0\.17\.2' /var/snap/frigate/common/db/
 # Event JSON shape: [{id, label, data:{score, top_score, ...}, camera, ...}]
 # Stats JSON shape: {detectors:{ov:{inference_speed, detection_start, pid}}, cameras:{...}}
 # DB table name: event (verified via sqlite_master on the live DB).
-# POSTPONED (user ruling 2026-07-05): the detection money test needs a camera feed with natural
-# quiet intervals. Stock ImprovedMotionDetector calibration never exits on the looping test clip
-# (constant motion => pct_motion always > 5%), and both non-patch routes are dead ends:
-#   - motion.enabled=false: hard ValidationError in v0.17.2 (object detection requires motion)
-#   - downstream behavior patch: rejected by ruling (stock frigate only)
-# The pipeline itself was proven end-to-end with the trial patch on 2026-07-05 (5 person events,
-# scores 0.78-0.97, inference 5.82ms iGPU) — see docs/patches.md "Rejected patch" section.
-# Re-arm the three SKIP checks below when live cameras replace the looping clip.
+# LIVE-CAMERA GATE (re-armed 2026-07-05): the detection money test runs against the live
+# camera (natural quiet intervals => stock calibration exits normally). The looping testclip
+# can NEVER produce detections on stock code (constant motion keeps calibration engaged;
+# motion.enabled=false is a v0.17.2 ValidationError; behavior patches rejected by ruling —
+# see docs/patches.md "Rejected patch"). Gate protocol (coral-style): no secret file or
+# unreachable stream => explicit SKIP with reason, suite stays green.
+LIVECAM_FILE=/var/snap/$SNAP_NAME/common/livecam-url
+LIVECAM=""
+LIVECAM_URL=""
+LIVECAM_SKIP_REASON="no livecam provisioned ($LIVECAM_FILE absent)"
+if [ -f "$LIVECAM_FILE" ]; then
+  LIVECAM_URL=$(head -1 "$LIVECAM_FILE" | tr -d '[:space:]')
+  # Reachability probe via the snap's own ffprobe; ALL output discarded (URL must not leak).
+  if timeout 20 snap run $SNAP_NAME.ffprobe -v error -rtsp_transport tcp -show_streams "$LIVECAM_URL" >/dev/null 2>&1; then
+    LIVECAM=yes
+  else
+    LIVECAM_SKIP_REASON="livecam-url present but stream unreachable at harness start"
+  fi
+fi
 CACHE_PEAK=0
-for i in $(seq 1 6); do
-  # events evidence still captured (expected [] on stock code with the looping clip)
-  curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
-    "http://127.0.0.1:5001/events?labels=person,car&limit=5" \
-    > "$EVIDENCE/frigate-events.json" 2>/dev/null || true
-  # cache peak sampling (RAM-backed private tmp) - evidence for multi-camera headroom math
-  C=$(du -sk /tmp/snap-private-tmp/snap.frigate/tmp/cache 2>/dev/null | awk '{print $1}')
-  [ -n "$C" ] && [ "$C" -gt "$CACHE_PEAK" ] && CACHE_PEAK=$C
-  sleep 5
-done
+if [ "$LIVECAM" = "yes" ]; then
+  # Detection poll: up to ~90s (first boot includes OpenVINO GPU model compile + stock
+  # motion calibration needs a quiet interval). Scoped to the livecam camera.
+  DETECTED=""
+  for i in $(seq 1 18); do
+    curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
+      "http://127.0.0.1:5001/events?cameras=livecam&labels=person&limit=5" \
+      > "$EVIDENCE/frigate-events.json" 2>/dev/null || true
+    if jq -e 'length > 0' "$EVIDENCE/frigate-events.json" >/dev/null 2>&1; then DETECTED=yes; fi
+    C=$(du -sk /tmp/snap-private-tmp/snap.frigate/tmp/cache 2>/dev/null | awk '{print $1}')
+    [ -n "$C" ] && [ "$C" -gt "$CACHE_PEAK" ] && CACHE_PEAK=$C
+    [ -n "$DETECTED" ] && [ "$i" -gt 6 ] && break   # keep sampling a bit even after first hit
+    sleep 5
+  done
+  check "MONEY TEST: real objects detected on live camera (events API)" test "$DETECTED" = "yes"
+  check "detection: label is person with score" sh -c "jq -e '.[0].label == \"person\" and .[0].data.score > 0.4' \"$EVIDENCE/frigate-events.json\""
+  # DB corroboration (also proves the split path is live). Table name: event.
+  sqlite3 /var/snap/frigate/common/db/frigate.db "SELECT id,label,camera FROM event WHERE camera='livecam' LIMIT 5;" > "$EVIDENCE/db-events.txt" 2>/dev/null || \
+    python3 -c "import sqlite3; c=sqlite3.connect('/var/snap/frigate/common/db/frigate.db'); [print(r[0],r[1],r[2]) for r in c.execute(\"SELECT id,label,camera FROM event WHERE camera='livecam' LIMIT 5\")]" > "$EVIDENCE/db-events.txt" 2>/dev/null || true
+  check "detection: corroborated in split db" test -s "$EVIDENCE/db-events.txt"
+  check "livecam: camera pipeline alive (ffmpeg_pid > 0)" sh -c "curl -sf --max-time 5 -H 'Remote-User: admin' -H 'Remote-Role: admin' http://127.0.0.1:5001/stats | jq -e '.cameras.livecam.ffmpeg_pid > 0'"
+else
+  for i in $(seq 1 6); do
+    curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
+      "http://127.0.0.1:5001/events?labels=person,car&limit=5" \
+      > "$EVIDENCE/frigate-events.json" 2>/dev/null || true
+    C=$(du -sk /tmp/snap-private-tmp/snap.frigate/tmp/cache 2>/dev/null | awk '{print $1}')
+    [ -n "$C" ] && [ "$C" -gt "$CACHE_PEAK" ] && CACHE_PEAK=$C
+    sleep 5
+  done
+  echo "SKIP: MONEY TEST: real objects detected (events API) — $LIVECAM_SKIP_REASON"
+  echo "SKIP: detection: labels are person/car with scores — $LIVECAM_SKIP_REASON"
+  echo "SKIP: detection: corroborated in split db — $LIVECAM_SKIP_REASON"
+fi
 echo "$CACHE_PEAK KiB peak" > "$EVIDENCE/cache-peak.txt"
-echo "SKIP: MONEY TEST: real objects detected (events API) — POSTPONED until live cameras (stock calibration never exits on looping clip)"
-echo "SKIP: detection: labels are person/car with scores — POSTPONED until live cameras"
-echo "SKIP: detection: corroborated in split db — POSTPONED until live cameras"
 # GPU evidence via frigate's own stats (route: /stats, not /api/stats)
 curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
   http://127.0.0.1:5001/stats > "$EVIDENCE/frigate-stats.json" 2>/dev/null || true
@@ -407,6 +466,16 @@ echo "  frigate finding: frigate.detecto OpenVINO GPU cap (sys_admin, perfmon) +
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true
+
+# Livecam secret hygiene: scrub the URL (credentials embedded) from ALL evidence files, then
+# assert absence. Fixed-string grep/sed; runs last so every evidence writer above is covered.
+if [ -n "${LIVECAM_URL:-}" ]; then
+  grep -rlF "$LIVECAM_URL" "$EVIDENCE" 2>/dev/null | while IFS= read -r f; do
+    sed -i "s|$LIVECAM_URL|LIVECAM-URL-REDACTED|g" "$f"
+  done
+  check "livecam: no stream URL/credentials in evidence files" sh -c "! grep -rqF \"$LIVECAM_URL\" \"$EVIDENCE\""
+fi
+
 echo
 [ "$FAIL" -eq 0 ] && echo "SPIKE SMOKE: ALL PASS" || echo "SPIKE SMOKE: FAILURES"
 exit "$FAIL"

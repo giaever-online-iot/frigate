@@ -13,7 +13,20 @@ MESA_LIB="$SNAP/gpu-2604/mesa-2604/usr/lib/x86_64-linux-gnu"
 # if-form, not '[ ] &&': set -e would abort when the content mount is absent
 if [ -d "$MESA_LIB" ]; then export LD_LIBRARY_PATH="$MESA_LIB:${LD_LIBRARY_PATH:-}"; fi
 mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" /tmp/cache
-[ -f "$CONFIG_FILE" ] || sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
-    "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
+# Same conditional livecam render as frigate-run (see frigate-config.yml LIVECAM block docs)
+if [ ! -f "$CONFIG_FILE" ]; then
+    LIVECAM_URL=""
+    [ -f "$SNAP_COMMON/livecam-url" ] && LIVECAM_URL=$(head -1 "$SNAP_COMMON/livecam-url" | tr -d '[:space:]')
+    if [ -n "$LIVECAM_URL" ]; then
+        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
+            -e "s|__LIVECAM_URL__|$LIVECAM_URL|g" \
+            "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
+    else
+        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
+            -e '/# LIVECAM-BEGIN/,/# LIVECAM-END/d' \
+            "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
+    fi
+    chmod 600 "$CONFIG_FILE"
+fi
 cd /opt/frigate   # through the Task-2 layout: also proves the layout works end-to-end
 exec "$SNAP/usr/bin/python3.11" -u -m frigate --validate-config
