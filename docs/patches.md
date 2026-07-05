@@ -3,6 +3,28 @@
 | Patch | Introduced | Purpose | Rebase notes |
 |---|---|---|---|
 | `spike/patches/0001-env-driven-paths.patch` | M2 (v0.17.2) | Make `frigate/const.py` base paths env-overridable (`FRIGATE_CONFIG_DIR`/`FRIGATE_BASE_DIR`/`FRIGATE_CACHE_DIR`; defaults unchanged ⇒ upstream no-op). Required because snapd layouts cannot target `/config` (root-level) or `/media/*` (denied allow-list entry) — see docs/m2-findings.md. | Re-diff against each new tag; constants may move/rename. Upstreaming candidate: yes — a small, defaults-preserving env override is upstreamable; consider a PR after M3 proves it in production shape. |
-| `spike/patches/0002-motion-calibration-exit.patch` | M3 (v0.17.2) | Force `ImprovedMotionDetector` calibration exit after 60 frames (`frame_counter >= 60`, 12 s at 5 fps). Frigate's stock exit condition (`pct_motion < 5%`, `len(motion_boxes) <= 4`) is never met with a looping pedestrian test clip — every frame has constant motion so `pct_motion` stays well above 5% indefinitely. Without the patch, `calibrating` stays `True` forever and no motion boxes are added to detection regions, so `detection_fps` stays 0. **Spike-only concern**: production cameras have natural quiet intervals. **Config route ruled out**: `motion.enabled: false` causes a hard pydantic ValidationError in v0.17.2 — Frigate refuses to start when motion is disabled and `detect.enabled: true` on the same camera (`"motion detection disabled and object detection enabled but object detection requires motion detection"`). **Behavior impact on production users**: no-op for any camera that ever sees a quiet interval (calibration exits via `pct_motion < 5%` first). Only a camera with unbroken constant motion from the very first frame would be affected, and then only earlier exit (after 12 s instead of never). The `lightning_threshold` guard (80% motion) still protects against scene-change storms. **Rebase notes**: re-diff against each new tag; look for changes to `detect()` in `frigate/motion/improved_motion.py`. `frame_counter` is incremented at lines 121–122 (v0.17.2) only while `calibrating=True`, so the guard fires only during calibration, not in steady state. **Upstreaming candidate**: yes, but as a configurable option (`motion.calibration_max_frames`) rather than hard-coded 60; a PR should add a `Field` to `MotionConfig` and plumb it through `RuntimeMotionConfig`. Hard-coded value is not upstreamable as-is. |
-
 The shm-prefix patch once planned for M3 was never needed: resolved in M2 via the shared-memory (private: true) interface — see docs/m2-findings.md strategic finding (b).
+
+## Rejected patch: motion calibration exit (M3, removed by user ruling 2026-07-05)
+
+A patch forcing `ImprovedMotionDetector` calibration exit after 60 frames was briefly carried
+(and a config alternative trialed) to make the detection money test green with the looping
+pedestrian test clip. Both routes are recorded here so they are not re-litigated:
+
+- **Why anything was needed at all**: stock calibration exits only when `pct_motion < 5%` and
+  `len(motion_boxes) <= 4`. The looping clip has constant motion in every frame, so
+  `calibrating` stays `True` forever, motion boxes never become detection regions, and
+  `detection_fps` stays 0. Real cameras have natural quiet intervals; the official Docker
+  image needs no equivalent patch because it targets real cameras.
+- **Config route (`motion.enabled: false`) is a dead end**: v0.17.2 hard-rejects it with a
+  pydantic ValidationError when `detect.enabled: true` on the same camera ("object detection
+  requires motion detection"). Frigate refuses to start.
+- **v0.17.2 has no config knob** for max calibration duration.
+- **Ruling**: no downstream behavior patches; run stock Frigate code. The detection money test
+  (events API, label/score, DB corroboration) is **POSTPONED until live cameras** replace the
+  looping clip. The harness marks these checks SKIP with this rationale (tests/spike-smoke.sh).
+- The trial patch proved the rest of the pipeline end-to-end on 2026-07-05: 5 person events
+  (scores 0.78–0.97), inference_speed=5.82 ms (iGPU OpenVINO), ffmpeg_pid nonzero,
+  detection_fps=43.4, recordings on disk, 0 unexpected denials — evidence preserved in
+  `.superpowers/sdd/task-5-report.md` (Fix rounds 1–2). The detection pipeline itself is not
+  in doubt; only the synthetic clip's inability to exit stock calibration is.

@@ -225,15 +225,12 @@ parts:
     source-depth: 1
     override-build: |
       patch -p1 < "$CRAFT_PROJECT_DIR/patches/0001-env-driven-paths.patch"
-      # 0002: ImprovedMotionDetector calibration max-frame exit.
-      # Frigate's calibration requires pct_motion < 5% which never happens with a looping
-      # pedestrian test clip (constant motion). Force calibration exit after 60 frames (12s
-      # at 5fps) so the background model has time to converge and motion boxes reach the
-      # object detector. Production cameras have natural quiet intervals; spike-only concern.
-      # Note: motion.enabled=false was ruled out — Frigate v0.17.2 hard-rejects that config
-      # when detect.enabled=true (ValidationError: "motion detection disabled and object
-      # detection enabled but object detection requires motion detection").
-      patch -p1 < "$CRAFT_PROJECT_DIR/patches/0002-motion-calibration-exit.patch"
+      # NOTE (2026-07-05 user ruling): NO behavior patches beyond 0001. A motion-calibration
+      # patch (forced exit after 60 frames) was trialed because the looping test clip's
+      # constant motion never satisfies stock calibration exit (pct_motion < 5%), and the
+      # config alternative motion.enabled=false is hard-rejected by v0.17.2 validation when
+      # detect.enabled=true. Ruling: run STOCK code; the detection money test is POSTPONED
+      # until live cameras (natural quiet intervals) are available. See docs/patches.md.
       # frigate/version.py is generated at build time upstream (Makefile `version` target:
       # echo 'VERSION = "$(VERSION)-$(COMMIT_HASH)"' > frigate/version.py) — not in the git tree.
       echo "VERSION = \"0.17.2-$(git rev-parse --short HEAD)\"" > frigate/version.py

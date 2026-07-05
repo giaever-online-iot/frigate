@@ -64,6 +64,15 @@ check "private /tmp/cache holds token" sh -c "grep -rq '$TOK' /tmp/snap-private-
 
 check "daemons run on python 3.11" test "$(jqr runtime '.version_major_minor')" = "3.11"
 
+# The imports probe (tensorflow+openvino imports, ~30-75s under load) can outlive the fixed
+# post-install sleep: probe completion observed at +73s under host load (2026-07-05, two
+# consecutive runs) while earlier same-day runs completed within 30s. Poll to the probe's
+# actual completion instead of racing a fixed sleep (deadline 120s; edgetpu-dlopen is
+# written by the same probe sequence right after imports.json).
+for i in $(seq 1 24); do
+  [ "$(jqr imports '.status')" = "complete" ] && [ "$(jqr edgetpu-dlopen '.status')" = "complete" ] && break
+  sleep 5
+done
 check "imports probe complete" test "$(jqr imports '.status')" = "complete"
 for MOD in numpy cv2 onnxruntime tflite_runtime tensorflow openvino fastapi uvicorn starlette peewee pydantic scipy norfair zmq cryptography ruamel.yaml paho.mqtt.client; do
   check "import $MOD" sh -c "jq -e '.imports.\"$MOD\".ok == true' \"$RESULTS/imports.json\""
@@ -230,29 +239,29 @@ check "sidecar written" sh -c "grep -qE '^0\.17\.2' /var/snap/frigate/common/db/
 # Event JSON shape: [{id, label, data:{score, top_score, ...}, camera, ...}]
 # Stats JSON shape: {detectors:{ov:{inference_speed, detection_start, pid}}, cameras:{...}}
 # DB table name: event (verified via sqlite_master on the live DB).
-# Detection: poll the events API up to ~90s (first boot includes OpenVINO GPU model compile).
-DETECTED=""
+# POSTPONED (user ruling 2026-07-05): the detection money test needs a camera feed with natural
+# quiet intervals. Stock ImprovedMotionDetector calibration never exits on the looping test clip
+# (constant motion => pct_motion always > 5%), and both non-patch routes are dead ends:
+#   - motion.enabled=false: hard ValidationError in v0.17.2 (object detection requires motion)
+#   - downstream behavior patch: rejected by ruling (stock frigate only)
+# The pipeline itself was proven end-to-end with the trial patch on 2026-07-05 (5 person events,
+# scores 0.78-0.97, inference 5.82ms iGPU) — see docs/patches.md "Rejected patch" section.
+# Re-arm the three SKIP checks below when live cameras replace the looping clip.
 CACHE_PEAK=0
-for i in $(seq 1 18); do
+for i in $(seq 1 6); do
+  # events evidence still captured (expected [] on stock code with the looping clip)
   curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
     "http://127.0.0.1:5001/events?labels=person,car&limit=5" \
     > "$EVIDENCE/frigate-events.json" 2>/dev/null || true
-  if jq -e 'length > 0' "$EVIDENCE/frigate-events.json" >/dev/null 2>&1; then DETECTED=yes; fi
   # cache peak sampling (RAM-backed private tmp) - evidence for multi-camera headroom math
   C=$(du -sk /tmp/snap-private-tmp/snap.frigate/tmp/cache 2>/dev/null | awk '{print $1}')
   [ -n "$C" ] && [ "$C" -gt "$CACHE_PEAK" ] && CACHE_PEAK=$C
-  [ -n "$DETECTED" ] && [ "$i" -gt 6 ] && break   # keep sampling a bit even after first hit
   sleep 5
 done
 echo "$CACHE_PEAK KiB peak" > "$EVIDENCE/cache-peak.txt"
-check "MONEY TEST: real objects detected (events API)" test "$DETECTED" = "yes"
-check "detection: labels are person/car with scores" sh -c "jq -e '.[0].label as \$l | ([\"person\",\"car\"] | index(\$l)) != null and .[0].data.score > 0.4' \"$EVIDENCE/frigate-events.json\""
-# DB corroboration (also proves the split path is live). Table name: event (verified via sqlite_master).
-# python3 fallback: use list comprehension so we only write output when rows exist (print(*iter) writes
-# a blank line for an empty cursor, which would cause a false-positive on test -s).
-sqlite3 /var/snap/frigate/common/db/frigate.db 'SELECT id,label,camera FROM event LIMIT 5;' > "$EVIDENCE/db-events.txt" 2>/dev/null || \
-  python3 -c "import sqlite3; c=sqlite3.connect('/var/snap/frigate/common/db/frigate.db'); [print(r[0],r[1],r[2]) for r in c.execute('SELECT id,label,camera FROM event LIMIT 5')]" > "$EVIDENCE/db-events.txt" 2>/dev/null || true
-check "detection: corroborated in split db" test -s "$EVIDENCE/db-events.txt"
+echo "SKIP: MONEY TEST: real objects detected (events API) — POSTPONED until live cameras (stock calibration never exits on looping clip)"
+echo "SKIP: detection: labels are person/car with scores — POSTPONED until live cameras"
+echo "SKIP: detection: corroborated in split db — POSTPONED until live cameras"
 # GPU evidence via frigate's own stats (route: /stats, not /api/stats)
 curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
   http://127.0.0.1:5001/stats > "$EVIDENCE/frigate-stats.json" 2>/dev/null || true
