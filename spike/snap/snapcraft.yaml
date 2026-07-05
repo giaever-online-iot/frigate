@@ -223,6 +223,41 @@ parts:
       # audio-labelmap.txt: runtime-only (events/audio.py:373); staged proactively mirroring
       # upstream Dockerfile — not forced by a validation error.
       cp labelmap.txt audio-labelmap.txt "$CRAFT_PART_INSTALL/opt/frigate/"
+  # M3 Task 1: OpenVINO SSDLite (prebuilt IR) + CPU tflite fallback + labelmaps.
+  # Route: prebuilt — openvino.tools.mo was removed in openvino 2024.0 (staged
+  # version is 2025.3.0); ovc dropped TF OD API params (pipeline_config,
+  # transformations_config) required for SSD [1,1,N,7] output; build-time
+  # conversion would add tensorflow (~600 MB) as an extra pip dep. Converted
+  # once on host using openvino-dev==2024.6.0 + tensorflow==2.17. See README.
+  detector-models:
+    plugin: nil
+    source: models-prebuilt
+    build-packages: [wget]
+    override-build: |
+      # --- OpenVINO SSDLite IR (prebuilt; MO-converted, FP16, SSD-transformed) ---
+      # ssdlite_mobilenet_v2 from TF Model Zoo; output shape [1,1,N,7] for Frigate SSD handler
+      install -D -m 0644 "$CRAFT_PART_SRC/ssdlite_mobilenet_v2.xml" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/openvino/ssdlite_mobilenet_v2.xml"
+      install -D -m 0644 "$CRAFT_PART_SRC/ssdlite_mobilenet_v2.bin" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/openvino/ssdlite_mobilenet_v2.bin"
+      echo "1de65ab321104005ae89713cd062432bb49663f84c69756a80e565acb0b8e4c4  $CRAFT_PART_INSTALL/opt/frigate/models/openvino/ssdlite_mobilenet_v2.xml" | sha256sum -c -
+      echo "e9ae61499b401144f6fa3bc08785d55bdfbb8ab706b58c870755830cc04663d3  $CRAFT_PART_INSTALL/opt/frigate/models/openvino/ssdlite_mobilenet_v2.bin" | sha256sum -c -
+      # OpenVINO labelmap: coco_91cl_bkgr.txt with truck->car patch (upstream Dockerfile line 136)
+      install -D -m 0644 "$CRAFT_PART_SRC/coco_91cl_bkgr.txt" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/openvino/coco_91cl_bkgr.txt"
+      echo "710061971626db24bab3bae6ff4e9ce6e66650565990123f3f86f12d385b37d1  $CRAFT_PART_INSTALL/opt/frigate/models/openvino/coco_91cl_bkgr.txt" | sha256sum -c -
+      # --- CPU tflite fallback (downloaded; pinned) ---
+      # ssdlite_mobiledet_coco_qat_postprocess from google-coral test_data release-frogfish
+      wget -qO "$CRAFT_PART_BUILD/cpu_model.tflite" \
+        "https://github.com/google-coral/test_data/raw/release-frogfish/ssdlite_mobiledet_coco_qat_postprocess.tflite"
+      echo "90bb33a634e041914cc1819aa5df99818e6c396c4d2db952c0fd7a9cffc4724f  $CRAFT_PART_BUILD/cpu_model.tflite" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_BUILD/cpu_model.tflite" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/cpu/cpu_model.tflite"
+      # --- COCO labelmap (pinned; same as frigate-src top-level copy) ---
+      install -D -m 0644 "$CRAFT_PART_SRC/labelmap.txt" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/labelmap.txt"
+      echo "6884be1f4f35344c499f944a1c168a34d837f7f7578f203fba95b3ede42fac09  $CRAFT_PART_INSTALL/opt/frigate/models/labelmap.txt" | sha256sum -c -
+
   # Task 5 import-chain additions: modules hard-imported (module level) by the
   # `python3 -m frigate --validate-config` chain but absent from the core-58 wheel set.
   # Separate part so the big spike-wheels part stays cached. Upstream pins from

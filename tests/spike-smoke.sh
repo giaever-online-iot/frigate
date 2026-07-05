@@ -190,6 +190,11 @@ check "frigate validate-config exits 0" test "$VC_RC" = "0"
 check "validate-config evidence captured" test -s "$EVIDENCE/validate-config.txt"
 echo "  validate finding: rc=$VC_RC $(tail -1 "$EVIDENCE/validate-config.txt" 2>/dev/null)"
 
+# --- M3: detector models staged (Task 1) ---
+check "openvino model staged" sh -c "ls /snap/frigate/current/opt/frigate/models/openvino/*.xml"
+check "cpu tflite fallback staged" sh -c "ls /snap/frigate/current/opt/frigate/models/cpu/*.tflite"
+check "coco labelmap staged" test -s /snap/frigate/current/opt/frigate/models/labelmap.txt
+
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
   > "$EVIDENCE/denials.txt" || true
