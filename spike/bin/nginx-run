@@ -10,6 +10,17 @@ set -e
 umask 077
 mkdir -p "$SNAP_DATA/nginx/conf" "$SNAP_DATA/nginx/logs" /tmp/nginx-tmp /tmp/nginx-cache
 
+# TLS pre-start: ensure cert dirs exist (layout: /etc/letsencrypt -> $SNAP_DATA/letsencrypt)
+# and generate a self-signed default if no real cert has been placed/certsync'd yet.
+mkdir -p /etc/letsencrypt/www /etc/letsencrypt/live/frigate
+if [ ! -f /etc/letsencrypt/live/frigate/privkey.pem ] || [ ! -f /etc/letsencrypt/live/frigate/fullchain.pem ]; then
+    echo "nginx-run: no TLS certificate found - generating self-signed default"
+    "$SNAP/usr/bin/openssl" req -new -newkey rsa:4096 -days 365 -nodes -x509 \
+        -subj "/O=FRIGATE DEFAULT CERT/CN=*" \
+        -keyout /etc/letsencrypt/live/frigate/privkey.pem \
+        -out /etc/letsencrypt/live/frigate/fullchain.pem 2>/dev/null
+fi
+
 # Render all conf templates into $SNAP_DATA/nginx/conf/
 # .in suffix marks the main template (nginx.conf.in -> nginx.conf); plain .conf files
 # are passed through sed unchanged (no tokens) for token-bearing includes (auth_location.conf

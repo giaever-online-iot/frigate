@@ -84,7 +84,18 @@ http {
     include __SNAP_DATA__/nginx/conf/go2rtc_upstream.conf;
 
     server {
-        listen 5000;
+        # listen directives and TLS params rendered into the conf dir by nginx-run's loop.
+        # listen.conf: 127.0.0.1:5000 (loopback-only internal) + 8971 ssl (external TLS).
+        # The file carries no __SNAP*__ tokens so sed passes it through unchanged.
+        include __SNAP_DATA__/nginx/conf/listen.conf;
+
+        # ACME HTTP-01 challenge: lives here (not in listen.conf) because nginx rejects
+        # location blocks at listen-directive include position. Root maps via the
+        # /etc/letsencrypt layout bind ($SNAP_DATA/letsencrypt) set in snapcraft.yaml.
+        location /.well-known/acme-challenge/ {
+            default_type "text/plain";
+            root /etc/letsencrypt/www;
+        }
 
         # vod settings
         vod_base_url '';

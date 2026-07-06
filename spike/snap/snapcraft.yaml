@@ -242,6 +242,10 @@ parts:
       - zlib1g-dev
       - libssl-dev
       - wget
+    # openssl binary: staged so nginx-run can call "$SNAP/usr/bin/openssl" to generate
+    # the self-signed default cert before nginx starts (M5 Task 2 TLS pre-start block).
+    stage-packages:
+      - openssl
     override-build: |
       cd "$CRAFT_PART_BUILD"
       wget -nv -O nginx.tar.gz "https://nginx.org/download/nginx-1.27.4.tar.gz"
