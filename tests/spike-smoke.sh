@@ -316,11 +316,12 @@ for _nginx_i in 1 2 3; do
     sleep 2
 done
 FRIGATE_VER=$(curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" http://127.0.0.1:5001/version 2>/dev/null)
+[ -n "$NGINX_VER" ] || fail_ "nginx proxies /api/version == :5001/version (no auth headers) — NGINX_VER empty (nginx not responding)"
 check "nginx proxies /api/version == :5001/version (no auth headers)" test "$NGINX_VER" = "$FRIGATE_VER"
 echo "  nginx finding: /api/version=$NGINX_VER (== :5001/version; no auth headers required)"
 # /auth endpoint: 202 Accepted confirms auth.enabled=false anonymous-accept path
 AUTH_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5001/auth 2>/dev/null)
-check "nginx: /auth returns 202 (anonymous accept with auth.enabled=false)" test "$AUTH_STATUS" = "202"
+check "frigate: /auth returns 202 (anonymous accept)" test "$AUTH_STATUS" = "202"
 echo "  nginx finding: /auth status=$AUTH_STATUS (202 Accepted = anonymous auth path confirmed)"
 echo "  nginx finding: error_log/access_log → files in \$SNAP_DATA/nginx/logs/ (deviation: /dev/stderr not openable in systemd snap unit — journal socket, not pipe; ENXIO on open); M7: configure logrotate for \$SNAP_DATA/nginx/logs/{error,access}.log; no journald capture while stderr is a socket fd"
 

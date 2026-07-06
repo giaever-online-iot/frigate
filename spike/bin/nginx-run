@@ -26,7 +26,8 @@ done
 umask 022
 
 # Readiness gate: wait for frigate API before starting nginx
-wait_for_url "http://127.0.0.1:5001/version" 60 || true
+wait_for_url "http://127.0.0.1:5001/version" 60 || \
+  echo "nginx-run: WARN frigate not ready after 60s - starting nginx anyway (UI shell serves, /api 502 until frigate answers)"
 echo "nginx-run: frigate gate waited_ms=${WAITED_MS:--1}"
 
 exec "$SNAP/usr/local/nginx/sbin/nginx" \

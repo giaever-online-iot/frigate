@@ -8,7 +8,7 @@
 # /dev/shm/nginx_cache -> /tmp/nginx-cache (private tmp; no shm-private plug needed).
 # /media/frigate roots -> __SNAP_COMMON__/media/frigate.
 # pid + logs dir -> __SNAP_DATA__/nginx/.
-# error_log -> /dev/stderr, access_log -> /dev/stdout (journald capture).
+# error_log + access_log -> __SNAP_DATA__/nginx/logs/ (ENXIO if /dev/stderr: journal socket, not pipe).
 # NOTE: daemon off; is NOT in this file — it is passed to nginx via -g "daemon off;" in
 # nginx-run. Setting it here too would trigger "daemon directive is duplicate" fatal error.
 # user root: snap daemons run as root; without this nginx defaults workers to "nobody" (uid

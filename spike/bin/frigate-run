@@ -26,7 +26,8 @@ if [ -d "$MESA_LIB" ]; then export LD_LIBRARY_PATH="$MESA_LIB${LD_LIBRARY_PATH:+
 # absent => the marker-delimited block is stripped. URL never logged. M4 Task 0 hardening:
 # umask 077 (config + sed script never transiently world-readable — replaces post-hoc chmod);
 # URL substitution via `sed -f <0600 script>` so the URL never appears in any argv
-# (/proc/<pid>/cmdline). '|' in credentials unsupported (sed delimiter).
+# (/proc/<pid>/cmdline). '|', '&', '\' in credentials unsupported (sed replacement semantics:
+# '|' is delimiter; '&' expands to the whole match; '\' is the escape prefix).
 umask 077
 LIVECAM_URL=""
 [ -f "$SNAP_COMMON/livecam-url" ] && LIVECAM_URL=$(head -1 "$SNAP_COMMON/livecam-url" | tr -d '[:space:]')

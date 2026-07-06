@@ -382,13 +382,6 @@ parts:
           -name 'distutils-precedence.pth' \
         \) -exec rm -rf {} +
       fi
-  # M4 Task 2: nginx conf templates (rendered at runtime by nginx-run via sed tokens).
-  # Separate from go2rtc-config (different source dir) to avoid touching that part's cache.
-  nginx-conf:
-    plugin: dump
-    source: config/nginx
-    organize:
-      '*': config/nginx/
   # M4 Task 3: upstream web UI built at base=/ for root-path serving via nginx.
   # DEVIATION: e2e:build absent at v0.17.2; scripts block = dev/build/lint/lint:fix/preview/test/coverage.
   # build script uses --base=/BASE_PATH/ (Docker substitution token, not root base).

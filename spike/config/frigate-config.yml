@@ -35,7 +35,9 @@ cameras:
   # into the comment too); when the file is absent this marker-delimited block is stripped.
   # The URL must never appear in committed files, harness output, or evidence (harness scrubs).
   # The harness preserves the file across its remove --purge/reinstall cycle.
-  # Caveat: render uses sed with '|' delimiter — a literal '|' in credentials is unsupported.
+  # Caveat: '|', '&', '\' in the URL/credentials are unsupported (sed replacement semantics:
+  # '|' is the delimiter; '&' expands to the whole match; '\' is the escape prefix). M5/M7: switch
+  # to a literal-safe renderer.
   # detect width/height intentionally omitted: Frigate autodetects via ffprobe.
   livecam:
     ffmpeg:
