@@ -50,6 +50,18 @@ if [ "${1:-}" != "--skip-install" ]; then
     cp -p "/var/snap/$SNAP_NAME/common/livecam-url" "$LIVECAM_STASH"
   fi
   snap remove --purge "$SNAP_NAME" 2>/dev/null || true
+  # FINDING (M4 Task 4): the snap's PRIVATE /tmp (/tmp/snap-private-tmp/snap.frigate/tmp) is HOST
+  # state — it survives snap remove --purge (cleared only at boot). Stale recording-cache segments
+  # (<camera>@<ts>.mp4) for a camera no longer in the rendered config (livecam@* left from an armed
+  # run after livecam-url deprovision) crash Frigate's recording maintainer EVERY 5s cycle:
+  # move_files() does self.config.cameras[camera] (plain dict) -> KeyError 'livecam' aborts the
+  # whole move loop, so NO camera's segments reach disk/DB (recordings + vod checks fail).
+  # Upstream bug (cache leftovers for a config-removed camera); snap-specific persistence.
+  # Journal: [2026-07-06 02:50] frigate.record.maintainer ERROR 'livecam' (every cycle).
+  # Clean the leaked cache in the purge window to restore the clean-slate invariant.
+  # M7: frigate-run should clear stale-camera cache segments at start — an operator deprovisioning
+  # livecam-url otherwise wedges ALL recording until host reboot.
+  rm -rf "/tmp/snap-private-tmp/snap.$SNAP_NAME/tmp/cache" 2>/dev/null || true
   # Install mesa-2604 content provider BEFORE frigate so gpu-2604 plug is live when daemons start.
   # This ensures libGL.so.1 (removed from snap prime by gpu/cleanup) is available via content mount.
   snap install mesa-2604 2>/dev/null || true
@@ -265,7 +277,14 @@ check "nginx service active" sh -c "snap services frigate.nginx | grep -q ' acti
 # Verify: /api/version via nginx (:5000) returns same body as direct :5001/version.
 # Route: nginx strips /api prefix, proxies to frigate_api (:5001) via rewrite ^/api(/.*)$ $1.
 # No auth headers sent — auth.enabled=false in config makes /auth return 202 Accepted for any request.
-NGINX_VER=$(curl -sf --max-time 5 http://127.0.0.1:5000/api/version 2>/dev/null)
+# Retry loop (2-3 iterations, sleep 2): closes the systemd-active-vs-bound window where the
+# nginx unit is reported active but the worker socket is not yet accepting connections.
+NGINX_VER=""
+for _nginx_i in 1 2 3; do
+    NGINX_VER=$(curl -sf --max-time 5 http://127.0.0.1:5000/api/version 2>/dev/null)
+    [ -n "$NGINX_VER" ] && break
+    sleep 2
+done
 FRIGATE_VER=$(curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" http://127.0.0.1:5001/version 2>/dev/null)
 check "nginx proxies /api/version == :5001/version (no auth headers)" test "$NGINX_VER" = "$FRIGATE_VER"
 echo "  nginx finding: /api/version=$NGINX_VER (== :5001/version; no auth headers required)"
@@ -273,7 +292,84 @@ echo "  nginx finding: /api/version=$NGINX_VER (== :5001/version; no auth header
 AUTH_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5001/auth 2>/dev/null)
 check "nginx: /auth returns 202 (anonymous accept with auth.enabled=false)" test "$AUTH_STATUS" = "202"
 echo "  nginx finding: /auth status=$AUTH_STATUS (202 Accepted = anonymous auth path confirmed)"
-echo "  nginx finding: error_log/access_log → files in \$SNAP_DATA/nginx/logs/ (deviation: /dev/stderr not openable in systemd snap unit — journal socket, not pipe; ENXIO on open)"
+echo "  nginx finding: error_log/access_log → files in \$SNAP_DATA/nginx/logs/ (deviation: /dev/stderr not openable in systemd snap unit — journal socket, not pipe; ENXIO on open); M7: configure logrotate for \$SNAP_DATA/nginx/logs/{error,access}.log; no journald capture while stderr is a socket fd"
+
+# --- M4: web UI + vod + go2rtc proxy gate (Task 4) ---
+# 1. Web UI root: GET :5000/ → 200 + "Frigate" marker
+#    nginx serves the built React app from /opt/frigate/web (snap layout bind); / → index.html.
+WUI_STATUS=""
+for _wui_i in 1 2 3; do
+    WUI_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5000/ 2>/dev/null)
+    [ "$WUI_STATUS" = "200" ] && break
+    sleep 2
+done
+check "webui: GET :5000/ → 200" test "$WUI_STATUS" = "200"
+curl -sf --max-time 5 http://127.0.0.1:5000/ > "$EVIDENCE/webui-root.html" 2>/dev/null || true
+check "webui: root body contains Frigate marker" grep -q 'Frigate' "$EVIDENCE/webui-root.html"
+# 2. Hashed JS asset: 200 + application/javascript MIME (1y cache confirms /assets/ location active).
+#    Asset URL discovered dynamically from the live snap's index.html at runtime.
+ASSET_PATH=$(grep -o 'assets/index-[^"]*\.js' /snap/frigate/current/opt/frigate/web/index.html 2>/dev/null | head -1)
+if [ -n "$ASSET_PATH" ]; then
+    ASSET_STATUS=$(curl -sI -o "$EVIDENCE/asset-headers.txt" -w '%{http_code}' \
+        --max-time 5 "http://127.0.0.1:5000/${ASSET_PATH}" 2>/dev/null)
+    check "webui: hashed JS asset ($ASSET_PATH) → 200" test "$ASSET_STATUS" = "200"
+    check "webui: hashed JS asset MIME is application/javascript" \
+        grep -qi 'application/javascript' "$EVIDENCE/asset-headers.txt"
+    echo "  webui finding: $ASSET_PATH → HTTP $ASSET_STATUS application/javascript (1y public cache, /assets/ location)"
+else
+    echo "  webui finding: no index-*.js found in snap index.html (unexpected — check snap prime)"
+fi
+# 3. GET :5000/api/version → 200 without auth headers (nginx auth_request + auth.enabled=false).
+#    /auth returns 202 + remote-user:viewer/remote-role:viewer; these are forwarded to Frigate.
+APIVER_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5000/api/version 2>/dev/null)
+check "webui: GET :5000/api/version → 200 (no auth headers)" test "$APIVER_STATUS" = "200"
+echo "  webui finding: /api/version HTTP $APIVER_STATUS without auth headers (/auth 202 viewer headers forwarded)"
+# 4. vod manifest check
+# URL shape (verified from Frigate source frigate/api/media.py line 853 + nginx-vod-module config):
+#   GET :5000/vod/{camera}/start/{start_ts}/end/{end_ts}/index.m3u8
+# nginx-vod-module (mapped mode, vod_upstream_location /api) makes internal subrequest to
+#   /api/vod/{camera}/start/{ts}/end/{ts} → nginx /api/vod/ location proxies to
+#   Frigate at /vod/{camera}/start/{ts}/end/{ts} → returns JSON clip mapping →
+#   nginx-vod-module builds HLS manifest with #EXTM3U header.
+# Dynamic timestamps: poll the live recordings API for testclip (continuous recording enabled).
+# UPSTREAM BUG (v0.17.2, found by this check's first gate run): /{camera}/recordings default
+# after/before are datetime.now() evaluated at IMPORT time (Python default-arg trap,
+# frigate/api/media.py:632-633). 'before' freezes at daemon boot and the filter is
+# start_time <= before, so every segment recorded AFTER boot is invisible to the bare route —
+# the poll saw [] for 90s while the DB held rows. Explicit after/before params (recomputed each
+# iteration) bypass the frozen defaults. M7/upstream: report; UI is immune (always sends params).
+VOD_START=""
+VOD_END=""
+for _vod_i in $(seq 1 18); do
+    VOD_NOW=$(date +%s)
+    VOD_REC=$(curl -sf --max-time 5 \
+        "http://127.0.0.1:5000/api/testclip/recordings?after=$((VOD_NOW-3600))&before=$((VOD_NOW+60))" 2>/dev/null)
+    if echo "$VOD_REC" | jq -e 'length > 0' >/dev/null 2>&1; then
+        VOD_START=$(echo "$VOD_REC" | jq -r '.[0].start_time')
+        VOD_END=$(echo "$VOD_REC" | jq -r '.[-1].end_time')
+        break
+    fi
+    sleep 5
+done
+if [ -n "$VOD_START" ] && [ -n "$VOD_END" ]; then
+    curl -sf --max-time 10 \
+        "http://127.0.0.1:5000/vod/testclip/start/${VOD_START}/end/${VOD_END}/index.m3u8" \
+        > "$EVIDENCE/vod-manifest.txt" 2>/dev/null || true
+    check "vod: GET :5000/vod/testclip/start/../end/../index.m3u8 → 200 + #EXTM3U" \
+        grep -q '#EXTM3U' "$EVIDENCE/vod-manifest.txt"
+    echo "  vod finding: shape=testclip/start/${VOD_START}/end/${VOD_END}/index.m3u8 segments=$(grep -c '^#EXTINF' "$EVIDENCE/vod-manifest.txt" 2>/dev/null || echo 0)"
+else
+    fail_ "vod: GET :5000/vod/testclip/start/../end/../index.m3u8 → 200 + #EXTM3U"
+    echo "  vod finding: FAIL — no recordings in DB after 90s poll; check recording maintainer logs"
+fi
+# 5. go2rtc proxy check: GET :5000/live/webrtc/webrtc.html → 200
+# Nginx /live/webrtc/webrtc.html proxies to go2rtc :1984/webrtc.html (plain HTTP GET, no WebSocket).
+# Chosen as the simplest HTTP-answerable go2rtc proxy path (vs /live/mse/api/ws WebSocket upgrade
+# and /api/go2rtc/webrtc POST-only). Proves the go2rtc upstream is reachable via nginx.
+GO2RTC_PROXY_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 \
+    http://127.0.0.1:5000/live/webrtc/webrtc.html 2>/dev/null)
+check "go2rtc proxy: GET :5000/live/webrtc/webrtc.html → 200" test "$GO2RTC_PROXY_STATUS" = "200"
+echo "  go2rtc proxy finding: nginx /live/webrtc/webrtc.html → go2rtc :1984/webrtc.html; HTTP $GO2RTC_PROXY_STATUS"
 
 # --- M3: money test (Task 5) ---
 # Routes verified against live daemon (v0.17.2): /events and /stats (NO /api/ prefix).
@@ -379,7 +475,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -496,6 +592,13 @@ echo "  frigate finding: frigate.detecto OpenVINO GPU cap (sys_admin, perfmon) +
 #   Production snap: add `setgid` to the nginx app's capability grants if worker user!=root.
 # Evidence (journal 2026-07-06 01:47:46): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.nginx" pid=2810997 comm="nginx" capability=6  capname="setgid"
 echo "  nginx finding: nginx worker CAP_SETGID denial at startup (worker privilege setup; benign, non-blocking, one per CPU core) — nginx active and serving (M4 Task 2)"
+# FINDING (M4 Task 4): nginx CAP_SETUID denial — the setuid() sibling of the CAP_SETGID arm above,
+#   from the same worker-process privilege setup (ngx_spawn_process -> initgroups/setuid path).
+#   With `user root;` the call is a uid-0 no-op, but AppArmor denies the capability check itself.
+#   Fires less often than setgid (observed once, cache-manager process spawn window); benign,
+#   non-blocking — nginx serves throughout the same run. Arm (profile+capname): nginx.*capname="setuid".
+# Evidence (journal 2026-07-06 02:54:22): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.nginx" pid=2909768 comm="nginx" capability=7  capname="setuid"
+echo "  nginx finding: nginx CAP_SETUID denial (setuid sibling of the setgid arm, worker/cache-manager privilege setup; benign, non-blocking) — M4 Task 4"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true
