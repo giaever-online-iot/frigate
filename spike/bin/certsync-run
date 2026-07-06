@@ -1,0 +1,26 @@
+#!/bin/sh
+# M5: upstream's certsync daemon - reload nginx when the on-disk cert changes.
+set -u
+LEFILE=/etc/letsencrypt/live/frigate/fullchain.pem
+PORT=8971
+echo "certsync-run: starting (watching $LEFILE vs :$PORT, 60s interval)"
+while :; do
+    # Upstream parity: with TLS disabled certsync idles forever. Our rendered config is the
+    # settings source (spike posture keeps tls enabled; branch exists, unexercised by harness).
+    if grep -A1 '^tls:' "$SNAP_DATA/config/config.yml" 2>/dev/null | grep -q 'enabled: false'; then
+        sleep 9999; continue
+    fi
+    if [ ! -e "$LEFILE" ]; then
+        echo "certsync-run: ERROR TLS certificate does not exist: $LEFILE"
+        sleep 60; continue
+    fi
+    LEPRINT=$("$SNAP/usr/bin/openssl" x509 -in "$LEFILE" -fingerprint -noout 2>&1 || echo failed)
+    LIVEPRINT=$(echo | "$SNAP/usr/bin/openssl" s_client -showcerts -connect 127.0.0.1:$PORT 2>/dev/null \
+        | "$SNAP/usr/bin/openssl" x509 -fingerprint -noout 2>&1 || echo failed)
+    if [ "$LEPRINT" != failed ] && [ "$LIVEPRINT" != failed ] && [ "$LEPRINT" != "$LIVEPRINT" ]; then
+        echo "certsync-run: cert drift detected - reloading nginx"
+        "$SNAP/usr/local/nginx/sbin/nginx" -p "$SNAP_DATA/nginx" -c "$SNAP_DATA/nginx/conf/nginx.conf" -s reload \
+            || echo "certsync-run: ERROR nginx reload failed"
+    fi
+    sleep 60
+done

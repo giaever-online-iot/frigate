@@ -148,6 +148,7 @@ apps:
   certsync:
     command: bin/certsync-run
     daemon: simple
+    restart-condition: on-failure
     after: [nginx]
     plugs: [network]
 

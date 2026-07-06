@@ -118,6 +118,16 @@ apps:
     after: [frigate]
     plugs: [network, network-bind]
 
+  # --- certsync: Let's Encrypt reload loop (M5 Task 3) ----------------------
+  # Mirrors upstream s6-rc.d/certsync/run: polls on-disk cert vs live TLS fingerprint
+  # every 60 s and signals nginx to reload when they diverge (cert rotation hook).
+  certsync:
+    command: bin/certsync-run
+    daemon: simple
+    restart-condition: on-failure
+    after: [nginx]
+    plugs: [network]
+
 parts:
   python311:
     plugin: nil
