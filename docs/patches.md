@@ -44,6 +44,9 @@ committed patch files for determinism (upstream uses inline `sed` and a heredoc 
 |---|---|---|
 | `spike/patches/nginx/0001-vod-max-clips-1080.patch` | `sed -i 's/MAX_CLIPS (128)/MAX_CLIPS (1080)/g' vod/media_set.h` in `build_nginx.sh` | Raise the per-playlist clip cap from 128 to 1080 to support longer HLS recordings. |
 | `spike/patches/nginx/0002-vod-rbsp-trailing-bits.patch` | heredoc `patch -p1` in `build_nginx.sh` (references kaltura/nginx-vod-module#4572) | Return `TRUE` early in `avc_hevc_parser_rbsp_trailing_bits` to tolerate non-conforming RBSP trailing bits in H.264/H.265 streams (Frigate issue #4572). |
+| `spike/patches/nginx/0003-vod-gcc15-exit-process-prototype.patch` | **OUR portability patch — not in upstream recipe** | Fix `ngx_http_vod_exit_process` K&R empty-param declaration and definition: GCC 15 (core26) makes the mismatch with the struct's `void (*)(ngx_cycle_t *)` slot a hard error. Trip-wire: patch will fail to apply if upstream vod ever fixes the prototype, surfacing the redundancy immediately at build time — drop when that happens. |
 
 Rebase: re-apply against the nginx-vod-module version pinned in snapcraft.yaml; upstream
 Frigate's `build_nginx.sh` is the authority — check it on each Frigate tag bump.
+Patch 0003 is OUR portability fix (not from upstream recipe); drop it if/when upstream
+nginx-vod-module fixes the prototype itself.

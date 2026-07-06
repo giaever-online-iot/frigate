@@ -1,0 +1,46 @@
+GCC 15 makes the mismatch between a K&R empty-param declaration/definition and
+a function-pointer type that carries explicit parameters a hard error
+(previously an implicit-function-declaration warning that could be suppressed).
+
+ngx_http_vod_module.c line ~219 declares:
+    static void ngx_http_vod_exit_process();
+and the definition at line ~3328 also uses empty parens.  Both are assigned to
+struct slots typed `void (*)(ngx_cycle_t *)` (init/exit_process, exit_master),
+so GCC 15 / core26 rejects the compilation unit outright.
+
+Fix: give declaration and definition the explicit `(ngx_cycle_t *cycle)` signature
+matching the struct's function-pointer type; silence the unused-param diagnostic
+with the conventional nginx `(void) cycle;` guard.
+
+Trip-wire: if upstream nginx-vod-module ever fixes this prototype the patch will
+fail to apply (context mismatch), surfacing the redundancy immediately at build
+time -- intentional per M4 review guidance.
+
+Applies to: nginx-vod-module 1.31
+GCC version that exposed this: gcc-15 (Ubuntu 25.04 / core26)
+Author: Frigate snap M4 portability fix (not upstream vod patch)
+
+--- a/ngx_http_vod_module.c
++++ b/ngx_http_vod_module.c
+@@ -216,7 +216,7 @@
+ static ngx_int_t ngx_http_vod_run_state_machine(ngx_http_vod_ctx_t *ctx);
+ static ngx_int_t ngx_http_vod_send_notification(ngx_http_vod_ctx_t *ctx);
+ static ngx_int_t ngx_http_vod_init_process(ngx_cycle_t *cycle);
+-static void ngx_http_vod_exit_process();
++static void ngx_http_vod_exit_process(ngx_cycle_t *cycle);
+ 
+ static ngx_int_t ngx_http_vod_init_file_reader_with_fallback(ngx_http_request_t *r, ngx_str_t* path, uint32_t flags, void** context);
+ static ngx_int_t ngx_http_vod_init_file_reader(ngx_http_request_t *r, ngx_str_t* path, uint32_t flags, void** context);
+@@ -3324,9 +3324,10 @@
+ 	return NGX_OK;
+ }
+ 
+-static void 
+-ngx_http_vod_exit_process()
++static void
++ngx_http_vod_exit_process(ngx_cycle_t *cycle)
+ {
++	(void) cycle;
+ #if (VOD_HAVE_ICONV)
+ 	webvtt_exit_process();
+ #endif // VOD_HAVE_ICONV

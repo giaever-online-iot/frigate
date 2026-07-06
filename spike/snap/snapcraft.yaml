@@ -259,9 +259,11 @@ parts:
       wget -nv -O set-misc.tar.gz "https://github.com/openresty/set-misc-nginx-module/archive/refs/tags/v0.33.tar.gz"
       echo "cd5e2cc834bcfa30149e7511f2b5a2183baf0b70dc091af717a89a64e44a2985  set-misc.tar.gz" | sha256sum -c -
       mkdir -p nginx-set-misc-module && tar -zxf set-misc.tar.gz -C nginx-set-misc-module --strip-components=1
-      # vod patches: MAX_CLIPS 128->1080; rbsp-trailing-bits tolerance (frigate#4572)
+      # vod patches: MAX_CLIPS 128->1080; rbsp-trailing-bits tolerance (frigate#4572);
+      # GCC 15 exit_process prototype fix (our portability patch, not upstream)
       patch -d nginx-vod-module -p1 < "$CRAFT_PROJECT_DIR/patches/nginx/0001-vod-max-clips-1080.patch"
       patch -d nginx-vod-module -p1 < "$CRAFT_PROJECT_DIR/patches/nginx/0002-vod-rbsp-trailing-bits.patch"
+      patch -d nginx-vod-module -p1 < "$CRAFT_PROJECT_DIR/patches/nginx/0003-vod-gcc15-exit-process-prototype.patch"
       cd nginx
       ./configure --prefix=/usr/local/nginx \
         --with-file-aio \
@@ -275,7 +277,7 @@ parts:
         --add-module=../nginx-set-misc-module \
         --add-module=../nginx-vod-module \
         --add-module=../nginx-secure-token-module \
-        --with-cc-opt="-O3 -Wno-error=implicit-fallthrough -Wno-incompatible-pointer-types"
+        --with-cc-opt="-O3 -Wno-error=implicit-fallthrough"
       make -j"$(nproc)"
       make install DESTDIR="$CRAFT_PART_INSTALL"
       rm -rf "$CRAFT_PART_INSTALL/usr/local/nginx/html" "$CRAFT_PART_INSTALL/usr/local/nginx/conf"/*.default
