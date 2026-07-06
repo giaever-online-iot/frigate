@@ -11,6 +11,11 @@ export DEFAULT_FFMPEG_VERSION="7.0"
 export INCLUDED_FFMPEG_VERSIONS="8.0:7.0:5.0"
 
 mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" "$SNAP_COMMON/db" /tmp/cache
+# Cache is staging-only and safe to clear at daemon start; stale segments from removed
+# cameras crash the recording maintainer (KeyError, observed M4 Task 4); private tmp
+# outlives even snap remove --purge. Also safe on restarts: frigate re-stages in-flight
+# segments; recording loses at most the segment being staged at crash time.
+rm -rf -- "${FRIGATE_CACHE_DIR:?}"/*
 
 # MESA content mount (gpu extension cleanup strips libGL from the snap)
 MESA_LIB="$SNAP/gpu-2604/usr/lib/x86_64-linux-gnu"

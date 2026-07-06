@@ -33,6 +33,17 @@ if [ "${1:-}" = "--provision-livecam" ]; then
   exit 0
 fi
 
+# Self-healing: if a prior aborted run couldn't restore the livecam secret (snap was gone at
+# EXIT trap time), it was moved to a deterministic stash path. Recover it now if the snap is
+# installed and the credential is missing — no content echoed, just the path.
+if [ -f "/var/tmp/frigate-livecam-url.stash" ] && \
+   [ ! -f "/var/snap/$SNAP_NAME/common/livecam-url" ] && \
+   [ -d "/var/snap/$SNAP_NAME/common" ]; then
+  echo "RECOVER: restoring livecam secret from /var/tmp/frigate-livecam-url.stash"
+  install -m 0600 -o root -g root /var/tmp/frigate-livecam-url.stash \
+    "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f /var/tmp/frigate-livecam-url.stash
+fi
+
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
 # Capture expanded snapcraft yaml (gpu extension evidence); use abs path since subshell cd's into spike/
 ABS_EVIDENCE="$(pwd)/$EVIDENCE"
@@ -44,7 +55,23 @@ if [ "${1:-}" != "--skip-install" ]; then
   # the purge/reinstall cycle: stash before remove, restore after install. Never echo its content.
   # M4 Task 0 hardening: EXIT trap — on mid-run abort the root-0600 copy must not persist in /tmp.
   LIVECAM_STASH=""
-  trap '[ -n "${LIVECAM_STASH:-}" ] && rm -f "$LIVECAM_STASH"' EXIT
+  # EXIT trap: restore-or-preserve semantics — never destroy the operator's secret.
+  # If the stash exists and the target is gone: restore when snap is present, or move to a
+  # deterministic root-0600 path when snap is absent. Idempotent with the explicit restore below.
+  trap '
+    if [ -n "${LIVECAM_STASH:-}" ] && [ -f "${LIVECAM_STASH}" ]; then
+      if [ ! -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
+        if [ -d "/var/snap/$SNAP_NAME/common" ]; then
+          install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f "$LIVECAM_STASH"
+        else
+          mv "$LIVECAM_STASH" /var/tmp/frigate-livecam-url.stash && \
+            echo "STASH: livecam secret preserved at /var/tmp/frigate-livecam-url.stash (snap absent; recover with: sudo tests/spike-smoke.sh or --provision-livecam)"
+        fi
+      else
+        rm -f "$LIVECAM_STASH"
+      fi
+    fi
+  ' EXIT
   if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
     LIVECAM_STASH=$(mktemp)
     cp -p "/var/snap/$SNAP_NAME/common/livecam-url" "$LIVECAM_STASH"
@@ -101,7 +128,10 @@ check "layout probe complete" test "$(jqr layout '.status')" = "complete"
 # FINDING: layout /config is rejected at snap pack time ("defines a new top-level directory").
 echo "  layout finding: /config NOT in snap layout (pack-time rejection); runtime probe: ok=$(jqr layout '.writes."/config/probe.txt".ok // "N/A"') err=$(jqr layout '.writes."/config/probe.txt".error // "-"')"
 check "layout: /etc/letsencrypt -> SNAP_DATA" grep -q "$TOK" /var/snap/$SNAP_NAME/current/letsencrypt/probe.txt
-check "private /tmp/cache holds token" sh -c "grep -rq '$TOK' /tmp/snap-private-tmp/snap.$SNAP_NAME/tmp/cache/ 2>/dev/null"
+# Fix 1 (M4 Task 4): frigate-run now clears /tmp/cache at startup — a live filesystem grep
+# would always fail. Check layout.json instead: the probe captures the write result at probe
+# time (before frigate-run starts), so the evidence outlives the cache clear.
+check "private /tmp/cache (staging): layout probe write ok" sh -c "jq -e '.writes.\"/tmp/cache/probe.txt\".ok == true' \"$RESULTS/layout.json\""
 
 check "daemons run on python 3.11" test "$(jqr runtime '.version_major_minor')" = "3.11"
 
@@ -317,6 +347,7 @@ if [ -n "$ASSET_PATH" ]; then
         grep -qi 'application/javascript' "$EVIDENCE/asset-headers.txt"
     echo "  webui finding: $ASSET_PATH → HTTP $ASSET_STATUS application/javascript (1y public cache, /assets/ location)"
 else
+    fail_ "webui: hashed JS asset — no assets/index-*.js in snap index.html"
     echo "  webui finding: no index-*.js found in snap index.html (unexpected — check snap prime)"
 fi
 # 3. GET :5000/api/version → 200 without auth headers (nginx auth_request + auth.enabled=false).
