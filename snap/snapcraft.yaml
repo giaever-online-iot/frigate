@@ -258,6 +258,7 @@ parts:
       - vainfo
       - jq
       - curl
+      - openssl                    # TLS cert generation (nginx-run) + certsync fingerprint compare
     organize:
       # the python package + migrations live under /opt/frigate
       frigate: opt/frigate/frigate

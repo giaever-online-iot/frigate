@@ -567,14 +567,20 @@ check "net: :5000 NOT all-interfaces" sh -c "! ss -tln | grep -qE '0\.0\.0\.0:50
 check "net: :5001 loopback-only (127.0.0.1:5001 bound)" sh -c "ss -tln | grep -q '127\.0\.0\.1:5001'"
 check "net: :5001 NOT all-interfaces (X-Server-Port spoofing surface sealed)" sh -c "! ss -tln | grep -qE '0\.0\.0\.0:5001|\[\:\:\]:5001'"
 check "net: :8971 non-loopback (0.0.0.0:8971 bound)" sh -c "ss -tln | grep -q '0\.0\.0\.0:8971'"
+# go2rtc control API/UI: loopback-only (controller ruling, final-review wave).
+# Browsers reach go2rtc via nginx /live/* proxy; no anonymous LAN exposure.
+check "net: :1984 loopback-only (127.0.0.1:1984 bound)" sh -c "ss -tln | grep -q '127\.0\.0\.1:1984'"
+check "net: :1984 NOT all-interfaces (go2rtc control API/UI sealed)" sh -c "! ss -tln | grep -qE '0\.0\.0\.0:1984|\[\:\:\]:1984'"
 ss -tln > "$EVIDENCE/ss-tln.txt" 2>/dev/null || true
-echo "  net finding: $(grep -E ':5000|:5001|:8971' "$EVIDENCE/ss-tln.txt" 2>/dev/null | sed 's/  */ /g' | tr '\n' '|')"
+echo "  net finding: $(grep -E ':5000|:5001|:8971|:1984' "$EVIDENCE/ss-tln.txt" 2>/dev/null | sed 's/  */ /g' | tr '\n' '|')"
 
 # Money check 5: certsync — automated cert-swap proof (Task 3 manual → automated)
 # Swap the cert on disk; poll openssl s_client fingerprint; assert changed ≤90 s + journal reload line.
 OLD_FP=$(echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -fingerprint -noout 2>/dev/null || echo "failed")
-# Generate a new cert (RSA-2048 for speed in harness; different key → different fingerprint)
-openssl req -new -newkey rsa:2048 -days 1 -nodes -x509 \
+# Generate a new cert (RSA-2048 for speed in harness; different key → different fingerprint).
+# -days 7: partial-re-run expiry cliff — -days 1 cert expires within the gate if anything
+# stalls; 7 days gives a safe window without polluting the live cert store.
+openssl req -new -newkey rsa:2048 -days 7 -nodes -x509 \
     -subj "/O=FRIGATE TEST CERT/CN=certsync-harness" \
     -keyout /tmp/m5-cs-key.pem \
     -out /tmp/m5-cs-cert.pem 2>/dev/null

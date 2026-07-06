@@ -3,7 +3,12 @@
 log:
   level: info
 api:
-  listen: ":1984"
+  # Loopback-only: go2rtc control API/UI must not be an anonymous LAN surface.
+  # Controller ruling (final-review): extends the loopback principle that already
+  # binds :5000/:5001. Browsers reach go2rtc via nginx's authed /live/* proxy;
+  # frigate + nginx consume it via loopback. Media ports 8554/8555 are unchanged.
+  # User may override to ":1984" to expose the go2rtc UI directly on LAN.
+  listen: "127.0.0.1:1984"
 rtsp:
   listen: ":8554"
 webrtc:

@@ -18,7 +18,7 @@ if [ ! -f /etc/letsencrypt/live/frigate/privkey.pem ] || [ ! -f /etc/letsencrypt
     "$SNAP/usr/bin/openssl" req -new -newkey rsa:4096 -days 365 -nodes -x509 \
         -subj "/O=FRIGATE DEFAULT CERT/CN=*" \
         -keyout /etc/letsencrypt/live/frigate/privkey.pem \
-        -out /etc/letsencrypt/live/frigate/fullchain.pem 2>/dev/null
+        -out /etc/letsencrypt/live/frigate/fullchain.pem
 fi
 
 # Render all conf templates into $SNAP_DATA/nginx/conf/

@@ -4,6 +4,15 @@ set -u
 LEFILE=/etc/letsencrypt/live/frigate/fullchain.pem
 PORT=8971
 echo "certsync-run: starting (watching $LEFILE vs :$PORT, 60s interval)"
+# Cold-start gate: wait up to 60 s for nginx to write its pid file before the
+# first poll. Without this, a drift detected before nginx has written
+# $SNAP_DATA/nginx/nginx.pid causes a cosmetic "open() nginx.pid failed" error;
+# nginx declares `after: [nginx]` but the pid file is written asynchronously
+# after master-process fork. Self-heals in 60 s; gate eliminates the log noise.
+_pid_i=0
+while [ ! -f "$SNAP_DATA/nginx/nginx.pid" ] && [ $_pid_i -lt 30 ]; do
+    sleep 2; _pid_i=$((_pid_i+1))
+done
 while :; do
     # Upstream parity: with TLS disabled certsync idles forever. Our rendered config is the
     # settings source (spike posture keeps tls enabled; branch exists, unexercised by harness).
