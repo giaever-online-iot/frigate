@@ -36,9 +36,11 @@ pedestrian test clip. Both routes are recorded here so they are not re-litigated
 ## Upstream-recipe build patches (nginx/vod)
 
 These patches are applied to `nginx-vod-module 1.31` during the nginx snap part build (M4
-Task 1). They are NOT downstream divergences from Frigate — they are carried verbatim from
-Frigate's own Docker build recipe (`docker/main/build_nginx.sh` @ v0.17.2), expressed as
-committed patch files for determinism (upstream uses inline `sed` and a heredoc `patch`).
+Task 1). Patches 0001 and 0002 are NOT downstream divergences from Frigate — they are carried
+verbatim from Frigate's own Docker build recipe (`docker/main/build_nginx.sh` @ v0.17.2),
+expressed as committed patch files for determinism (upstream uses inline `sed` and a heredoc
+`patch`). Patch 0003 is a snap portability patch, not in the upstream recipe: it fixes a GCC 15
+hard error introduced by core26's compiler — see the Purpose column and the Erratum note below.
 
 | Patch file | Source in upstream recipe | Purpose |
 |---|---|---|
@@ -50,3 +52,12 @@ Rebase: re-apply against the nginx-vod-module version pinned in snapcraft.yaml; 
 Frigate's `build_nginx.sh` is the authority — check it on each Frigate tag bump.
 Patch 0003 is OUR portability fix (not from upstream recipe); drop it if/when upstream
 nginx-vod-module fixes the prototype itself.
+
+### Erratum — 0003 patch header diagnostic name
+
+The header comment of `spike/patches/nginx/0003-vod-gcc15-exit-process-prototype.patch`
+describes the GCC 15 change as promoting an "implicit-function-declaration warning" to a hard
+error. The correct diagnostic is `-Wincompatible-pointer-types`. The patch body is correct and
+applies cleanly — header lines are not processed by `patch`. Confirming evidence: the cc-opt
+flag removed in Fix Round 1 was `-Wno-incompatible-pointer-types`, and the GCC error line in
+the build log names `[-Wincompatible-pointer-types]` (task-1-report.md verbatim).
