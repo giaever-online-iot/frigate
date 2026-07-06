@@ -3,11 +3,18 @@
 # version pinned to CURRENT_CONFIG_VERSION (0.17-0) so migrate_frigate_config() does not rewrite.
 mqtt:
   enabled: false
-# M4 Task 2: anonymous auth so nginx's auth_request /auth subrequest always succeeds.
+# M5 Task 4: real auth — enabled: true + cookie_secure: true (TLS on :8971; Secure cookie correct).
 # Placed OUTSIDE the LIVECAM-BEGIN/END cameras block so both render branches keep it.
-# With auth.enabled=false the /auth endpoint returns anonymous-user headers (no login required).
+# Fresh bootstrap: purge cycle (snap remove --purge) empties DB → init_auth logs admin password once:
+#   journal pattern: ***    Password: <32-hex>   ***  (frigate/app.py init_auth)
+# cookie_secure: true — Secure flag on frigate_token: browsers only send token over HTTPS.
 auth:
-  enabled: false
+  enabled: true
+  cookie_secure: true
+# M5 Task 4: explicit tls: enabled: true (certsync's disabled-branch grep reads this block).
+# Frigate Python app TLS awareness; nginx TLS is configured in listen.conf (Task 2 plumbing).
+tls:
+  enabled: true
 database:
   path: __SNAP_COMMON__/db/frigate.db
 detectors:

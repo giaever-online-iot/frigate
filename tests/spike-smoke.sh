@@ -306,7 +306,8 @@ check "sidecar written" sh -c "grep -qE '^0\.17\.2' /var/snap/frigate/common/db/
 check "nginx service active" sh -c "snap services frigate.nginx | grep -q ' active'"
 # Verify: /api/version via nginx (:5000) returns same body as direct :5001/version.
 # Route: nginx strips /api prefix, proxies to frigate_api (:5001) via rewrite ^/api(/.*)$ $1.
-# No auth headers sent — auth.enabled=false in config makes /auth return 202 Accepted for any request.
+# M5: auth.enabled=true; :5000 internal port stays anonymous via nginx X-Server-Port:5000 short-circuit.
+# nginx /api/version includes auth_request.conf; via :5000 nginx injects X-Server-Port:5000 → auth() 202.
 # Retry loop (2-3 iterations, sleep 2): closes the systemd-active-vs-bound window where the
 # nginx unit is reported active but the worker socket is not yet accepting connections.
 NGINX_VER=""
@@ -319,10 +320,12 @@ FRIGATE_VER=$(curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: adm
 [ -n "$NGINX_VER" ] || fail_ "nginx proxies /api/version == :5001/version (no auth headers) — NGINX_VER empty (nginx not responding)"
 check "nginx proxies /api/version == :5001/version (no auth headers)" test "$NGINX_VER" = "$FRIGATE_VER"
 echo "  nginx finding: /api/version=$NGINX_VER (== :5001/version; no auth headers required)"
-# /auth endpoint: 202 Accepted confirms auth.enabled=false anonymous-accept path
-AUTH_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5001/auth 2>/dev/null)
-check "frigate: /auth returns 202 (anonymous accept)" test "$AUTH_STATUS" = "202"
-echo "  nginx finding: /auth status=$AUTH_STATUS (202 Accepted = anonymous auth path confirmed)"
+# M5: :5000 internal-port anonymity — nginx auth_request sends X-Server-Port:5000 → auth() 202.
+# Direct :5001/auth without X-Server-Port returns 401 with auth=true (not tested here by design).
+# Verify anonymity via protected path: :5000/api/version → 200 proves no-JWT anonymous accept.
+HTTP_ANON_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5000/api/version 2>/dev/null)
+check "frigate: :5000 internal-port anonymous (X-Server-Port:5000 → 202; auth=true)" test "$HTTP_ANON_STATUS" = "200"
+echo "  nginx finding: :5000 anonymous status=$HTTP_ANON_STATUS (X-Server-Port==5000 short-circuit; no JWT needed on internal port)"
 echo "  nginx finding: error_log/access_log → files in \$SNAP_DATA/nginx/logs/ (deviation: /dev/stderr not openable in systemd snap unit — journal socket, not pipe; ENXIO on open); M7: configure logrotate for \$SNAP_DATA/nginx/logs/{error,access}.log; no journald capture while stderr is a socket fd"
 
 # --- M4: web UI + vod + go2rtc proxy gate (Task 4) ---
@@ -498,6 +501,115 @@ check "gpu: openvino detector reporting + camera pipeline alive" sh -c "jq -e '.
 echo "  gpu finding: ov inference_speed=$(jq -r '.detectors.ov.inference_speed' "$EVIDENCE/frigate-stats.json" 2>/dev/null)ms"
 # Recordings on disk
 check "recordings: files under SNAP_COMMON" sh -c "find /var/snap/frigate/common/media/frigate/recordings -name '*.mp4' 2>/dev/null | head -1 | grep -q mp4"
+
+# --- M5: TLS + auth + certsync (Task 4 — THE MILESTONE MONEY CHECKS) ---
+
+# Money check 1: HTTPS web UI — GET :8971/ → 200 + Frigate marker + cert subject
+# nginx /: no auth_request (static assets exempt); serves web UI on TLS without JWT.
+TLS_WUI_STATUS=""
+for _tls_i in 1 2 3; do
+    TLS_WUI_STATUS=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://127.0.0.1:8971/ 2>/dev/null)
+    [ "$TLS_WUI_STATUS" = "200" ] && break
+    sleep 2
+done
+check "https: GET :8971/ → 200" test "$TLS_WUI_STATUS" = "200"
+curl -sk --max-time 5 https://127.0.0.1:8971/ > "$EVIDENCE/https-root.html" 2>/dev/null || true
+check "https: root body contains Frigate marker" grep -q 'Frigate' "$EVIDENCE/https-root.html"
+CERT_SUBJ=$(echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -subject -noout 2>/dev/null || echo "")
+echo "$CERT_SUBJ" > "$EVIDENCE/cert-subj.txt"
+check "https: cert subject contains FRIGATE DEFAULT CERT" grep -q 'FRIGATE DEFAULT CERT' "$EVIDENCE/cert-subj.txt"
+echo "  tls finding: cert subject=$(cat "$EVIDENCE/cert-subj.txt")"
+
+# Money check 2: auth gate — unauthenticated :8971 API → 401
+# nginx /api/version includes auth_request.conf; X-Server-Port:8971 ≠ 5000 → JWT validation → 401.
+AUTH_401=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://127.0.0.1:8971/api/version 2>/dev/null)
+check "auth: :8971 API unauthenticated → 401" test "$AUTH_401" = "401"
+echo "  auth finding: :8971 unauthenticated /api/version=$AUTH_401 (401 = JWT gate via X-Server-Port:8971)"
+
+# Money check 3: login → cookie → 200 (THE M5 MONEY LINE)
+# Bootstrap admin password: logged once on first start after snap remove --purge (empty DB).
+# DISCIPLINE: capture to shell var only; never echo, never write to evidence files.
+ADMIN_PW=$(journalctl -u snap.frigate.frigate --since "$MARK" 2>/dev/null \
+    | grep -oP '(?<=\*\*\*    Password: )[0-9a-f]{32}(?=   \*\*\*)' | tail -1)
+if [ -n "$ADMIN_PW" ]; then
+    # POST to /api/login via HTTPS — proves full external TLS chain (-k = self-signed cert accepted)
+    # Payload field: "user" not "username" (Task 1 verified shape, frigate/api/defs/request/app_body.py)
+    LOGIN_STATUS=$(curl -sk --max-time 10 \
+        -c /tmp/m5-gate-cookie.jar \
+        -D /tmp/m5-gate-headers.txt \
+        -H 'Content-Type: application/json' \
+        -d "{\"user\":\"admin\",\"password\":\"$ADMIN_PW\"}" \
+        -o /dev/null -w '%{http_code}' \
+        https://127.0.0.1:8971/api/login 2>/dev/null)
+    LOGIN_COOKIE=$(grep -i 'set-cookie' /tmp/m5-gate-headers.txt 2>/dev/null | grep -o 'frigate_token' | head -1 || echo "")
+    check "auth: POST https://127.0.0.1:8971/api/login → 200" test "$LOGIN_STATUS" = "200"
+    check "auth: login → frigate_token cookie set" test "$LOGIN_COOKIE" = "frigate_token"
+    # Authenticated GET via HTTPS using the session cookie (THE M5 MONEY LINE)
+    AUTHED_STATUS=$(curl -sk --max-time 5 \
+        -b /tmp/m5-gate-cookie.jar \
+        -o /dev/null -w '%{http_code}' \
+        https://127.0.0.1:8971/api/version 2>/dev/null)
+    check "auth: authed GET https://127.0.0.1:8971/api/version → 200 (M5 MONEY LINE)" test "$AUTHED_STATUS" = "200"
+    echo "  auth finding: login=$LOGIN_STATUS cookie=frigate_token authed_get=$AUTHED_STATUS — JWT gate proven end-to-end"
+    # Discard derived credentials (JWT in cookie jar + response headers — not the password)
+    rm -f /tmp/m5-gate-cookie.jar /tmp/m5-gate-headers.txt
+else
+    fail_ "auth: POST https://127.0.0.1:8971/api/login → 200 (bootstrap password not in journal)"
+    fail_ "auth: login → frigate_token cookie set"
+    fail_ "auth: authed GET https://127.0.0.1:8971/api/version → 200 (M5 MONEY LINE)"
+    echo "  auth finding: bootstrap password not found in journal — full gate (snap remove --purge) required"
+fi
+
+# Money check 4: port binding — :5000 and :5001 loopback-only; :8971 non-loopback
+# :5001 loopback-only seals X-Server-Port spoofing surface (cannot forge port=5000 from off-host).
+check "net: :5000 loopback-only (127.0.0.1:5000 bound)" sh -c "ss -tln | grep -q '127\.0\.0\.1:5000'"
+check "net: :5000 NOT all-interfaces" sh -c "! ss -tln | grep -qE '0\.0\.0\.0:5000|\[\:\:\]:5000'"
+check "net: :5001 loopback-only (127.0.0.1:5001 bound)" sh -c "ss -tln | grep -q '127\.0\.0\.1:5001'"
+check "net: :5001 NOT all-interfaces (X-Server-Port spoofing surface sealed)" sh -c "! ss -tln | grep -qE '0\.0\.0\.0:5001|\[\:\:\]:5001'"
+check "net: :8971 non-loopback (0.0.0.0:8971 bound)" sh -c "ss -tln | grep -q '0\.0\.0\.0:8971'"
+ss -tln > "$EVIDENCE/ss-tln.txt" 2>/dev/null || true
+echo "  net finding: $(grep -E ':5000|:5001|:8971' "$EVIDENCE/ss-tln.txt" 2>/dev/null | sed 's/  */ /g' | tr '\n' '|')"
+
+# Money check 5: certsync — automated cert-swap proof (Task 3 manual → automated)
+# Swap the cert on disk; poll openssl s_client fingerprint; assert changed ≤90 s + journal reload line.
+OLD_FP=$(echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -fingerprint -noout 2>/dev/null || echo "failed")
+# Generate a new cert (RSA-2048 for speed in harness; different key → different fingerprint)
+openssl req -new -newkey rsa:2048 -days 1 -nodes -x509 \
+    -subj "/O=FRIGATE TEST CERT/CN=certsync-harness" \
+    -keyout /tmp/m5-cs-key.pem \
+    -out /tmp/m5-cs-cert.pem 2>/dev/null
+CERT_DIR=/var/snap/$SNAP_NAME/current/letsencrypt/live/frigate
+if [ -d "$CERT_DIR" ]; then
+    cp /tmp/m5-cs-cert.pem "$CERT_DIR/fullchain.pem"
+    cp /tmp/m5-cs-key.pem "$CERT_DIR/privkey.pem"
+    SWAP_TS=$(date +%s)
+    rm -f /tmp/m5-cs-key.pem /tmp/m5-cs-cert.pem
+    # Poll up to 100 s (certsync interval = 60 s + nginx reload latency; assertion bound = 90 s)
+    NEW_FP=""
+    ELAPSED_CS=999
+    for _cs_i in $(seq 1 20); do
+        LIVE_FP=$(echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -fingerprint -noout 2>/dev/null || echo "failed")
+        if [ "$LIVE_FP" != "failed" ] && [ "$LIVE_FP" != "$OLD_FP" ]; then
+            NEW_FP="$LIVE_FP"
+            ELAPSED_CS=$(( $(date +%s) - SWAP_TS ))
+            break
+        fi
+        sleep 5
+    done
+    check "certsync: new fingerprint served after cert swap" test -n "$NEW_FP"
+    check "certsync: cert swap → reload ≤90 s (elapsed=${ELAPSED_CS}s)" sh -c "[ $ELAPSED_CS -le 90 ]"
+    RELOAD_LINE=$(journalctl -u snap.frigate.certsync --since "$MARK" 2>/dev/null | grep 'cert drift detected' | tail -1 || echo "")
+    check "certsync: nginx reload logged in journal" test -n "$RELOAD_LINE"
+    echo "  certsync finding: old_fp=$OLD_FP"
+    echo "  certsync finding: new_fp=${NEW_FP:-not-changed} elapsed=${ELAPSED_CS}s"
+    echo "  certsync finding: reload='${RELOAD_LINE:-not-found}'"
+else
+    fail_ "certsync: new fingerprint served after cert swap (cert dir not found: $CERT_DIR)"
+    fail_ "certsync: cert swap → reload ≤90 s"
+    fail_ "certsync: nginx reload logged in journal"
+    echo "  certsync finding: ERROR — cert dir not found at $CERT_DIR"
+    rm -f /tmp/m5-cs-key.pem /tmp/m5-cs-cert.pem
+fi
 
 # --- M3: rollback machinery (Task 4) ---
 # Proof 1: refresh fires the pre-refresh hook -> backup exists.
