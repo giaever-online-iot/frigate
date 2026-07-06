@@ -389,3 +389,21 @@ parts:
     source: config/nginx
     organize:
       '*': config/nginx/
+  # M4 Task 3: upstream web UI built at base=/ for root-path serving via nginx.
+  # DEVIATION: e2e:build absent at v0.17.2; scripts block = dev/build/lint/lint:fix/preview/test/coverage.
+  # build script uses --base=/BASE_PATH/ (Docker substitution token, not root base).
+  # Minimal equivalent: vite build --base=/ (deviation documented in task-3-report.md).
+  # Source isolated via pinned git tag + separate source: local project edits never retrigger npm build.
+  # nginx root: /opt/frigate/web (layout: /opt/frigate -> $SNAP/opt/frigate; see nginx.conf.in line 347).
+  web-ui:
+    plugin: nil
+    source: https://github.com/blakeblackshear/frigate.git
+    source-tag: v0.17.2
+    source-depth: 1
+    build-snaps: [node/20/stable]
+    override-build: |
+      cd "$CRAFT_PART_SRC/web"
+      npm ci
+      node_modules/.bin/vite build --base=/
+      mkdir -p "$CRAFT_PART_INSTALL/opt/frigate/web"
+      cp -r dist/. "$CRAFT_PART_INSTALL/opt/frigate/web/"
