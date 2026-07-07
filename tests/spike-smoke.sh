@@ -26,6 +26,10 @@ command -v jq >/dev/null || { echo "jq required: sudo apt install -y jq"; exit 1
 # Operator provisioning for the live camera (see spike/config/frigate-config.yml LIVECAM block).
 # URL arrives on STDIN (never argv - visible in ps) and is written root-owned 0600:
 #   printf '%s' 'rtsp://user:pass@host:554/path' | sudo tests/spike-smoke.sh --provision-livecam
+# NOTE (M6 final review): --skip-install runs never re-render config.yml (render-once semantics —
+# frigate-run only renders on first start). A livecam provisioned AFTER config.yml was first
+# rendered needs a full run (no --skip-install) — or delete config.yml and restart frigate —
+# before the live-camera money test is armed.
 if [ "${1:-}" = "--provision-livecam" ]; then
   mkdir -p "/var/snap/$SNAP_NAME/common"
   umask 077
@@ -52,36 +56,39 @@ MARK=$(date '+%Y-%m-%d %H:%M:%S')
 ABS_EVIDENCE="$(pwd)/$EVIDENCE"
 (cd spike && snapcraft expand-extensions > "$ABS_EVIDENCE/expanded-snapcraft.yaml" 2>/dev/null) || true
 
+# Live camera secret ($SNAP_COMMON/livecam-url, provisioned once by the operator) must survive
+# the purge/reinstall cycle: stash before remove, restore after install. Never echo its content.
+# M4 Task 0 hardening: EXIT trap — on mid-run abort the root-0600 copy must not persist in /tmp.
+LIVECAM_STASH=""
+# EXIT trap: restore-or-preserve semantics — never destroy the operator's secret.
+# If the stash exists and the target is gone: restore when snap is present, or move to a
+# deterministic root-0600 path when snap is absent. Idempotent with the explicit restore below.
+# M6 final review: hoisted above the --skip-install branch (along with LIVECAM_STASH="" above)
+# so EVERY run registers this trap — --skip-install runs previously had no EXIT handler at all.
+trap '
+  if [ -n "${LIVECAM_STASH:-}" ] && [ -f "${LIVECAM_STASH}" ]; then
+    if [ ! -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
+      if [ -d "/var/snap/$SNAP_NAME/common" ]; then
+        install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f "$LIVECAM_STASH"
+      else
+        mv "$LIVECAM_STASH" /var/tmp/frigate-livecam-url.stash && \
+          echo "STASH: livecam secret preserved at /var/tmp/frigate-livecam-url.stash (snap absent; recover with: sudo tests/spike-smoke.sh or --provision-livecam)"
+      fi
+    else
+      rm -f "$LIVECAM_STASH"
+    fi
+  fi
+  # M6: if the Coral phase died mid-swap, put the OpenVINO default back (idempotent —
+  # CORAL_CFG_BAK is empty unless the phase is mid-flight).
+  if [ -n "${CORAL_CFG_BAK:-}" ] && [ -f "${CORAL_CFG_BAK:-}" ]; then
+    cp -p "$CORAL_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null || true
+    rm -f "$CORAL_CFG_BAK"
+    snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  fi
+' EXIT
+
 if [ "${1:-}" != "--skip-install" ]; then
   [ -n "$SNAP_FILE" ] || { echo "ERROR: no spike/${SNAP_NAME}_*.snap file found - build first (cd spike && snapcraft pack)"; exit 1; }
-  # Live camera secret ($SNAP_COMMON/livecam-url, provisioned once by the operator) must survive
-  # the purge/reinstall cycle: stash before remove, restore after install. Never echo its content.
-  # M4 Task 0 hardening: EXIT trap — on mid-run abort the root-0600 copy must not persist in /tmp.
-  LIVECAM_STASH=""
-  # EXIT trap: restore-or-preserve semantics — never destroy the operator's secret.
-  # If the stash exists and the target is gone: restore when snap is present, or move to a
-  # deterministic root-0600 path when snap is absent. Idempotent with the explicit restore below.
-  trap '
-    if [ -n "${LIVECAM_STASH:-}" ] && [ -f "${LIVECAM_STASH}" ]; then
-      if [ ! -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
-        if [ -d "/var/snap/$SNAP_NAME/common" ]; then
-          install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f "$LIVECAM_STASH"
-        else
-          mv "$LIVECAM_STASH" /var/tmp/frigate-livecam-url.stash && \
-            echo "STASH: livecam secret preserved at /var/tmp/frigate-livecam-url.stash (snap absent; recover with: sudo tests/spike-smoke.sh or --provision-livecam)"
-        fi
-      else
-        rm -f "$LIVECAM_STASH"
-      fi
-    fi
-    # M6: if the Coral phase died mid-swap, put the OpenVINO default back (idempotent —
-    # CORAL_CFG_BAK is empty unless the phase is mid-flight).
-    if [ -n "${CORAL_CFG_BAK:-}" ] && [ -f "${CORAL_CFG_BAK:-}" ]; then
-      cp -p "$CORAL_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null || true
-      rm -f "$CORAL_CFG_BAK"
-      snap restart $SNAP_NAME.frigate 2>/dev/null || true
-    fi
-  ' EXIT
   if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
     LIVECAM_STASH=$(mktemp)
     cp -p "/var/snap/$SNAP_NAME/common/livecam-url" "$LIVECAM_STASH"
@@ -654,7 +661,10 @@ CORAL_CFG=/var/snap/$SNAP_NAME/current/config/config.yml
 if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
   MARK_CORAL=$(date '+%Y-%m-%d %H:%M:%S')
   CORAL_CFG_BAK="/var/snap/$SNAP_NAME/current/config/.config.yml.pre-coral"
-  cp -p "$CORAL_CFG" "$CORAL_CFG_BAK"
+  # FINDING (M6 final review): a leftover backup from an aborted phase holds the GOOD
+  # config (config.yml may still be coral) - never clobber it; the transform below reads
+  # the backup, so a preserved backup also self-heals the aborted state.
+  [ -f "$CORAL_CFG_BAK" ] || cp -p "$CORAL_CFG" "$CORAL_CFG_BAK"
   # Render the coral config by transforming the RENDERED file (preserves the livecam block +
   # credential; template block order is detectors: -> model: -> cameras:, so the replace region
   # is [^detectors:, ^cameras:) ). Never echo config contents (credential embedded).
@@ -780,6 +790,7 @@ if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
       http://127.0.0.1:5001/stats 2>/dev/null | jq -e '.detectors.ov' >/dev/null 2>&1 && { OV_BACK=yes; break; }
   done
   check "coral phase: OpenVINO default restored (ov reporting in /stats)" test "$OV_BACK" = "yes"
+  check "coral phase: frigate healthy after restore" sh -c "snap services frigate.frigate | grep -q ' active'"
 else
   echo "SKIP: coral phase: API back up on coral config — no Coral USB attached (1a6e/18d1 absent)"
   echo "SKIP: coral phase: journal markers — no Coral USB attached"

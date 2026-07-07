@@ -1,5 +1,7 @@
-# M3 Task 3: Frigate daemon real config. Rendered fresh EVERY start by frigate-run
-# (sed replaces __SNAP_COMMON__ and __SNAP__ tokens).
+# M3 Task 3: Frigate daemon real config. Rendered at FIRST start ONLY, by frigate-run
+# (or validate-config) — (sed replaces __SNAP_COMMON__ and __SNAP__ tokens). Once
+# config.yml exists, the OPERATOR owns it: delete the file and restart frigate to
+# regenerate from this template (edits are never clobbered on subsequent starts).
 # version pinned to CURRENT_CONFIG_VERSION (0.17-0) so migrate_frigate_config() does not rewrite.
 mqtt:
   enabled: false

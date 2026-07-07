@@ -17,16 +17,13 @@ mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" "$SNAP_COMMON/db" /tmp
 # segments; recording loses at most the segment being staged at crash time.
 rm -rf -- "${FRIGATE_CACHE_DIR:?}"/*
 
-# M6 gate discovery: Frigate's per-camera detector-input SHM (named <camera>, sized to the
-# model geometry) PERSISTS in /dev/shm across service restarts; at start app.py attaches to
-# any existing segment (FileExistsError fallback) WITHOUT resizing, so a model-geometry change
-# in config.yml (the documented Coral swap, docs/accelerator-support.md) crashes every camera's
-# RemoteObjectDetector: "TypeError: buffer is too small for requested array" (base.py:392) —
-# detection permanently dead until the stale segments are removed. Upstream stale-attach bug;
-# snap-specific persistence (the per-snap /dev/shm bind outlives the service) — same class as
-# the recording-cache clear above. All frigate processes are dead at this point (systemd killed
-# the unit's cgroup), so clearing frigate's own segments (<camera>, out-<camera>, <camera>_frameN)
-# is safe. psm_* (svc-a) and sem.* (sibling daemons' live semaphores) are preserved.
+# Stale-SHM clear (M6 finding: model-geometry SHM persists across restarts and crashes
+# every detect process on geometry change - "buffer is too small for requested array").
+# DENYLIST policy: preserve python-mp names (psm_*, sem.*), delete everything else in the
+# snap's private /dev/shm (camera-derived segment names are unpredictable; an allowlist is
+# impractical). Sibling daemons write nothing here (M6 final-review inventory: go2rtc=Go
+# no shm files, nginx=anonymous mmap, certsync=shell). ASSUMPTION recorded: if frigate ever
+# moves geometry-dependent data into a psm_* segment, this clear silently stops covering it.
 for _shm in /dev/shm/*; do
     case "${_shm##*/}" in
         psm_*|sem.*) ;;
