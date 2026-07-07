@@ -1,22 +1,24 @@
 # Accelerator support
 
-Frigate needs a hardware object detector to find people, cars, and other
-objects in your camera streams. This snap ships an OpenVINO detector by
-default, which runs on your Intel or AMD integrated GPU, and also supports
-the Coral USB Accelerator as an alternative detector. Which accelerators
-work, and how well, depends on your hardware and on strict confinement's
-rules about what a snap is allowed to touch on your system. This page is
-the support matrix: what works out of the box, what needs manual setup,
-and what isn't supported at all.
+Frigate needs an object detector to find people, cars, and other objects
+in your camera streams; a hardware accelerator keeps CPU load and
+inference times low. This snap ships an OpenVINO detector by default,
+which runs on your Intel or AMD integrated GPU, and also supports the
+Coral USB Accelerator as an alternative detector, or plain CPU inference
+as a no-accelerator fallback. Which accelerators work, and how well,
+depends on your hardware and on strict confinement's rules about what a
+snap is allowed to touch on your system. This page is the support
+matrix: what works out of the box, what needs manual setup, and what
+isn't supported at all.
 
 ## Support matrix
 
 | Accelerator | Status | Notes |
 |---|---|---|
-| CPU | Works out of the box | No setup required. Slow — fine for trying Frigate out, but not recommended for more than one camera. |
+| CPU | Supported — config swap required | Fallback when no supported GPU/TPU is available. Slow — fine for trying Frigate out, but not recommended for more than one camera. See "CPU fallback" below. |
 | Intel/AMD iGPU (OpenVINO / VAAPI) | Supported — shipped default | Uses the GPU content interface, which is wired up automatically when you install from the Snap Store. No manual `snap connect` needed. |
 | Coral USB | Supported | Needs two manual connects and a config change. See "Coral USB setup" below. |
-| Coral PCIe / M.2 (`/dev/apex_0`) | Not supported | Strict confinement has no interface for this device class. There is no way to grant a strictly-confined snap access to `/dev/apex_0` today. |
+| Coral PCIe / M.2 (`/dev/apex_0`) | Not supported | snapd has no standard interface for this device class; the custom-device mechanism would require a Store-approved declaration this snap does not carry, so there is no supported path today. |
 | Intel NPU | Not yet supported | Tracked for a future release. |
 | NVIDIA GPU | Not supported | See "NVIDIA" below. |
 
@@ -59,6 +61,41 @@ The first time the Coral stick is used, it uploads firmware and
 re-enumerates on the USB bus (its device ID changes from `1a6e:089a` to
 `18d1:9302`). If the detector fails to start on this very first boot,
 restart once more — it will come up normally after that.
+
+## CPU fallback
+
+If your hardware has no supported GPU or TPU, Frigate can run object
+detection on the CPU. Open
+`/var/snap/frigate/current/config/config.yml` and replace the `detectors:`
+and `model:` blocks with:
+
+```yaml
+detectors:
+  cpu:
+    type: cpu
+model:
+  path: /opt/frigate/models/cpu/cpu_model.tflite
+  labelmap_path: /opt/frigate/models/labelmap.txt
+  width: 320
+  height: 320
+  input_tensor: nhwc
+  input_pixel_format: rgb
+  model_type: ssd
+```
+
+Then restart Frigate to pick up the change — the same edit-config.yml-then-restart flow as the Coral section above. Expect much slower inference than any accelerator.
+
+## Editing your configuration
+
+`config.yml` is generated the first time Frigate starts. After that, the
+file is yours: edits survive restarts and snap refreshes, and new snap
+revisions never rewrite an existing `config.yml`. To discard your edits
+and regenerate the defaults, delete the file and restart Frigate:
+
+```
+sudo rm /var/snap/frigate/current/config/config.yml
+sudo snap restart frigate.frigate
+```
 
 ## One detector type at a time
 
