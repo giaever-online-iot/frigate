@@ -100,7 +100,10 @@ apps:
     # /dev/shm fs-type for frame-buffer sizing (CameraMaintainer.__calculate_shm_frame_count).
     # Without this, PermissionError crashes the main process before the API can start.
     # Arm: expected/documented for the daemon — psutil mounts-read is a well-known snap pattern.
-    plugs: [network, network-bind, opengl, shm-private, mount-observe]
+    # raw-usb + hardware-observe (M6): libusb enumerate/open of the Coral USB TPU —
+    # the M0 coral-probe precedent (same two plugs). Manual-connect; harness install
+    # section already connects both at snap level.
+    plugs: [network, network-bind, opengl, shm-private, mount-observe, raw-usb, hardware-observe]
   validate-config:
     command: bin/validate-config
     # network-bind: snapd seccomp gates listen(2) behind it (type=1326 syscall=50 evidence) —
@@ -196,8 +199,11 @@ parts:
     build-packages: [wget]
     override-build: |
       mkdir -p "$CRAFT_PART_INSTALL/models"
+      # M6: pinned to the immutable commit whose blob matches the sha below (master content
+      # 2026-07-07). NOTE: c21de44 (the detection models' commit) serves DIFFERENT content
+      # for this file (0400fbd9…) — do not "unify" the commits.
       wget -O "$CRAFT_PART_INSTALL/models/edgetpu-test.tflite" \
-        https://github.com/google-coral/test_data/raw/master/mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite
+        https://github.com/google-coral/test_data/raw/104342d2d3480b3e66203073dac24f4e2dbb4c41/mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite
       echo "5b468dfe63ce4d79056bb19b953529e25df0a8d841b204c626576a1b8bd36afe  $CRAFT_PART_INSTALL/models/edgetpu-test.tflite" | sha256sum -c -
   wrappers:
     plugin: dump
@@ -349,6 +355,14 @@ parts:
       echo "90bb33a634e041914cc1819aa5df99818e6c396c4d2db952c0fd7a9cffc4724f  $CRAFT_PART_BUILD/cpu_model.tflite" | sha256sum -c -
       install -D -m 0644 "$CRAFT_PART_BUILD/cpu_model.tflite" \
         "$CRAFT_PART_INSTALL/opt/frigate/models/cpu/cpu_model.tflite"
+      # --- EdgeTPU COCO detection model (M6; pinned; same c21de44 commit as the CPU sibling) ---
+      # ssdlite_mobiledet_coco_qat_postprocess_edgetpu: the EdgeTPU compilation of the CPU
+      # fallback model above (same network, same COCO labelmap.txt).
+      wget -qO "$CRAFT_PART_BUILD/edgetpu_model.tflite" \
+        "https://github.com/google-coral/test_data/raw/c21de4450f88a20ac5968628d375787745932a5a/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite"
+      echo "4a2be2bbb614e576d56dcb914fa52752bf0f13411512710d355d97faa1b35641  $CRAFT_PART_BUILD/edgetpu_model.tflite" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_BUILD/edgetpu_model.tflite" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/edgetpu/edgetpu_model.tflite"
       # --- COCO labelmap (pinned; same as frigate-src top-level copy) ---
       echo "e23585f859d6a93827443fde9fe99ece7195dd856648af9ecb6bc6cf05f9b4d2  $CRAFT_PART_SRC/labelmap.txt" | sha256sum -c -
       install -D -m 0644 "$CRAFT_PART_SRC/labelmap.txt" \
