@@ -62,7 +62,7 @@ restart once more — it will come up normally after that.
 
 ## One detector type at a time
 
-Frigate applies a single global model configuration to every object
+Frigate v0.17.x applies a single global model configuration to every object
 detector you configure. This means you cannot mix detector types with
 different model geometries — for example, running Coral and OpenVINO at
 the same time — because they need different model files and input shapes,
