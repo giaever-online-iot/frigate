@@ -7,6 +7,9 @@ SNAP_FILE=$(ls -t spike/${SNAP_NAME}_*.snap 2>/dev/null | head -1)
 RESULTS=/var/snap/$SNAP_NAME/common/spike-results
 EVIDENCE=spike/results
 FAIL=0
+# M6: backup path of the pre-Coral (OpenVINO default) rendered config; empty unless the Coral
+# phase is mid-swap. Initialized here so the EXIT trap's restore hook can reference it safely.
+CORAL_CFG_BAK=""
 mkdir -p "$EVIDENCE"
 # Evidence dir is created by the root harness but must stay writable by the invoking user
 # (agents capture run transcripts here). chown to SUDO_USER when run via sudo.
@@ -70,6 +73,13 @@ if [ "${1:-}" != "--skip-install" ]; then
       else
         rm -f "$LIVECAM_STASH"
       fi
+    fi
+    # M6: if the Coral phase died mid-swap, put the OpenVINO default back (idempotent —
+    # CORAL_CFG_BAK is empty unless the phase is mid-flight).
+    if [ -n "${CORAL_CFG_BAK:-}" ] && [ -f "${CORAL_CFG_BAK:-}" ]; then
+      cp -p "$CORAL_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null || true
+      rm -f "$CORAL_CFG_BAK"
+      snap restart $SNAP_NAME.frigate 2>/dev/null || true
     fi
   ' EXIT
   if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
@@ -633,6 +643,150 @@ sleep 20
 check "rollback: downgrade detected + restored" sh -c "journalctl --since \"$MARK\" | grep -q 'frigate-run: restored'"
 check "rollback: incompatible db preserved" sh -c "ls /var/snap/frigate/common/db/frigate.db.incompatible-*"
 check "rollback: frigate healthy after restore" sh -c "snap services frigate.frigate | grep -q ' active'"
+
+# --- M6: Coral detector phase (spec §3.4) ---
+# Upstream v0.17.2 supports ONE model geometry across all object detectors
+# (config.py: per-detector model: is discarded — "users should not set model
+# themselves"; only model_path overrides the single global model block). So the
+# Coral proof is a phase: swap detectors+model to edgetpu, restart, assert,
+# restore. Shipped default stays OpenVINO (USER re-ruling, spec §2).
+CORAL_CFG=/var/snap/$SNAP_NAME/current/config/config.yml
+if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
+  MARK_CORAL=$(date '+%Y-%m-%d %H:%M:%S')
+  CORAL_CFG_BAK="/var/snap/$SNAP_NAME/current/config/.config.yml.pre-coral"
+  cp -p "$CORAL_CFG" "$CORAL_CFG_BAK"
+  # Render the coral config by transforming the RENDERED file (preserves the livecam block +
+  # credential; template block order is detectors: -> model: -> cameras:, so the replace region
+  # is [^detectors:, ^cameras:) ). Never echo config contents (credential embedded).
+  awk '
+    /^detectors:/ {skip=1
+      print "detectors:"
+      print "  coral:"
+      print "    type: edgetpu"
+      print "    device: usb"
+      print "model:"
+      print "  # M6 Coral phase: EdgeTPU compilation of the CPU-fallback network (c21de44)"
+      print "  path: /opt/frigate/models/edgetpu/edgetpu_model.tflite"
+      print "  labelmap_path: /opt/frigate/models/labelmap.txt"
+      print "  width: 320"
+      print "  height: 320"
+      print "  input_tensor: nhwc"
+      print "  input_pixel_format: rgb"
+      print "  model_type: ssd"
+      next}
+    /^cameras:/ {skip=0}
+    skip!=1 {print}
+  ' "$CORAL_CFG_BAK" > "$CORAL_CFG"
+  snap restart $SNAP_NAME.frigate
+  CORAL_UP=""
+  for i in $(seq 1 24); do
+    sleep 5
+    curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1 && { CORAL_UP=yes; break; }
+  done
+  # TPU init markers land seconds AFTER /version answers (API and detector init in parallel;
+  # gate run 3 evidence: 'TPU found' logged at +2 s, one-shot capture raced past it) — poll
+  # the journal bounded (≤60 s), never sample once.
+  TPU_FOUND=""
+  for i in $(seq 1 12); do
+    journalctl -u snap.frigate.frigate --since "$MARK_CORAL" 2>/dev/null | grep -q 'TPU found' && { TPU_FOUND=yes; break; }
+    sleep 5
+  done
+  # M0 re-enumeration protocol: one bounded rerun if the TPU regressed to 1a6e
+  # (delegate load uploads firmware; a mid-phase replug would need it again).
+  if [ -z "$TPU_FOUND" ]; then
+    if lsusb 2>/dev/null | grep -qi '1a6e:089a'; then
+      snap run $SNAP_NAME.coral-probe >/dev/null 2>&1 || true
+      snap restart $SNAP_NAME.frigate
+      for i in $(seq 1 24); do
+        sleep 5
+        curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1 && { CORAL_UP=yes; break; }
+      done
+      for i in $(seq 1 12); do
+        journalctl -u snap.frigate.frigate --since "$MARK_CORAL" 2>/dev/null | grep -q 'TPU found' && { TPU_FOUND=yes; break; }
+        sleep 5
+      done
+    fi
+  fi
+  check "coral phase: API back up on coral config" test "$CORAL_UP" = "yes"
+  journalctl -u snap.frigate.frigate --since "$MARK_CORAL" 2>/dev/null \
+    | grep -E 'Attempting to load TPU|TPU found|No EdgeTPU was detected' \
+    > "$EVIDENCE/coral-phase-journal.txt" || true
+  check "coral phase: journal 'Attempting to load TPU as usb'" grep -q 'Attempting to load TPU as usb' "$EVIDENCE/coral-phase-journal.txt"
+  check "coral phase: journal 'TPU found' (delegate loaded)" grep -q 'TPU found' "$EVIDENCE/coral-phase-journal.txt"
+  # inference_speed init default is EXACTLY 10.0 (v0.17.2 base.py: Value("d", 0.01)
+  # -> stats x1000) until real inferences move the average. CORRECTED M6 finding (gate run 3):
+  # the looping testclip NEVER feeds the object detector on stock code — constant motion keeps
+  # motion calibration engaged (improved_motion.py: calibration exits only when motion <5% and
+  # contours <4) and only motion regions are sent to the detector; testclip detection_fps stays
+  # 0.0 and inference_speed stays 10.0 on BOTH ov and coral. Inference drift therefore REQUIRES
+  # the live camera (same dependency as the detection MONEY test, M3 re-ruling): livecam armed
+  # -> hard-assert drift (120 s poll); livecam down -> hard-assert detector liveness on the TPU
+  # config and SKIP drift (no frame source can reach any detector — environment, not packaging).
+  if [ "$LIVECAM" = "yes" ]; then
+    CORAL_SPEED=""
+    for i in $(seq 1 24); do
+      curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
+        http://127.0.0.1:5001/stats > "$EVIDENCE/coral-phase-stats.json" 2>/dev/null || true
+      if jq -e '.detectors.coral.pid > 0 and .detectors.coral.inference_speed != 10.0 and .detectors.coral.inference_speed > 0 and .detectors.coral.inference_speed < 100' \
+          "$EVIDENCE/coral-phase-stats.json" >/dev/null 2>&1; then
+        CORAL_SPEED=$(jq -r '.detectors.coral.inference_speed' "$EVIDENCE/coral-phase-stats.json")
+        break
+      fi
+      sleep 5
+    done
+    check "coral phase MONEY: coral detector alive + inference_speed moved off 10.0 init default" test -n "$CORAL_SPEED"
+    echo "  coral finding: inference_speed=${CORAL_SPEED:-none}ms (init default 10.0 exactly; drift = real TPU inferences)"
+  else
+    curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
+      http://127.0.0.1:5001/stats > "$EVIDENCE/coral-phase-stats.json" 2>/dev/null || true
+    check "coral phase: coral detector process alive on TPU config (pid > 0 in /stats)" \
+      jq -e '.detectors.coral.pid > 0' "$EVIDENCE/coral-phase-stats.json"
+    echo "SKIP: coral phase MONEY: inference_speed drift — $LIVECAM_SKIP_REASON; testclip cannot feed the detector (M3 calibration finding), so no inference source exists"
+    echo "  coral finding: inference_speed=$(jq -r '.detectors.coral.inference_speed // "none"' "$EVIDENCE/coral-phase-stats.json" 2>/dev/null)ms (10.0 = init default; drift unprovable without livecam)"
+  fi
+  # Detection event on the Coral — livecam machinery, standing scene-dependent
+  # SKIP semantics (armed + pipeline alive + no event = scene, not packaging).
+  if [ "$LIVECAM" = "yes" ]; then
+    CORAL_DETECTED=""
+    for i in $(seq 1 18); do
+      curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
+        "http://127.0.0.1:5001/events?cameras=livecam&labels=person&after=$(date -d "$MARK_CORAL" +%s)&limit=5" \
+        > "$EVIDENCE/coral-phase-events.json" 2>/dev/null || true
+      jq -e 'length > 0' "$EVIDENCE/coral-phase-events.json" >/dev/null 2>&1 && { CORAL_DETECTED=yes; break; }
+      sleep 5
+    done
+    curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
+      http://127.0.0.1:5001/stats > "$EVIDENCE/coral-phase-stats2.json" 2>/dev/null || true
+    CORAL_PIPE=""
+    jq -e '.cameras.livecam.ffmpeg_pid > 0' "$EVIDENCE/coral-phase-stats2.json" >/dev/null 2>&1 && CORAL_PIPE=yes
+    if [ "$CORAL_DETECTED" = "yes" ]; then
+      check "coral phase: person event detected BY THE TPU (coral-only pool)" test "$CORAL_DETECTED" = "yes"
+    elif [ "$CORAL_PIPE" = "yes" ]; then
+      echo "SKIP: coral phase: person event detected BY THE TPU — pipeline alive, no subject in frame (scene-dependent)"
+    else
+      fail_ "coral phase: person event detected BY THE TPU — pipeline dead on coral config (packaging regression)"
+    fi
+  else
+    echo "SKIP: coral phase: person event detected BY THE TPU — $LIVECAM_SKIP_REASON"
+  fi
+  # Restore the OpenVINO default and prove steady state returns.
+  cp -p "$CORAL_CFG_BAK" "$CORAL_CFG"
+  rm -f "$CORAL_CFG_BAK"; CORAL_CFG_BAK=""
+  snap restart $SNAP_NAME.frigate
+  OV_BACK=""
+  for i in $(seq 1 24); do
+    sleep 5
+    curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
+      http://127.0.0.1:5001/stats 2>/dev/null | jq -e '.detectors.ov' >/dev/null 2>&1 && { OV_BACK=yes; break; }
+  done
+  check "coral phase: OpenVINO default restored (ov reporting in /stats)" test "$OV_BACK" = "yes"
+else
+  echo "SKIP: coral phase: API back up on coral config — no Coral USB attached (1a6e/18d1 absent)"
+  echo "SKIP: coral phase: journal markers — no Coral USB attached"
+  echo "SKIP: coral phase MONEY: inference_speed drift — no Coral USB attached"
+  echo "SKIP: coral phase: person event — no Coral USB attached"
+  echo "SKIP: coral phase: OpenVINO default restored — no Coral USB attached"
+fi
 
 # --- AppArmor denial scan (keep last) ---
 journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" \
