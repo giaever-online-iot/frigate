@@ -23,7 +23,7 @@ Coral substrate carried from M0 (proven every milestone, and again this run befo
 
 **PROVEN on the Coral this run** (hard-asserted PASS): delegate load (`TPU found`), the staged EdgeTPU model loads under the frigate daemon, the coral detect process is alive (`pid 460323 > 0`) on the swapped config, and the config swap + restore round-trip is clean (OpenVINO default restored, unit healthy). The raw M0 substrate — firmware upload + a real `coral inference ran` via `coral-probe` — also passed again this run.
 
-**NOT YET PROVEN** (SKIP, deferred to a powered camera; harness needs no changes): actual frigate-driven TPU **inference** (the `inference_speed` drift) and a **detection event** on the Coral. Both are blocked solely by the live camera being off-network tonight (`No route to host`, controller-verified) combined with the standing fact that the looping testclip drives no detector inference (D6). On the next `sudo tests/spike-smoke.sh` with the camera powered, both checks hard-assert automatically.
+**NOT YET PROVEN** (SKIP, deferred to a powered camera; harness needs no changes): actual frigate-driven TPU **inference** (the `inference_speed` drift) and a **detection event** on the Coral. Both are blocked solely by the live camera being off-network tonight (`No route to host`, controller-verified — `.superpowers/sdd/task-2-report.md` Concern 1) combined with the standing fact that the looping testclip drives no detector inference (D6). On the next `sudo tests/spike-smoke.sh` with the camera powered, both checks hard-assert automatically.
 
 Neither side is softened: the delegate and detector-process facts are real and hard-gated; the inference/event facts are honestly outstanding.
 
@@ -61,11 +61,13 @@ Source: spec §2 / §3.1; config.py:476–491 (verbatim above).
 self.avg_inference_speed = Value("d", 0.01)
 ```
 
-`frigate/stats/util.py:298`:
+`frigate/stats/util.py:298` (verbatim):
 
 ```python
-"inference_speed": round(detector.avg_inference_speed.value * 1000, 2),   # 0.01 * 1000 = 10.0
+"inference_speed": round(detector.avg_inference_speed.value * 1000, 2),  # type: ignore[attr-defined]
 ```
+
+The stats endpoint multiplies the average by 1000, so the untouched `0.01` init value reports as exactly `10.0` ms.
 
 Design consequence: the money check is a **drift** assertion (`!= 10.0`, `> 0`, `< 100` plausibility band), not a presence check. This run confirmed the default is real and sticky: coral `inference_speed = 10.0`, `detection_start = 0.0` (`spike/results/coral-phase-stats.json`); the OpenVINO baseline earlier in the same run also read `ov inference_speed=10.0ms` (m6-final-run.txt `gpu finding`), for the same reason.
 
@@ -130,9 +132,9 @@ Source: task-2-report.md finding #3; improved_motion.py calibration-exit conditi
 
 ## Review trail
 
-- **Per-task reviews — all Approved.** Task 1 (snap surface): zero findings. Task 3 (accelerator doc): approved after a one-line fix scoping the single-detector constraint to "Frigate v0.17.x" (commit `b3ff7a4`). Task 2 (harness phase + frigate-run): approved, zero Critical / zero Important.
+- **Per-task reviews — all Approved.** Task 1 (snap surface): approved, zero Critical / zero Important (one Minor, report-excerpt paraphrase, rolled up). Task 3 (accelerator doc): approved after a one-line fix scoping the single-detector constraint to "Frigate v0.17.x" (commit `b3ff7a4`). Task 2 (harness phase + frigate-run): approved, zero Critical / zero Important.
 - **Final whole-branch review** (`83f8752..25dc8fa`, against spec + plan): verdict **"With fixes"** — **0 Critical, 4 Important**. The consolidated fix wave landed as **`75f2791`** (trap hoist so `--skip-install` still registers the EXIT trap; backup-clobber guard so a leftover good-config backup is never overwritten by a coral-tainted `config.yml`; a `frigate healthy after restore` health check; SHM-denylist + render-once comment accuracy) and **`62e8282`** (accelerator-doc corrections: CPU acknowledged as the no-accelerator fallback with its own config-swap section, config-ownership section, PCIe snapd-custom-device wording).
-- A scoped re-verdict on that fix wave was running in parallel; this findings task does not depend on it.
+- **Scoped re-verdict on the fix wave: RESOLVED.** The trap hoist was verified correct (variables initialized before trap registration; fire-time expansion; an aborted-coral state self-heals via the backup-sourced transform); no defects found in either fix commit (`75f2791`, `62e8282`).
 
 Result of this task's authoritative gate on top of the fix wave: `SPIKE SMOKE: ALL PASS`, 112 PASS / 0 FAIL / 5 SKIP, 366 denials 0 unexpected — a single run, no re-run needed.
 
