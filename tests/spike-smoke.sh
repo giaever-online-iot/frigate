@@ -97,11 +97,14 @@ if [ "${1:-}" != "--skip-install" ]; then
   # mount-observe: not auto-connected for --dangerous installs; required by frigate daemon so
   # psutil.disk_partitions() can read /proc/<pid>/mounts for /dev/shm fs-type detection.
   snap connect $SNAP_NAME:mount-observe 2>/dev/null || true
-  # Restore the livecam secret (0600) and restart frigate so frigate-run re-renders the
-  # config with the LIVECAM block armed (daemons started at install without the file).
+  # Restore the livecam secret (0600), then delete the rendered config and restart frigate so
+  # frigate-run regenerates it with the LIVECAM block armed (daemons started at install without
+  # the file). M6: frigate-run renders at FIRST start only — operator owns config.yml once it
+  # exists; delete-to-regenerate is the re-render protocol.
   if [ -n "$LIVECAM_STASH" ]; then
     install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url"
     rm -f "$LIVECAM_STASH"
+    rm -f "/var/snap/$SNAP_NAME/current/config/config.yml"
     snap restart $SNAP_NAME.frigate 2>/dev/null || true
   fi
   pass_ "snap install --dangerous ($SNAP_FILE)"
