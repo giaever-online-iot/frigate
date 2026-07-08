@@ -1,0 +1,53 @@
+name: Promote to beta
+
+# NEW for M7 (no zwave-js-ui source equivalent): a manual, human-triggered
+# promotion from latest/edge to latest/beta. Latest-only milestone (spec's
+# latest-only ruling) — there is no candidate/stable step here, just edge -> beta.
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: >-
+          Optional: exact store revision number to release to latest/beta
+          instead of whatever currently sits in latest/edge. Leave blank for
+          the default behaviour (promote latest/edge as-is).
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Same group as release-on-merge.yml: a merge-triggered edge promotion and a
+# manual beta promotion must not race on overlapping channels.
+concurrency:
+  group: snap-release
+  cancel-in-progress: false
+
+env:
+  SNAP_NAME: frigate
+
+jobs:
+  promote-beta:
+    runs-on: ubuntu-latest
+    env:
+      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Promote latest/edge -> latest/beta
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REVISION" ]; then
+            echo ">> releasing revision $REVISION -> latest/beta"
+            snapcraft release "$SNAP_NAME" "$REVISION" latest/beta
+          else
+            echo ">> promoting latest/edge -> latest/beta"
+            snapcraft promote "$SNAP_NAME" --from-channel latest/edge --to-channel latest/beta --yes
+          fi

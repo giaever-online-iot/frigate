@@ -1,0 +1,63 @@
+name: Lint & test
+
+# M7: merges the source pattern's two workflows (lint-test.yml + helper-tests.yml)
+# into one, since frigate's "app scripts" and "CI helper scripts" are both plain
+# bash and both cheap to check in a single job.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'spike/bin/**'
+      - 'snap/hooks/**'
+      - 'tests/**'
+      - '.github/scripts/**'
+      - '.github/workflows/lint-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: shellcheck — spike/bin, snap/hooks, spike-smoke (owned by other tasks)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # snap/hooks/* does not exist in every checkout yet — it lands at the repo
+          # root alongside snap/snapcraft.yaml via the parallel M7 "productize" task
+          # (Task 4). nullglob makes that an empty (not literal, not erroring) arg
+          # list until it does.
+          targets=(spike/bin/* snap/hooks/*)
+          [ -f tests/spike-smoke.sh ] && targets+=(tests/spike-smoke.sh)
+          # FINDING (task-6, CI adaptation, recorded in task-6-report.md): these two
+          # codes pre-date this task and are owned by other milestones' scripts, not
+          # by .github/ — Task 6 must not edit outside .github/, so they are excluded
+          # here (by code, scoped to THIS invocation only — .github/scripts/*.sh below
+          # gets no exclusions) rather than silenced at the source:
+          #   spike/bin/lib-wait.sh   SC2148 (error)   no shebang (it's a sourced lib,
+          #                                            not executed directly — likely
+          #                                            an intentional false-positive,
+          #                                            but not this task's file to fix)
+          #   spike/bin/lib-wait.sh   SC2034 (warning) WAITED_MS appears unused
+          #   tests/spike-smoke.sh    SC2164 (warning) `cd` without `|| exit`
+          # Remove this exclude once those are fixed upstream by their owning task.
+          if [ "${#targets[@]}" -gt 0 ]; then
+            shellcheck --severity=warning -x -e SC2148,SC2034,SC2164 "${targets[@]}"
+          fi
+
+      - name: shellcheck — .github/scripts (this task's files; no exclusions)
+        run: shellcheck --severity=warning -x .github/scripts/*.sh
+
+      - name: Run .github/scripts unit tests
+        run: |
+          for t in .github/scripts/*.test.sh; do
+            echo "== $t"
+            bash "$t" || exit 1
+          done

@@ -1,0 +1,82 @@
+name: Release on merge
+
+# M7 SIMPLIFICATION vs the source pattern (zwave-js-ui): this milestone is
+# LATEST-ONLY (spec's latest-only ruling). There is exactly one promotion:
+#   latest/edge/PR<N> -> latest/edge
+# All candidate/stable/default-track logic from the source pattern is DROPPED
+# (that math still exists, dormant, in snap-release.sh for when per-track
+# promotion returns). The branch-has-revisions guard and the serializing
+# concurrency group are kept — both are cheap safety nets that a docs-only
+# merge or a build that never uploaded should not defeat.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+    # Mirror pr-build-snap's filter: a merge only has something to promote when
+    # the PR built something.
+    paths:
+      - 'snap/**'
+      - 'spike/**'
+      - '.github/**'
+
+permissions:
+  contents: read
+
+# Serialize ALL merge releases (and promote-beta.yml — same group) so two
+# near-simultaneous merges/promotions can't race on the shared latest/*
+# channels. Never cancel an in-flight promotion.
+concurrency:
+  group: snap-release
+  cancel-in-progress: false
+
+env:
+  SNAP_NAME: frigate
+
+jobs:
+  promote:
+    if: ${{ github.event.pull_request.merged == true }}
+    runs-on: ubuntu-latest
+    env:
+      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Resolve version / channel
+        id: meta
+        run: |
+          set -euo pipefail
+          V="$(yq '.version' snap/snapcraft.yaml)"
+          {
+            echo "version=$V"
+            echo "pr=${{ github.event.pull_request.number }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Promote PR revisions to latest/edge
+        run: |
+          set -euo pipefail
+          SR=.github/scripts/snap-release.sh
+          SNAP="$SNAP_NAME"
+          V="${{ steps.meta.outputs.version }}"
+          PR="${{ steps.meta.outputs.pr }}"
+          CHAN="latest/edge/PR$PR"
+
+          INFO="$(snap info "$SNAP")"
+
+          # branch-has-revisions joins its two args as "<track>/edge/<arg2>"; passing
+          # "PR$PR" (not just "$PR") reproduces frigate's latest/edge/PR<N> naming
+          # from the unmodified (verbatim) helper.
+          if [ "$("$SR" branch-has-revisions latest "PR$PR" <<<"$INFO")" != "yes" ]; then
+            echo "No revisions in $CHAN (docs-only merge / build failed / branch expired). Nothing to promote."
+            exit 0
+          fi
+
+          echo "Merged $V; promoting $CHAN -> latest/edge"
+          snapcraft promote "$SNAP" --from-channel "$CHAN" --to-channel latest/edge --yes
+
+          echo ">> closing $CHAN"
+          snapcraft close "$SNAP" "$CHAN" --yes || echo "close failed (already gone?); ignoring"
