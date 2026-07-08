@@ -51,7 +51,10 @@ sudo snap connect frigate:mount-observe
   these regardless of which detector you use.
 
 Your Intel/AMD GPU is wired up automatically via the `gpu` content
-interface — no manual connect needed there.
+interface — no manual connect needed there. This relies on the snap's
+default content-provider being auto-connected by snapd at install time; if
+GPU detection doesn't come up, confirm the `gpu` plug is actually connected
+with `snap connections frigate` before troubleshooting further.
 
 Check what's connected at any time with:
 
@@ -117,6 +120,27 @@ file and restart:
 sudo rm /var/snap/frigate/current/config/config.yml
 sudo snap restart frigate.frigate
 ```
+
+### Built-in demo camera
+
+A fresh install ships with a built-in demo camera named `testclip` — a
+short pedestrian clip that loops forever — so a brand-new install shows a
+working pipeline (live view, object detection, recordings) the moment it
+comes up, before you've added any real cameras. It's handy for a first
+look, but it isn't free: it continuously decodes and re-encodes video, so
+it costs CPU, and it records to disk (bounded — 1 day of retention).
+
+When you start adding real cameras, remove it. In `config.yml`, delete the
+whole `testclip:` block under `cameras:` (from the `testclip:` line through
+its `objects:` list), then restart Frigate:
+
+```
+sudo snap restart frigate.frigate
+```
+
+The clip itself is streamed by the snap's internal `go2rtc` on demand:
+once no camera references it, that stream stops on its own, so there's
+nothing else to clean up.
 
 Two things worth knowing before you rely on this setup long-term:
 

@@ -18,9 +18,15 @@ while [ ! -f "$SNAP_DATA/nginx/nginx.pid" ] && [ $_pid_i -lt 30 ]; do
     sleep 2; _pid_i=$((_pid_i+1))
 done
 while :; do
-    # Upstream parity: with TLS disabled certsync idles forever. Our rendered config is the
-    # settings source (spike posture keeps tls enabled; branch exists, unexercised by harness).
-    if grep -A1 '^tls:' "$SNAP_DATA/config/config.yml" 2>/dev/null | grep -q 'enabled: false'; then
+    # Upstream parity: with TLS disabled certsync idles forever. DUAL idle sources (M7 final review):
+    #  (1) config.yml's tls: block — operator-owned semantics; the rendered Frigate config is the
+    #      original settings source (spike posture keeps tls enabled, so this branch is unexercised
+    #      by the harness), and
+    #  (2) the snap key tls.enabled (snap set frigate tls.enabled=false) — the SAME key nginx-run
+    #      honors for the listener; certsync must idle in lockstep, else it polls a plain-HTTP :PORT
+    #      forever. cfg_get (sourced from lib-wait.sh) reads snapctl and defaults to true.
+    if grep -A1 '^tls:' "$SNAP_DATA/config/config.yml" 2>/dev/null | grep -q 'enabled: false' \
+       || [ "$(cfg_get tls.enabled true)" = false ]; then
         sleep 9999; continue
     fi
     if [ ! -e "$LEFILE" ]; then
