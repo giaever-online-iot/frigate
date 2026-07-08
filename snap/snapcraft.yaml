@@ -1,150 +1,156 @@
-# =============================================================================
-# DRAFT snapcraft.yaml for Frigate NVR  (native snap — NOT docker-in-snap)
-# Status: SKELETON / illustrative. Not yet buildable end-to-end.
-# See docs/snap-feasibility.md for the full rationale behind every choice here.
-#
-# Architecture mirrors Frigate's s6-overlay service tree as snap daemons:
-#   setup (oneshot) -> go2rtc -> frigate -> nginx -> certsync
-# =============================================================================
-
 name: frigate
 title: Frigate NVR
-base: core26                       # Ubuntu 26.04 LTS (decision 2026-07-02, see design spec).
-                                   # Frigate pins Python 3.11 -> built as a part regardless
-                                   # of the base's default Python. Fallback: core24 (one line).
-version: '0.17.2'                  # track upstream; set by `snapcraft.yaml` or adopt-info
-summary: Locally-processed AI NVR for IP cameras
+version: '0.17.2'
+summary: Locally-processed AI NVR for IP cameras — no cloud, no subscription
 description: |
   Frigate is a complete, locally-processed network video recorder with
-  real-time object detection (Coral USB, OpenVINO/Intel GPU, CPU).
+  real-time object detection (Coral USB, OpenVINO/Intel GPU, CPU). This
+  snap ships an OpenVINO detector by default, which runs on your Intel or
+  AMD integrated GPU, and also supports the Coral USB Accelerator as an
+  alternative detector, or plain CPU inference as a no-accelerator
+  fallback.
 
-  Strict-confinement build. After install, connect the hardware/storage
-  interfaces you need, e.g.:
-      snap connect frigate:raw-usb              # Coral USB
-      snap connect frigate:removable-media      # recordings on external disk
-      snap connect frigate:camera               # Raspberry Pi / USB cameras
-  See `snap connections frigate`.
+  Under the hood the snap runs four cooperating services — go2rtc (camera
+  stream restreaming), frigate (the NVR core and detection engine), nginx
+  (the HTTPS web UI and API proxy), and certsync (keeps nginx in sync with
+  your TLS certificate).
 
-grade: devel                      # -> stable once the /dev/shm + layout risks (§4) clear
-confinement: strict               # the whole point; classic only as a separate build
-# license: Apache-2.0
+  Strict confinement means the snap only gets access to hardware you
+  explicitly grant. A few interfaces can't be auto-connected yet, so
+  connect them by hand after install:
 
-# --- Architectures -----------------------------------------------------------
+      snap connect frigate:raw-usb              # Coral USB Accelerator only
+      snap connect frigate:hardware-observe      # Coral USB Accelerator only
+      snap connect frigate:shm-private snapd:shared-memory
+      snap connect frigate:mount-observe
+
+  Your Intel/AMD GPU is wired up automatically via the gpu content
+  interface — no manual connect needed there. Check what's connected with
+  `snap connections frigate`.
+base: core26
+grade: stable
+confinement: strict
+license: MIT
+contact: https://github.com/giaever-online-iot/frigate
+website: https://github.com/giaever-online-iot/frigate
+source-code: https://github.com/giaever-online-iot/frigate
+
+layout:
+  # NOTE: /config bind is REJECTED at pack time (snapd: "defines a new top-level directory").
+  # /etc/letsencrypt is a sub-path of /etc (exists in base) and is accepted.
+  # NOTE: /media/frigate ALSO REJECTED at pack time — same error: "defines a new top-level directory /media".
+  # Implication for M3: recordings dir cannot use a /media/frigate layout; must configure Frigate's
+  # BASE_DIR or recordings path directly to a $SNAP_COMMON path.
+  /opt/frigate:
+    bind: $SNAP/opt/frigate
+  /etc/letsencrypt:
+    bind: $SNAP_DATA/letsencrypt
+  /etc/OpenCL:
+    bind: $SNAP/etc/OpenCL
+  /usr/lib/x86_64-linux-gnu/intel-opencl:
+    bind: $SNAP/usr/lib/x86_64-linux-gnu/intel-opencl
+  /usr/lib/ffmpeg:
+    bind: $SNAP/usr/lib/ffmpeg
+
+slots:
+  npu-dev:
+    interface: custom-device
+    custom-device: intel-npu
+    devices:
+      - /dev/accel/accel0
+
+plugs:
+  npu:
+    interface: custom-device
+    custom-device: intel-npu
+  # Task 5 finding: glibc sem_open(O_CREAT) mknods a RANDOM /dev/shm/sem.XXXXXX tempfile,
+  # so the sem.snap.<name>.* AppArmor rule can never match (python multiprocessing SemLock
+  # -> PermissionError). private:true gives the snap its own /dev/shm tmpfs — the canonical fix.
+  # SIZING NOTE: the private /dev/shm tmpfs uses the system default sizing (~50% RAM);
+  # flag for M3 frame-buffer capacity planning (see task-5-report.md Fix round 1).
+  shm-private:
+    interface: shared-memory
+    private: true
+
 platforms:
   amd64:
-  arm64:                          # RPi / Apple-silicon hosts; ffmpeg/go2rtc binaries differ
 
-# =============================================================================
-# LAYOUTS  — remap Frigate's HARDCODED absolute paths into the snap dirs.
-# These apply to the whole snap mount namespace, so go2rtc/ffmpeg/nginx/python
-# all see them consistently (avoids forking frigate/const.py).  (report §2.3)
-# /tmp/cache needs NO layout: snaps already get a private writable /tmp.
-# /dev/shm CANNOT be fixed here — see BLOCKER in the `frigate` part below (§4.1).
-# =============================================================================
-layout:
-  /opt/frigate:
-    bind: $SNAP/opt/frigate            # app code + built web UI (read-only)
-  /usr/local/nginx:
-    bind: $SNAP/usr/local/nginx        # custom nginx prefix
-  /usr/local/go2rtc:
-    bind: $SNAP/usr/local/go2rtc
-  /usr/lib/ffmpeg:
-    bind: $SNAP/usr/lib/ffmpeg         # the 5.0/7.0/8.0 ffmpeg trees
-  # M0 SPIKE CORRECTION (docs/spike-findings.md): layouts for /config and
-  # /media/frigate are IMPOSSIBLE — snapd rejects layouts that define a new
-  # top-level directory at pack time. Frigate's const.py must instead be
-  # patched to env-driven base paths (CONFIG dir -> $SNAP_DATA/config,
-  # media root -> $SNAP_COMMON/media/frigate). Pairs with the shm-prefix patch.
-  /etc/letsencrypt:
-    bind: $SNAP_DATA/letsencrypt       # TLS certs written at runtime (M0-verified working)
-
-# =============================================================================
-# PLUGS  — manual-connect interfaces declared once, referenced per-app below.
-# network / network-bind / opengl AUTO-connect and need no declaration.
-# For a polished store snap, request snap-declaration grants to AUTO-connect
-# raw-usb / camera / removable-media (report §3).
-# =============================================================================
-plugs:
-  camera:            # /dev/video* — RPi V4L2, USB cameras
-  raw-usb:           # Coral USB /dev/bus/usb (needs root + udev; see §4.2)
-  removable-media:   # recordings to /media, /run/media, /mnt ONLY (§4.7)
-  hardware-observe:  # device enumeration + GPU/hw stats
-  mount-observe:     # disk-usage stats for the storage page
-  system-observe:    # process/system stats
-  avahi-observe:     # ONVIF/mDNS camera discovery (verify need — open Q#3)
-
-  # ---- BLOCKERS: uncomment ONLY for special builds (report §4.3/§4.4) --------
-  # custom-device is SUPER-PRIVILEGED and requires Snap Store approval.
-  # coral-pci:
-  #   interface: custom-device
-  #   custom-device: coral-pci
-  #   devices: [/dev/apex_0]
-  # intel-npu:
-  #   interface: custom-device
-  #   custom-device: intel-npu
-  #   devices: [/dev/accel/accel0]
-  # NVIDIA CUDA/TensorRT/NVDEC: NOT possible under strict confinement at all —
-  # ship as a separate `confinement: classic` snap or stay on Docker (§4.4).
-
-# =============================================================================
-# APPS / DAEMONS  — one per Frigate s6 long-run service, ordered by `after:`.
-# =============================================================================
 apps:
-
-  # --- oneshot init: replaces s6 `prepare` + `log-prepare` -------------------
-  setup:
-    command: bin/setup                 # mkdir $SNAP_DATA/{config,letsencrypt} +
-                                       # $SNAP_COMMON/media/frigate; migrate db;
-                                       # generate self-signed cert if absent.
-    daemon: oneshot
-    install-mode: enable
-    before: [go2rtc, frigate, nginx, certsync]
-    plugs: [removable-media]
-
-  # --- go2rtc: restreaming / RTSP / WebRTC ----------------------------------
   go2rtc:
-    command: bin/go2rtc-run            # wrapper: runs create_config.py to render
-                                       # $SNAP_DATA/.../go2rtc.yaml, then exec go2rtc
+    command: bin/go2rtc-run
     daemon: simple
-    after: [setup]
-    restart-condition: on-failure      # replaces the s6 go2rtc-healthcheck loop
-    extensions: [gpu]                  # snapcraft 9 `gpu` ext -> mesa-2604 on core26 (§3)
-    plugs: [network, network-bind, hardware-observe, avahi-observe]
-
-  # --- frigate: the Python core (spawns ffmpeg per camera) ------------------
-  frigate:
-    command: bin/frigate-run           # wrapper: cd /opt/frigate && exec python3 -u -m frigate
+    restart-condition: on-failure
+    plugs: [network, network-bind]
+  svc-a:
+    command: bin/svc-a
     daemon: simple
+    restart-condition: never
     after: [go2rtc]
-    extensions: [gpu]                  # VA-API decode + OpenVINO on /dev/dri (mesa-2604)
-    plugs:
-      - network
-      - network-bind
-      - camera               # RPi V4L2 / USB cams
-      - raw-usb              # Coral USB
-      - removable-media      # external recording disks
-      - hardware-observe
-      - mount-observe
-      - system-observe
-    environment:
-      # ffmpeg selection (only env vars Frigate honours besides CONFIG_FILE)
-      DEFAULT_FFMPEG_VERSION: "8.0"
-      INCLUDED_FFMPEG_VERSIONS: "8.0:7.0:5.0"
-      # VA-API driver path provided by the gpu extension's Mesa content snap
-      # (mesa-2604 mounts at $SNAP/gpu-2604 on core26; the extension's
-      #  command-chain wrapper sets most of this up — verify in M0-C spike)
-      LIBVA_DRIVERS_PATH: $SNAP/gpu-2604/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/dri
-      PYTHONPATH: $SNAP/opt/frigate:$SNAP/usr/lib/python3.11/site-packages
-
-  # --- nginx: front door (custom build; rewrites own config at start) --------
-  nginx:
-    command: bin/nginx-run             # wrapper: tempio renders listen.conf/base_path.conf,
-                                       # sed worker_processes, then exec nginx
+    plugs: [network]
+  svc-b:
+    command: bin/svc-b
     daemon: simple
+    restart-condition: never
+    after: [svc-a]
+  svc-c:
+    command: bin/svc-c
+    daemon: simple
+    restart-condition: never
+    after: [svc-b]
+  gpu-probe:
+    command: bin/gpu-probe
+    extensions: [gpu]
+    plugs: [opengl]
+  coral-probe:
+    command: bin/coral-probe
+    plugs: [raw-usb, hardware-observe]
+  npu-probe:
+    command: bin/npu-probe
+    plugs: [npu]
+  mdns-probe:
+    command: bin/mdns-probe
+    plugs: [network, network-bind]
+  ffprobe:
+    command: usr/lib/ffmpeg/7.0/bin/ffprobe
+    plugs: [network]
+  vaapi-probe:
+    command: bin/vaapi-probe
+    extensions: [gpu]
+    plugs: [opengl, network]
+  frigate:
+    command: bin/frigate-run
+    daemon: simple
+    restart-condition: on-failure
+    after: [go2rtc]
+    extensions: [gpu]
+    # mount-observe: psutil.disk_partitions(all=True) reads /proc/<pid>/mounts to compute
+    # /dev/shm fs-type for frame-buffer sizing (CameraMaintainer.__calculate_shm_frame_count).
+    # Without this, PermissionError crashes the main process before the API can start.
+    # Arm: expected/documented for the daemon — psutil mounts-read is a well-known snap pattern.
+    # raw-usb + hardware-observe (M6): libusb enumerate/open of the Coral USB TPU —
+    # the M0 coral-probe precedent (same two plugs). Manual-connect; harness install
+    # section already connects both at snap level.
+    plugs: [network, network-bind, opengl, shm-private, mount-observe, raw-usb, hardware-observe]
+  validate-config:
+    command: bin/validate-config
+    # network-bind: snapd seccomp gates listen(2) behind it (type=1326 syscall=50 evidence) —
+    # python mp.forkserver's AF_UNIX control socket needs listen even without inet sockets.
+    # shm-private: POSIX named semaphores (mp.Manager) need a writable private /dev/shm.
+    plugs: [network, network-bind, shm-private]
+  # M4 Task 2: nginx reverse-proxy serving the web UI and proxying /api to frigate :5001.
+  # daemon simple (nginx runs in foreground via -g "daemon off;" in nginx-run).
+  # after: [frigate] — nginx-run also gates on wait_for_url :5001/version so nginx starts
+  # only once the frigate API is answering; after: ensures systemd ordering too.
+  nginx:
+    command: bin/nginx-run
+    daemon: simple
+    restart-condition: on-failure
     after: [frigate]
     plugs: [network, network-bind]
 
-  # --- certsync: Let's Encrypt reload loop -----------------------------------
+  # --- certsync: Let's Encrypt reload loop (M5 Task 3) ----------------------
+  # Mirrors upstream s6-rc.d/certsync/run: polls on-disk cert vs live TLS fingerprint
+  # every 60 s and signals nginx to reload when they diverge (cert rotation hook).
   certsync:
     command: bin/certsync-run
     daemon: simple
@@ -152,141 +158,325 @@ apps:
     after: [nginx]
     plugs: [network]
 
-  # --- user-facing control command ------------------------------------------
-  config-check:
-    command: bin/frigate-run --validate-config
-    plugs: [removable-media]
+  # --- logrotate: nginx log rotation (M7 Task 3) ---------------------------
+  # Oneshot timer app (fires daily at 00:00) that rotates nginx's access/error logs via
+  # copytruncate (nginx's open fds stay valid — no reopen signal needed, so no extra plugs).
+  # Operates only on the snap's own $SNAP_DATA logs, which need no interface.
+  logrotate:
+    command: bin/logrotate-run
+    daemon: oneshot
+    timer: "00:00"
 
-# =============================================================================
-# PARTS  — translate Frigate's multi-stage Dockerfile (report §2.4).
-# Stock apt nginx/ffmpeg CANNOT be reused (custom nginx modules; pinned ffmpeg).
-# =============================================================================
 parts:
-
-  # ---- Python 3.11 from source (base ships 3.12; wheels are cp311) ----------
   python311:
-    plugin: autotools
-    source: https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
-    autotools-configure-parameters:
-      - --prefix=/usr
-      - --enable-optimizations
-      - --enable-shared
-    build-packages: [build-essential, zlib1g-dev, libssl-dev, libffi-dev,
-                     libsqlite3-dev, libbz2-dev, liblzma-dev, libreadline-dev]
-    # TODO: confirm shared-lib paths land under $SNAP/usr correctly.
-
-  # ---- go2rtc binary (upstream release) ------------------------------------
-  go2rtc:
-    plugin: dump
-    source: https://github.com/AlexxIT/go2rtc/releases/download/v1.9.13/go2rtc_linux_${CRAFT_ARCH_BUILD_FOR}
-    source-type: file
-    organize:
-      go2rtc_linux_*: usr/local/go2rtc/bin/go2rtc
-    # TODO: chmod +x via override-build; create_config.py comes from frigate part.
-
-  # ---- ffmpeg static builds (NickM-27/FFmpeg-Builds), 3 versions ------------
-  ffmpeg:
     plugin: nil
-    # TODO: fetch n8.1.1/n7.0.2/n5.1 gpl static tarballs into
-    #   $SNAP/usr/lib/ffmpeg/{8.0,7.0,5.0}/bin/{ffmpeg,ffprobe}
-    # NOTE: gpl static builds — confirm license compatibility for redistribution.
+    source: https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
+    build-packages:
+      - build-essential
+      - pkg-config
+      - libssl-dev
+      - zlib1g-dev
+      - libffi-dev
+      - libsqlite3-dev
+      - libbz2-dev
+      - liblzma-dev
+      - libreadline-dev
+      - uuid-dev
     override-build: |
-      echo "TODO: download + unpack ffmpeg builds per arch"
-
-  # ---- custom nginx 1.27.4 + vod/secure-token/set-misc/devel-kit -----------
-  nginx:
-    plugin: autotools
-    source: https://nginx.org/download/nginx-1.27.4.tar.gz
-    # TODO: pull the 4 extra modules as additional sources and pass
-    #   --add-module=... ; apply Frigate's nginx-vod MAX_CLIPS 128->1080 patch.
-    autotools-configure-parameters:
-      - --prefix=/usr/local/nginx
-      - --with-http_ssl_module
-      - --with-http_v2_module
-      - --with-http_auth_request_module
-      - --with-http_realip_module
-      - --with-http_sub_module
-      - --with-threads
-    build-packages: [libpcre2-dev, zlib1g-dev, libssl-dev]
-    stage-packages: [libssl3, libpcre2-8-0]
-
-  sqlite-vec:
-    plugin: make
-    source: https://github.com/asg017/sqlite-vec.git   # TODO: pin tag
-    # builds the vector extension .so consumed by Frigate's semantic search
-
-  # ---- Coral USB runtime (Edge TPU) ----------------------------------------
-  libedgetpu:
-    plugin: dump
-    # NOTE: upstream uses feranick/libedgetpu .deb built for Debian 12 bookworm —
-    # VERIFY ABI against the Ubuntu core24 base, or build libedgetpu from source.
-    source: https://github.com/feranick/libedgetpu.git   # TODO: pin / use .deb
-    override-build: |
-      echo "TODO: stage libedgetpu.so.1 + plugdev udev rule"
-
-  # ---- web UI (React) ------------------------------------------------------
-  web-ui:
-    plugin: npm
-    npm-include-node: true
-    npm-node-version: "20"
-    source: https://github.com/blakeblackshear/frigate.git
-    source-tag: v0.17.2
-    source-subdir: web
-    organize:
-      "dist/*": opt/frigate/web/        # TODO: confirm build output dir
-
-  # ---- Frigate Python app + wheels -----------------------------------------
-  frigate:
+      ./configure --prefix=/usr --enable-shared --with-ensurepip=install \
+        LDFLAGS="-Wl,-rpath,/snap/frigate/current/usr/lib"
+      make -j"$(nproc)"
+      make install DESTDIR="$CRAFT_PART_INSTALL"
+  spike-wheels:
+    plugin: nil
     after: [python311]
-    plugin: python
-    source: https://github.com/blakeblackshear/frigate.git
-    source-tag: v0.17.2
-    python-requirements: [docker/main/requirements-wheels.txt]
+    # source deliberately isolated: probe edits must not retrigger this 500MB build
+    source: spike/wheels-src
     stage-packages:
-      # runtime libs from docker/main/install_deps.sh
       - libgl1
-      - libglib2.0-0
-      - libusb-1.0-0
-      - libgomp1
-      - libvulkan1
-      - mesa-vulkan-drivers
-      - libva2
-      - libva-drm2
-      - mesa-va-drivers
-      - i965-va-driver
-      - intel-media-va-driver-non-free
-      - vainfo
-      - jq
-      - curl
-      - openssl                    # TLS cert generation (nginx-run) + certsync fingerprint compare
-    organize:
-      # the python package + migrations live under /opt/frigate
-      frigate: opt/frigate/frigate
-      migrations: opt/frigate/migrations
-    # ===================================================================
-    # BLOCKER (report §4.1): Frigate's SharedMemoryFrameManager uses
-    # Python multiprocessing.shared_memory -> /dev/shm/psm_*  which snapd's
-    # AppArmor DENIES (only /dev/shm/snap.frigate.* is allowed).
-    # MUST patch the SHM name prefix to "snap.frigate." (or shim) here,
-    # AND verify snapd provides a large-enough writable /dev/shm.
-    # Prototype THIS before anything else.
-    # override-build: |
-    #   craftctl default
-    #   patch -p1 < $CRAFT_PROJECT_DIR/snap/local/patches/shm-prefix.patch
-    # ===================================================================
-
-  # ---- default models (detector + audio) -----------------------------------
-  models:
+    override-build: |
+      export LD_LIBRARY_PATH="$CRAFT_STAGE/usr/lib:${LD_LIBRARY_PATH:-}"
+      "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
+        --root "$CRAFT_PART_INSTALL" --prefix /usr \
+        -r requirements-core.txt
+      # Remove packages already staged by python311 (ensurepip) to avoid staging conflicts.
+      # Guard: pip reports "already satisfied" on re-runs (packages found in stage); in that
+      # case CRAFT_PART_INSTALL/site-packages is absent and the cleanup is a no-op.
+      SP="$CRAFT_PART_INSTALL/usr/lib/python3.11/site-packages"
+      if [ -d "$SP" ]; then
+        rm -rf "$SP/setuptools" "$SP/_distutils_hack" "$SP/pkg_resources"
+        find "$SP" -maxdepth 1 \( \
+          -name 'setuptools-*.dist-info' -o \
+          -name 'distutils-precedence.pth' \
+        \) -exec rm -rf {} +
+      fi
+  probes:
     plugin: dump
-    source: snap/local/models           # TODO: or fetch at build time
-    # OpenVINO SSDLite MobileNet, EdgeTPU/CPU tflite, YAMNet audio, labelmaps
+    source: spike/probes
     organize:
-      "*": opt/frigate/models/
-
-  # ---- launch/setup wrappers (replace s6 run scripts) ----------------------
+      '*': probes/
+  libedgetpu:
+    plugin: nil
+    build-packages: [wget]
+    stage-packages: [libusb-1.0-0]
+    override-build: |
+      wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
+      echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
+      dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+  va-tools:
+    plugin: nil
+    stage-packages:
+      - vainfo
+      - ocl-icd-libopencl1   # ICD loader: provides libOpenCL.so.1 for OpenVINO GPU plugin
+      - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
+      - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
+  coral-model:
+    plugin: nil
+    build-packages: [wget]
+    override-build: |
+      mkdir -p "$CRAFT_PART_INSTALL/models"
+      # M6: pinned to the immutable commit whose blob matches the sha below (master content
+      # 2026-07-07). NOTE: c21de44 (the detection models' commit) serves DIFFERENT content
+      # for this file (0400fbd9…) — do not "unify" the commits.
+      wget -O "$CRAFT_PART_INSTALL/models/edgetpu-test.tflite" \
+        https://github.com/google-coral/test_data/raw/104342d2d3480b3e66203073dac24f4e2dbb4c41/mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite
+      echo "5b468dfe63ce4d79056bb19b953529e25df0a8d841b204c626576a1b8bd36afe  $CRAFT_PART_INSTALL/models/edgetpu-test.tflite" | sha256sum -c -
   wrappers:
     plugin: dump
-    source: snap/local/bin
+    source: spike/bin
     organize:
-      "*": bin/
-    # bin/setup, bin/go2rtc-run, bin/frigate-run, bin/nginx-run, bin/certsync-run
+      '*': bin/
+  ffmpeg:
+    plugin: nil
+    build-packages: [wget, xz-utils, bzip2]
+    override-build: |
+      # --- 8.0 tree (autobuild, pinned) — temps migrated to $CRAFT_PART_BUILD (M1 review fix) ---
+      wget -O "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linux64-gpl-8.1.tar.xz"
+      echo "9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9  $CRAFT_PART_BUILD/ffmpeg-8.tar.xz" | sha256sum -c -
+      mkdir -p "$CRAFT_PART_BUILD/f8" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" -C "$CRAFT_PART_BUILD/f8" --strip-components=1
+      install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
+      install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
+      # --- 5.0 tree (tag-exact, v0.17.2 install_deps.sh) ---
+      wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linux64-gpl-5.1.tar.xz"
+      echo "377abec133f9d9e8014dee1b91c9684ac8bb0b5b7d80100a57116ff837c4c0d4  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -
+      mkdir -p "$CRAFT_PART_BUILD/f5" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" -C "$CRAFT_PART_BUILD/f5" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
+      install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffmpeg"
+      install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffprobe"
+      # --- 7.0 tree (tag-exact default; tarball is bzip2 despite .xz name — use tar -xf for auto-detect) ---
+      wget -O "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linux64-gpl-7.0.tar.xz"
+      echo "e13860eb90409c8218319c928067834ce450128e86f24cfed5cfe91ce6e31037  $CRAFT_PART_BUILD/ffmpeg-7.tar.xz" | sha256sum -c -
+      mkdir -p "$CRAFT_PART_BUILD/f7" && tar -xf "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" -C "$CRAFT_PART_BUILD/f7" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
+      install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffmpeg"
+      install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffprobe"
+  go2rtc:
+    plugin: nil
+    build-packages: [wget]
+    override-build: |
+      wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.13/go2rtc_linux_amd64"
+      echo "dce491325c28890ad0b85e83090753dc111b903ef83f43b834798f9114520dba  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
+      install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+  go2rtc-config:
+    plugin: dump
+    source: spike/config
+    organize:
+      '*': config/
+    # logrotate REFUSES a config that is group/world-writable ("Ignoring ... because it is writable
+    # by group or others"). The dump plugin preserves the source file's mode, and a 0664 working-tree
+    # bit would carry through — force logrotate.conf to 0644 at prime so the mode is deterministic
+    # regardless of the committer's umask (observed M7 Task 3).
+    permissions:
+      - path: config/logrotate.conf
+        mode: "644"
+  # M4 Task 1: upstream's exact nginx recipe (docker/main/build_nginx.sh @ v0.17.2) as a part.
+  # nginx 1.27.4 + kaltura vod 1.31 (2 upstream patches, committed under patches/nginx/) +
+  # secure-token 1.5 + set-misc v0.33 + ngx_devel_kit v0.3.3; upstream configure flags verbatim.
+  # THIRD-PARTY build patches (nginx-vod-module, not Frigate source) — outside the
+  # docs/patches.md Frigate register scope; provenance documented in the patch headers.
+  # No ccache (one-shot part build). html/ + conf/*.default removed per upstream.
+  nginx:
+    plugin: nil
+    build-packages:
+      - build-essential
+      - libpcre2-dev
+      - zlib1g-dev
+      - libssl-dev
+      - wget
+    # openssl binary: staged so nginx-run can call "$SNAP/usr/bin/openssl" to generate
+    # the self-signed default cert before nginx starts (M5 Task 2 TLS pre-start block).
+    # logrotate binary ("$SNAP/usr/sbin/logrotate"): the frigate.logrotate oneshot timer app
+    # rotates nginx's access/error logs (M7 hardening — bin/logrotate-run + config/logrotate.conf).
+    # GCC 15 / core26 build-env drift (M7 Task 4, root-build verification): nginx core's
+    # src/http/v2/ngx_http_v2_filter_module.c hits the new -Wunterminated-string-initialization
+    # diagnostic (5-byte u_char array init from a 5-char string literal — GCC now also counts
+    # the implicit NUL, same GCC-15 strictness class as the pre-existing implicit-fallthrough
+    # flag and the nginx-vod-module 0003 patch). Silenced via cc-opt, not a source patch — no
+    # Frigate/nginx behavior change, matches the existing implicit-fallthrough precedent below.
+    stage-packages:
+      - openssl
+      - logrotate
+    override-build: |
+      cd "$CRAFT_PART_BUILD"
+      wget -nv -O nginx.tar.gz "https://nginx.org/download/nginx-1.27.4.tar.gz"
+      echo "294816f879b300e621fa4edd5353dd1ec00badb056399eceb30de7db64b753b2  nginx.tar.gz" | sha256sum -c -
+      mkdir -p nginx && tar -zxf nginx.tar.gz -C nginx --strip-components=1
+      wget -nv -O vod.tar.gz "https://github.com/kaltura/nginx-vod-module/archive/refs/tags/1.31.tar.gz"
+      echo "ace04201cf2d2b1a3e5e732a22b92225b8ce61a494df9cc7f79d97efface8952  vod.tar.gz" | sha256sum -c -
+      mkdir -p nginx-vod-module && tar -zxf vod.tar.gz -C nginx-vod-module --strip-components=1
+      wget -nv -O secure-token.tar.gz "https://github.com/kaltura/nginx-secure-token-module/archive/refs/tags/1.5.tar.gz"
+      echo "9809b7797e049429627a2c9e78c78e4b27bf4a2d0c7274a126cb6bb16ddd4215  secure-token.tar.gz" | sha256sum -c -
+      mkdir -p nginx-secure-token-module && tar -zxf secure-token.tar.gz -C nginx-secure-token-module --strip-components=1
+      wget -nv -O ngx-devel-kit.tar.gz "https://github.com/vision5/ngx_devel_kit/archive/refs/tags/v0.3.3.tar.gz"
+      echo "faa2fcd5168b10764d35081356511d5f84db5c526a1aa4b6add2db94b6853b2b  ngx-devel-kit.tar.gz" | sha256sum -c -
+      mkdir -p ngx_devel_kit && tar -zxf ngx-devel-kit.tar.gz -C ngx_devel_kit --strip-components=1
+      wget -nv -O set-misc.tar.gz "https://github.com/openresty/set-misc-nginx-module/archive/refs/tags/v0.33.tar.gz"
+      echo "cd5e2cc834bcfa30149e7511f2b5a2183baf0b70dc091af717a89a64e44a2985  set-misc.tar.gz" | sha256sum -c -
+      mkdir -p nginx-set-misc-module && tar -zxf set-misc.tar.gz -C nginx-set-misc-module --strip-components=1
+      # vod patches: MAX_CLIPS 128->1080; rbsp-trailing-bits tolerance (frigate#4572);
+      # GCC 15 exit_process prototype fix (our portability patch, not upstream)
+      patch -d nginx-vod-module -p1 < "$CRAFT_PROJECT_DIR/spike/patches/nginx/0001-vod-max-clips-1080.patch"
+      patch -d nginx-vod-module -p1 < "$CRAFT_PROJECT_DIR/spike/patches/nginx/0002-vod-rbsp-trailing-bits.patch"
+      patch -d nginx-vod-module -p1 < "$CRAFT_PROJECT_DIR/spike/patches/nginx/0003-vod-gcc15-exit-process-prototype.patch"
+      cd nginx
+      ./configure --prefix=/usr/local/nginx \
+        --with-file-aio \
+        --with-http_sub_module \
+        --with-http_ssl_module \
+        --with-http_v2_module \
+        --with-http_auth_request_module \
+        --with-http_realip_module \
+        --with-threads \
+        --add-module=../ngx_devel_kit \
+        --add-module=../nginx-set-misc-module \
+        --add-module=../nginx-vod-module \
+        --add-module=../nginx-secure-token-module \
+        --with-cc-opt="-O3 -Wno-error=implicit-fallthrough -Wno-error=unterminated-string-initialization"
+      make -j"$(nproc)"
+      make install DESTDIR="$CRAFT_PART_INSTALL"
+      rm -rf "$CRAFT_PART_INSTALL/usr/local/nginx/html" "$CRAFT_PART_INSTALL/usr/local/nginx/conf"/*.default
+  frigate-src:
+    plugin: nil
+    source: https://github.com/blakeblackshear/frigate.git
+    source-tag: v0.17.2
+    source-depth: 1
+    override-build: |
+      patch -p1 < "$CRAFT_PROJECT_DIR/spike/patches/0001-env-driven-paths.patch"
+      # NOTE (2026-07-05 user ruling): NO behavior patches beyond 0001. A motion-calibration
+      # patch (forced exit after 60 frames) was trialed because the looping test clip's
+      # constant motion never satisfies stock calibration exit (pct_motion < 5%), and the
+      # config alternative motion.enabled=false is hard-rejected by v0.17.2 validation when
+      # detect.enabled=true. Ruling: run STOCK code; the detection money test is POSTPONED
+      # until live cameras (natural quiet intervals) are available. See docs/patches.md.
+      # frigate/version.py is generated at build time upstream (Makefile `version` target:
+      # echo 'VERSION = "$(VERSION)-$(COMMIT_HASH)"' > frigate/version.py) — not in the git tree.
+      echo "VERSION = \"0.17.2-$(git rev-parse --short HEAD)\"" > frigate/version.py
+      mkdir -p "$CRAFT_PART_INSTALL/opt/frigate"
+      cp -r frigate migrations "$CRAFT_PART_INSTALL/opt/frigate/"
+      # Upstream Dockerfile COPYs labelmap.txt / audio-labelmap.txt to the image root; / is
+      # not writable in a snap, so stage them with the source; the config template points
+      # model.labelmap_path at /opt/frigate/labelmap.txt (reachable via the Task-2 layout).
+      # audio-labelmap.txt: runtime-only (events/audio.py:373); staged proactively mirroring
+      # upstream Dockerfile — not forced by a validation error.
+      cp labelmap.txt audio-labelmap.txt "$CRAFT_PART_INSTALL/opt/frigate/"
+  # M3 Task 1: OpenVINO SSDLite (prebuilt IR) + CPU tflite fallback + labelmaps.
+  # Route: prebuilt — openvino.tools.mo was removed in openvino 2024.0 (staged
+  # version is 2025.3.0); ovc dropped TF OD API params (pipeline_config,
+  # transformations_config) required for SSD [1,1,N,7] output; build-time
+  # conversion would add tensorflow (~600 MB) as an extra pip dep. Converted
+  # once on host using openvino-dev==2024.6.0 + tensorflow==2.17. See README.
+  detector-models:
+    plugin: nil
+    source: spike/models-prebuilt
+    build-packages: [wget]
+    override-build: |
+      # --- OpenVINO SSDLite IR (prebuilt; MO-converted, FP16, SSD-transformed) ---
+      # ssdlite_mobilenet_v2 from TF Model Zoo; output shape [1,1,N,7] for Frigate SSD handler
+      echo "1de65ab321104005ae89713cd062432bb49663f84c69756a80e565acb0b8e4c4  $CRAFT_PART_SRC/ssdlite_mobilenet_v2.xml" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_SRC/ssdlite_mobilenet_v2.xml" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/openvino/ssdlite_mobilenet_v2.xml"
+      echo "e9ae61499b401144f6fa3bc08785d55bdfbb8ab706b58c870755830cc04663d3  $CRAFT_PART_SRC/ssdlite_mobilenet_v2.bin" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_SRC/ssdlite_mobilenet_v2.bin" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/openvino/ssdlite_mobilenet_v2.bin"
+      # OpenVINO labelmap: coco_91cl_bkgr.txt with truck->car patch (upstream Dockerfile line 136)
+      echo "710061971626db24bab3bae6ff4e9ce6e66650565990123f3f86f12d385b37d1  $CRAFT_PART_SRC/coco_91cl_bkgr.txt" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_SRC/coco_91cl_bkgr.txt" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/openvino/coco_91cl_bkgr.txt"
+      # --- CPU tflite fallback (downloaded; pinned) ---
+      # ssdlite_mobiledet_coco_qat_postprocess from google-coral test_data (commit c21de44)
+      wget -qO "$CRAFT_PART_BUILD/cpu_model.tflite" \
+        "https://github.com/google-coral/test_data/raw/c21de4450f88a20ac5968628d375787745932a5a/ssdlite_mobiledet_coco_qat_postprocess.tflite"
+      echo "90bb33a634e041914cc1819aa5df99818e6c396c4d2db952c0fd7a9cffc4724f  $CRAFT_PART_BUILD/cpu_model.tflite" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_BUILD/cpu_model.tflite" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/cpu/cpu_model.tflite"
+      # --- EdgeTPU COCO detection model (M6; pinned; same c21de44 commit as the CPU sibling) ---
+      # ssdlite_mobiledet_coco_qat_postprocess_edgetpu: the EdgeTPU compilation of the CPU
+      # fallback model above (same network, same COCO labelmap.txt).
+      wget -qO "$CRAFT_PART_BUILD/edgetpu_model.tflite" \
+        "https://github.com/google-coral/test_data/raw/c21de4450f88a20ac5968628d375787745932a5a/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite"
+      echo "4a2be2bbb614e576d56dcb914fa52752bf0f13411512710d355d97faa1b35641  $CRAFT_PART_BUILD/edgetpu_model.tflite" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_BUILD/edgetpu_model.tflite" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/edgetpu/edgetpu_model.tflite"
+      # --- COCO labelmap (pinned; same as frigate-src top-level copy) ---
+      echo "e23585f859d6a93827443fde9fe99ece7195dd856648af9ecb6bc6cf05f9b4d2  $CRAFT_PART_SRC/labelmap.txt" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_SRC/labelmap.txt" \
+        "$CRAFT_PART_INSTALL/opt/frigate/models/labelmap.txt"
+
+  # M3 Task 2: CC0 pedestrian clip for real-object detection testing.
+  # Source: Wikimedia Commons CC0 1.0 (see spike/LICENSE-testclip).
+  # The file is a pre-converted h264/mp4 (converted from the CC0 WebM source)
+  # committed to the spike source tree alongside the prebuilt model binaries.
+  # Conversion avoids Wikimedia rate-limiting during snap builds; provenance
+  # and sha256 of both source WebM and converted MP4 are in LICENSE-testclip.
+  test-clip:
+    plugin: nil
+    source: spike/media-samples
+    override-build: |
+      echo "38df1538cd58333a55111579367b6150df62c2ae521969dd1c1bb5631a45c887  $CRAFT_PART_SRC/testclip.mp4" | sha256sum -c -
+      install -D -m 0644 "$CRAFT_PART_SRC/testclip.mp4" "$CRAFT_PART_INSTALL/media-samples/testclip.mp4"
+
+  # Task 5 import-chain additions: modules hard-imported (module level) by the
+  # `python3 -m frigate --validate-config` chain but absent from the core-58 wheel set.
+  # Separate part so the big spike-wheels part stays cached. Upstream pins from
+  # docker/main/requirements-wheels.txt: sherpa-onnx==1.12.*, librosa==0.11.*,
+  # soundfile==0.13.*, transformers==4.45.*, pandas==2.2.*; py3nvml is an unpinned git dep
+  # upstream -> nearest pinned release; regex is transitive upstream (via transformers) but
+  # directly imported by frigate.embeddings. NOTE: all of these are DEFERRED-frigate-ai.txt
+  # entries — the deferred-AI companion-snap plan does not survive frigate's import graph
+  # (module-level imports in embeddings/data_processing/api); recorded as an M2 finding.
+  # Pins below use RESOLVED exact versions from the installed snap (M2 fix round 1).
+  validate-deps:
+    plugin: nil
+    after: [python311, spike-wheels]
+    override-build: |
+      export LD_LIBRARY_PATH="$CRAFT_STAGE/usr/lib:${LD_LIBRARY_PATH:-}"
+      "$CRAFT_STAGE/usr/bin/python3.11" -m pip install --no-cache-dir \
+        --root "$CRAFT_PART_INSTALL" --prefix /usr \
+        "py3nvml==0.2.7" "regex==2024.11.6" "sherpa-onnx==1.12.40" \
+        "librosa==0.11.0" "soundfile==0.13.1" \
+        "transformers==4.45.2" "pandas==2.2.3"
+      # Same dedupe guard as spike-wheels: drop packages already staged by python311.
+      SP="$CRAFT_PART_INSTALL/usr/lib/python3.11/site-packages"
+      if [ -d "$SP" ]; then
+        rm -rf "$SP/setuptools" "$SP/_distutils_hack" "$SP/pkg_resources"
+        find "$SP" -maxdepth 1 \( \
+          -name 'setuptools-*.dist-info' -o \
+          -name 'distutils-precedence.pth' \
+        \) -exec rm -rf {} +
+      fi
+  # M4 Task 3: upstream web UI built at base=/ for root-path serving via nginx.
+  # DEVIATION: e2e:build absent at v0.17.2; scripts block = dev/build/lint/lint:fix/preview/test/coverage.
+  # build script uses --base=/BASE_PATH/ (Docker substitution token, not root base).
+  # Minimal equivalent: vite build --base=/ (deviation documented in task-3-report.md).
+  # Source isolated via pinned git tag + separate source: local project edits never retrigger npm build.
+  # nginx root: /opt/frigate/web (layout: /opt/frigate -> $SNAP/opt/frigate; see nginx.conf.in line 347).
+  web-ui:
+    plugin: nil
+    source: https://github.com/blakeblackshear/frigate.git
+    source-tag: v0.17.2
+    source-depth: 1
+    build-snaps: [node/20/stable]
+    override-build: |
+      cd "$CRAFT_PART_SRC/web"
+      npm ci
+      node_modules/.bin/vite build --base=/
+      mkdir -p "$CRAFT_PART_INSTALL/opt/frigate/web"
+      cp -r dist/. "$CRAFT_PART_INSTALL/opt/frigate/web/"

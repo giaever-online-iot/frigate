@@ -3,7 +3,11 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 SNAP_NAME=frigate
-SNAP_FILE=$(ls -t spike/${SNAP_NAME}_*.snap 2>/dev/null | head -1)
+# M7 Task 4: project root is now the snapcraft project (snap/snapcraft.yaml at root);
+# `snapcraft pack` at root produces ./frigate_*.snap. Root-first, but tolerate old
+# spike/frigate_*.snap artifacts and Task 1's remote-built spike/frigate-remote_amd64.snap
+# (frigate*_*.snap matches both frigate_<ver>_<arch>.snap and frigate-remote_<arch>.snap).
+SNAP_FILE=$(ls -t frigate*_*.snap spike/frigate*_*.snap 2>/dev/null | head -1)
 RESULTS=/var/snap/$SNAP_NAME/common/spike-results
 EVIDENCE=spike/results
 FAIL=0
@@ -52,9 +56,10 @@ if [ -f "/var/tmp/frigate-livecam-url.stash" ] && \
 fi
 
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
-# Capture expanded snapcraft yaml (gpu extension evidence); use abs path since subshell cd's into spike/
+# Capture expanded snapcraft yaml (gpu extension evidence); project root is the snapcraft
+# project since M7 Task 4 (snap/snapcraft.yaml), so this runs directly from repo root.
 ABS_EVIDENCE="$(pwd)/$EVIDENCE"
-(cd spike && snapcraft expand-extensions > "$ABS_EVIDENCE/expanded-snapcraft.yaml" 2>/dev/null) || true
+snapcraft expand-extensions > "$ABS_EVIDENCE/expanded-snapcraft.yaml" 2>/dev/null || true
 
 # Live camera secret ($SNAP_COMMON/livecam-url, provisioned once by the operator) must survive
 # the purge/reinstall cycle: stash before remove, restore after install. Never echo its content.
@@ -88,7 +93,7 @@ trap '
 ' EXIT
 
 if [ "${1:-}" != "--skip-install" ]; then
-  [ -n "$SNAP_FILE" ] || { echo "ERROR: no spike/${SNAP_NAME}_*.snap file found - build first (cd spike && snapcraft pack)"; exit 1; }
+  [ -n "$SNAP_FILE" ] || { echo "ERROR: no ${SNAP_NAME}_*.snap file found - build first (snapcraft pack)"; exit 1; }
   if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
     LIVECAM_STASH=$(mktemp)
     cp -p "/var/snap/$SNAP_NAME/common/livecam-url" "$LIVECAM_STASH"

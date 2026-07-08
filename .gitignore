@@ -1,2 +1,4 @@
 .superpowers/
 .remember/
+# M7 Task 4: `snapcraft pack` at repo root drops the artifact at ./frigate_*.snap
+/frigate_*.snap
