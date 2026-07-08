@@ -879,9 +879,14 @@ EOF
   check "reject: tls.cert-profile=rsa-1024 → snap set fails" sh -c "! snap set $SNAP_NAME tls.cert-profile=rsa-1024 2>/dev/null"
   check "reject: certsync.interval=5 (below min 10) → snap set fails" sh -c "! snap set $SNAP_NAME certsync.interval=5 2>/dev/null"
   check "reject: detector=gpu (not ov|coral|cpu) → snap set fails" sh -c "! snap set $SNAP_NAME detector=gpu 2>/dev/null"
+  # Reserved-port rejection (M7 final review, CRITICAL — auth): ports.https=5000 would render the
+  # external LAN listener on Frigate's internal auth-bypass port (X-Server-Port==5000 => anonymous
+  # admin). The hook rejects the whole reserved set; assert both the failure AND that the surfaced
+  # error mentions "reserved" (snapd surfaces the configure hook's stderr on a failed snap set).
+  check "reject: ports.https=5000 (reserved — would bypass auth) → snap set fails, error mentions reserved" sh -c "snap set $SNAP_NAME ports.https=5000 2>&1 | grep -qi reserved"
   check "reject: daemon state untouched — nginx still active after rejected sets" sh -c "snap services $SNAP_NAME.nginx | grep -q ' active'"
   check "reject: bad value never committed — ports.https != 99999" sh -c "[ \"\$(snap get $SNAP_NAME ports.https 2>/dev/null)\" != 99999 ]"
-  echo "  reject finding: 6 invalid snap-set values rolled back by the configure hook; nginx uninterrupted"
+  echo "  reject finding: 7 invalid snap-set values rolled back by the configure hook (incl. reserved ports.https=5000); nginx uninterrupted"
 
   # (1) PORT REBIND — snap set ports.https=9443 → configure hook restarts nginx → TLS on :9443;
   # reset (unset → default 8971) → original :8971 checks re-assert.
