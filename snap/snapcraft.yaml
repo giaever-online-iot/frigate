@@ -305,12 +305,21 @@ parts:
     # the self-signed default cert before nginx starts (M5 Task 2 TLS pre-start block).
     # logrotate binary ("$SNAP/usr/sbin/logrotate"): the frigate.logrotate oneshot timer app
     # rotates nginx's access/error logs (M7 hardening — bin/logrotate-run + config/logrotate.conf).
-    # GCC 15 / core26 build-env drift (M7 Task 4, root-build verification): nginx core's
-    # src/http/v2/ngx_http_v2_filter_module.c hits the new -Wunterminated-string-initialization
-    # diagnostic (5-byte u_char array init from a 5-char string literal — GCC now also counts
-    # the implicit NUL, same GCC-15 strictness class as the pre-existing implicit-fallthrough
-    # flag and the nginx-vod-module 0003 patch). Silenced via cc-opt, not a source patch — no
-    # Frigate/nginx behavior change, matches the existing implicit-fallthrough precedent below.
+    # cc-opt flags below are two different things. "-O3 -Wno-error=implicit-fallthrough" is
+    # upstream-verbatim, copied as-is from Frigate's own docker/main/build_nginx.sh @ v0.17.2 —
+    # not a downstream deviation. "-Wno-error=unterminated-string-initialization" IS our
+    # downstream addition (M7 Task 4, root-build verification): nginx core's
+    # src/http/v2/ngx_http_v2_filter_module.c hits GCC 15's new
+    # -Wunterminated-string-initialization diagnostic (5-byte u_char array init from a 5-char
+    # string literal — GCC now also counts the implicit NUL), exposed by the cold-cache root
+    # build. "-Wno-error=" only downgrades error to warning; the diagnostic still prints in
+    # build logs, unlike a blanket "-Wno-" silence. Handled via cc-opt rather than a
+    # docs/patches.md source patch because this is third-party nginx CORE — outside that
+    # register's scope — and a core source patch would be materially more invasive/brittle
+    # across nginx version bumps than the 3-line vod prototype fix (0003) was. This is a
+    # deliberate DISTINCTION from the M4 vod ruling (cc-opt suppression rejected there in
+    # favor of source patch 0003), not a claim of parity with it. Recorded in docs/patches.md
+    # nginx section for the same review-boundary transparency.
     stage-packages:
       - openssl
       - logrotate

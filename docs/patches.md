@@ -61,3 +61,33 @@ error. The correct diagnostic is `-Wincompatible-pointer-types`. The patch body 
 applies cleanly — header lines are not processed by `patch`. Confirming evidence: the cc-opt
 flag removed in Fix Round 1 was `-Wno-incompatible-pointer-types`, and the GCC error line in
 the build log names `[-Wincompatible-pointer-types]` (task-1-report.md verbatim).
+
+### Build-flag deviation (not a patch): nginx core cc-opt, `-Wno-error=unterminated-string-initialization`
+
+Recorded here — not as a numbered patch — for the same review-boundary transparency as the
+table above, because it is a cc-opt flag on the nginx part in `snap/snapcraft.yaml`, not a
+patch file under `spike/patches/nginx/`.
+
+The nginx part's `--with-cc-opt` carries two flags that are NOT the same kind of thing:
+
+- `-O3 -Wno-error=implicit-fallthrough` is **upstream-verbatim**, copied as-is from Frigate's
+  own `docker/main/build_nginx.sh` @ v0.17.2. It is not a downstream deviation and needs no
+  entry here; it is background for the point below.
+- `-Wno-error=unterminated-string-initialization` **is our downstream addition** (M7 Task 4,
+  root-build verification). Reason: nginx core's `src/http/v2/ngx_http_v2_filter_module.c`
+  hits GCC 15's new `-Wunterminated-string-initialization` diagnostic (a 5-byte `u_char` array
+  initialized from a 5-char string literal — GCC 15 now also counts the implicit NUL), exposed
+  by the cold-cache root build. `-Wno-error=` only downgrades the diagnostic from error to
+  warning; it still prints in build logs, unlike a blanket `-Wno-` silence that would hide it
+  entirely.
+
+**Why cc-opt here instead of a `docs/patches.md`-style source patch (the 0003 route above)**:
+`ngx_http_v2_filter_module.c` is third-party nginx **core**, not `nginx-vod-module` — outside
+this register's original scope — and a core source patch would be materially more invasive
+and more brittle across nginx version bumps than the 3-line vod prototype fix (0003) was. This
+is a deliberate **distinction** from the M4 vod ruling, not a claim of parity with it: for the
+vod case, cc-opt suppression was considered and *rejected* in favor of a minimal source patch
+with a trip-wire (0003); for this nginx-core case, the flag is judged the lower-risk choice and
+the source-patch route is not taken. The two decisions look similar on the surface (both are
+"GCC-15 vs a diagnostic") but resolve oppositely, and this entry exists so that asymmetry is
+explicit rather than implied to be consistent.
