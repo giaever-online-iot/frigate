@@ -27,6 +27,18 @@ jqr()   { jq -r "$2" "$RESULTS/$1.json" 2>/dev/null; }
 
 command -v jq >/dev/null || { echo "jq required: sudo apt install -y jq"; exit 1; }
 
+# m7: snap size floor — silent prime-gutting tripwire (controller addition, 2026-07-08). SNAP_FILE
+# was resolved above (line 10); a chosen artifact under 900 MB means the prime was gutted (a mid-
+# write artifact read, or a silent pack failure) — catch it HERE, before anything installs it. The
+# earlier check() helpers are needed, so this rides just below their definition rather than at the
+# resolution line. Guarded on a non-empty SNAP_FILE (a bare --skip-install with no local artifact
+# leaves it empty; the size floor simply does not apply in that case).
+if [ -n "$SNAP_FILE" ]; then
+  SNAP_SZ=$(stat -c %s "$SNAP_FILE" 2>/dev/null || echo 0)
+  check "m7: snap size floor (>900 MB, prime not gutted)" sh -c "[ '$SNAP_SZ' -ge 943718400 ]"
+  echo "  m7 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (floor 943718400)"
+fi
+
 # Operator provisioning for the live camera (see spike/config/frigate-config.yml LIVECAM block).
 # URL arrives on STDIN (never argv - visible in ps) and is written root-owned 0600:
 #   printf '%s' 'rtsp://user:pass@host:554/path' | sudo tests/spike-smoke.sh --provision-livecam
@@ -802,6 +814,223 @@ else
   echo "SKIP: coral phase MONEY: inference_speed drift — no Coral USB attached"
   echo "SKIP: coral phase: person event — no Coral USB attached"
   echo "SKIP: coral phase: OpenVINO default restored — no Coral USB attached"
+fi
+
+# --- M7: snap-set surface + hardening (Task 5 — the M7 assertions) ---
+# Guarded on the M7 config surface: the configure hook is a Task-2 addition, so its presence in
+# the mounted snap distinguishes an M7 build from Task 1's remote artifact (built from kickoff
+# HEAD, pre-Tasks-2-4). No surface → every M7 assertion emits an explicit SKIP (coral-style) so
+# gate #2 (remote-artifact parity) stays green. `snap get ports.https` is a weaker OR probe (it
+# only succeeds once the key is set), kept for completeness; the hook-file test is authoritative.
+M7_CERT_DIR=/var/snap/$SNAP_NAME/current/letsencrypt/live/frigate
+M7_CFG=/var/snap/$SNAP_NAME/current/config/config.yml
+if [ -f "/snap/$SNAP_NAME/current/meta/hooks/configure" ] || snap get $SNAP_NAME ports.https >/dev/null 2>&1; then
+
+  # (8) RENDER-ONCE GUARD — runs BEFORE anything that could regenerate config.yml. Setting the
+  # `detector` key must NOT re-render config.yml (render-once; detector applies at the NEXT render
+  # only, and the configure hook never touches config.yml or restarts frigate). sha256 (not cat —
+  # config.yml carries the livecam credential) before/after must be byte-identical.
+  M7_SHA_BEFORE=$(sha256sum "$M7_CFG" 2>/dev/null | awk '{print $1}')
+  snap set $SNAP_NAME detector=cpu 2>/dev/null || fail_ "render-once: snap set detector=cpu (valid value) should succeed"
+  sleep 3   # let the configure hook run (restarts nginx+certsync, deliberately NOT frigate)
+  M7_SHA_AFTER=$(sha256sum "$M7_CFG" 2>/dev/null | awk '{print $1}')
+  check "render-once: config.yml sha unchanged after snap set detector=cpu" sh -c "[ -n '$M7_SHA_BEFORE' ] && [ '$M7_SHA_BEFORE' = '$M7_SHA_AFTER' ]"
+  snap unset $SNAP_NAME detector 2>/dev/null || true   # restore auto-detect (pristine)
+  echo "  render-once finding: sha_before=${M7_SHA_BEFORE:0:12} sha_after=${M7_SHA_AFTER:0:12} (detector key is render-time-only; config.yml frozen)"
+
+  # (9) FRESH-RENDER AUTO-DETECT — the config.yml rendered by the top-of-harness purge/reinstall
+  # cycle (detector unset → auto-detect; this host has /dev/dri/renderD*) must have selected ov.
+  # Non-secret grep only (count of a literal marker; never cat the credential-bearing file).
+  # grep -c prints its count (even 0) AND exits 1 on zero matches, so a `|| echo 0` fallback would
+  # append a spurious second line — capture the count directly and default only the file-missing case.
+  M7_OV=$(grep -c 'type: openvino' "$M7_CFG" 2>/dev/null); M7_OV=${M7_OV:-0}
+  M7_CPU=$(grep -c 'type: cpu' "$M7_CFG" 2>/dev/null); M7_CPU=${M7_CPU:-0}
+  M7_CORAL=$(grep -c 'type: edgetpu' "$M7_CFG" 2>/dev/null); M7_CORAL=${M7_CORAL:-0}
+  check "auto-detect: fresh render selected ov (renderD* present → type: openvino)" sh -c "[ '$M7_OV' -ge 1 ]"
+  check "auto-detect: the other two detector blocks were stripped (exactly one rendered)" sh -c "[ '$M7_CPU' -eq 0 ] && [ '$M7_CORAL' -eq 0 ]"
+  echo "  auto-detect finding: type:openvino=$M7_OV type:cpu=$M7_CPU type:edgetpu=$M7_CORAL (auto-detect → ov; cpu/coral marker regions deleted at render)"
+
+  # (6) LITERAL-SAFE RENDERER — the shipped renderer is a python str.replace (frigate-run), so a
+  # URL with sed-hostile bytes (| & \) must survive byte-exact. Proof on SCRATCH paths with a TEST
+  # url (never the real $SNAP_COMMON/livecam-url); the metacharacters are why the old sed renderer
+  # was retired (M4 finding). str.replace is interpreter-independent, so a plain python3 is faithful.
+  M7_SCRATCH=$(mktemp -d)
+  M7_TESTURL='rtsp://user:p|a&b\c@camera.example:554/Streaming/Channels/101'
+  printf '%s\n' "$M7_TESTURL" > "$M7_SCRATCH/url"
+  printf 'cameras:\n  x:\n    ffmpeg:\n      inputs:\n        - path: __LIVECAM_URL__\n' > "$M7_SCRATCH/tmpl.yml"
+  python3 - "$M7_SCRATCH/tmpl.yml" "$M7_SCRATCH/url" <<'EOF' 2>/dev/null || true
+import sys
+cfg = open(sys.argv[1]).read()
+url = open(sys.argv[2]).read().strip()
+open(sys.argv[1], "w").write(cfg.replace("__LIVECAM_URL__", url))
+EOF
+  check "renderer: literal-safe — |&\\ URL rendered byte-exact (scratch)" grep -qF "$M7_TESTURL" "$M7_SCRATCH/tmpl.yml"
+  check "renderer: token fully substituted (no __LIVECAM_URL__ remains)" sh -c "! grep -q '__LIVECAM_URL__' '$M7_SCRATCH/tmpl.yml'"
+  echo "  renderer finding: |&\\ URL byte-exact via python str.replace (sed metacharacter hazard retired, M4→M7)"
+  rm -rf "$M7_SCRATCH"
+
+  # (7) INVALID KEY REJECTION — the configure hook validates every key and exits non-zero on a bad
+  # value, so `snap set` fails and snapd rolls the transaction back (value never committed, daemons
+  # never restarted). `! snap set …` under check(): reject succeeds → 0 → PASS; a bad value slipping
+  # through → snap set 0 → ! → 1 → FAIL. Daemon-state-untouched proven by nginx staying active.
+  check "reject: ports.https=99999 (out of range) → snap set fails" sh -c "! snap set $SNAP_NAME ports.https=99999 2>/dev/null"
+  check "reject: ports.https=abc (non-integer) → snap set fails" sh -c "! snap set $SNAP_NAME ports.https=abc 2>/dev/null"
+  check "reject: tls.enabled=maybe → snap set fails" sh -c "! snap set $SNAP_NAME tls.enabled=maybe 2>/dev/null"
+  check "reject: tls.cert-profile=rsa-1024 → snap set fails" sh -c "! snap set $SNAP_NAME tls.cert-profile=rsa-1024 2>/dev/null"
+  check "reject: certsync.interval=5 (below min 10) → snap set fails" sh -c "! snap set $SNAP_NAME certsync.interval=5 2>/dev/null"
+  check "reject: detector=gpu (not ov|coral|cpu) → snap set fails" sh -c "! snap set $SNAP_NAME detector=gpu 2>/dev/null"
+  check "reject: daemon state untouched — nginx still active after rejected sets" sh -c "snap services $SNAP_NAME.nginx | grep -q ' active'"
+  check "reject: bad value never committed — ports.https != 99999" sh -c "[ \"\$(snap get $SNAP_NAME ports.https 2>/dev/null)\" != 99999 ]"
+  echo "  reject finding: 6 invalid snap-set values rolled back by the configure hook; nginx uninterrupted"
+
+  # (1) PORT REBIND — snap set ports.https=9443 → configure hook restarts nginx → TLS on :9443;
+  # reset (unset → default 8971) → original :8971 checks re-assert.
+  snap set $SNAP_NAME ports.https=9443 2>/dev/null || fail_ "ports.https=9443: snap set (valid) should succeed"
+  M7_9443=""
+  for _i in $(seq 1 12); do ss -tln | grep -q '0\.0\.0\.0:9443' && { M7_9443=bound; break; }; sleep 2; done
+  check "ports.https=9443: nginx TLS bound on 0.0.0.0:9443 (ss)" test "$M7_9443" = bound
+  M7_C9443=""
+  for _i in $(seq 1 6); do
+    S=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://127.0.0.1:9443/ 2>/dev/null)
+    [ "$S" = 200 ] && { M7_C9443=200; break; }; sleep 2
+  done
+  check "ports.https=9443: curl -k https://127.0.0.1:9443/ → 200" test "$M7_C9443" = 200
+  snap unset $SNAP_NAME ports.https 2>/dev/null || true   # reset → default 8971 re-renders
+  M7_8971=""
+  for _i in $(seq 1 12); do ss -tln | grep -q '0\.0\.0\.0:8971' && { M7_8971=bound; break; }; sleep 2; done
+  check "ports.https reset: nginx TLS bound back on 0.0.0.0:8971 (ss)" test "$M7_8971" = bound
+  check "ports.https reset: 9443 no longer bound" sh -c "! ss -tln | grep -q '0\.0\.0\.0:9443'"
+  M7_C8971=""
+  for _i in $(seq 1 6); do
+    S=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://127.0.0.1:8971/ 2>/dev/null)
+    [ "$S" = 200 ] && { M7_C8971=200; break; }; sleep 2
+  done
+  check "ports.https reset: curl -k https://127.0.0.1:8971/ → 200 (original re-asserted)" test "$M7_C8971" = 200
+  echo "  ports finding: 9443 bound=$M7_9443 curl=$M7_C9443 → reset 8971 bound=$M7_8971 curl=$M7_C8971"
+
+  # (3) CERTSYNC INTERVAL — snap set certsync.interval=15 → cert-swap reload observed ≤45 s (vs the
+  # old 90 s bound at interval=60). Same swap machinery as the M5 money check, tighter deadline.
+  snap set $SNAP_NAME certsync.interval=15 2>/dev/null || fail_ "certsync.interval=15: snap set (valid) should succeed"
+  for _i in 1 2 3 4 5 6; do snap services $SNAP_NAME.certsync | grep -q ' active' && break; sleep 2; done
+  sleep 3   # certsync cold-start pid gate (nginx.pid already present → passes fast)
+  M7_CS_OLD=$(echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -fingerprint -noout 2>/dev/null || echo failed)
+  openssl req -new -newkey rsa:2048 -days 7 -nodes -x509 \
+      -subj "/O=FRIGATE TEST CERT/CN=certsync-i15" \
+      -keyout /tmp/m7-cs15-key.pem -out /tmp/m7-cs15-cert.pem 2>/dev/null
+  if [ -d "$M7_CERT_DIR" ]; then
+    cp /tmp/m7-cs15-cert.pem "$M7_CERT_DIR/fullchain.pem"
+    cp /tmp/m7-cs15-key.pem  "$M7_CERT_DIR/privkey.pem"
+    M7_CS_SWAP=$(date +%s)
+    rm -f /tmp/m7-cs15-key.pem /tmp/m7-cs15-cert.pem
+    M7_CS_NEW=""; M7_CS_EL=999
+    for _i in $(seq 1 12); do   # 12×4 s = 48 s ceiling; assertion bound 45 s (interval 15 + reload)
+      LFP=$(echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -fingerprint -noout 2>/dev/null || echo failed)
+      if [ "$LFP" != failed ] && [ "$LFP" != "$M7_CS_OLD" ]; then M7_CS_NEW="$LFP"; M7_CS_EL=$(( $(date +%s) - M7_CS_SWAP )); break; fi
+      sleep 4
+    done
+    check "certsync.interval=15: new fingerprint served after cert swap" test -n "$M7_CS_NEW"
+    check "certsync.interval=15: cert swap → reload ≤45 s (elapsed=${M7_CS_EL}s)" sh -c "[ $M7_CS_EL -le 45 ]"
+    echo "  certsync15 finding: elapsed=${M7_CS_EL}s at interval=15 (was bounded 90 s at interval=60)"
+  else
+    fail_ "certsync.interval=15: new fingerprint served after cert swap (cert dir absent: $M7_CERT_DIR)"
+    fail_ "certsync.interval=15: cert swap → reload ≤45 s"
+    rm -f /tmp/m7-cs15-key.pem /tmp/m7-cs15-cert.pem
+  fi
+  snap unset $SNAP_NAME certsync.interval 2>/dev/null || true   # reset → 60 s default
+
+  # (2) CERT PROFILE — snap set tls.cert-profile=ecdsa-p256 → DELETE the cert files → restart nginx
+  # (regeneration only fires when no cert is on disk) → served leaf is EC / P-256. Then reset
+  # (unset → rsa-4096 default) → delete → restart → RSA-4096 regenerates. Runs LAST of the TLS items
+  # so the block ends on the clean RSA-4096 default. Gen-time comparison measured directly on scratch
+  # (restart-to-served latency also folds in nginx boot, so it is not a clean gen figure).
+  M7_ECT=$(mktemp -d)
+  M7_T0=$(date +%s.%N); openssl req -new -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 7 -subj "/O=T/CN=x" -keyout "$M7_ECT/e.key" -out "$M7_ECT/e.crt" 2>/dev/null; M7_T1=$(date +%s.%N)
+  M7_T2=$(date +%s.%N); openssl req -new -newkey rsa:4096 -days 7 -nodes -x509 -subj "/O=T/CN=x" -keyout "$M7_ECT/r.key" -out "$M7_ECT/r.crt" 2>/dev/null; M7_T3=$(date +%s.%N)
+  M7_ECGEN=$(awk -v a="$M7_T0" -v b="$M7_T1" 'BEGIN{printf "%.2f", b-a}')
+  M7_RSGEN=$(awk -v a="$M7_T2" -v b="$M7_T3" 'BEGIN{printf "%.2f", b-a}')
+  rm -rf "$M7_ECT"
+  snap set $SNAP_NAME tls.cert-profile=ecdsa-p256 2>/dev/null || fail_ "tls.cert-profile=ecdsa-p256: snap set (valid) should succeed"
+  if [ -d "$M7_CERT_DIR" ]; then
+    rm -f "$M7_CERT_DIR/privkey.pem" "$M7_CERT_DIR/fullchain.pem"
+    snap restart $SNAP_NAME.nginx 2>/dev/null || true
+    M7_EC_SERVED=""
+    for _i in $(seq 1 12); do
+      echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -text -noout 2>/dev/null > "$EVIDENCE/m7-ecdsa-cert.txt" || true
+      grep -q 'id-ecPublicKey' "$EVIDENCE/m7-ecdsa-cert.txt" && { M7_EC_SERVED=yes; break; }
+      sleep 3
+    done
+    check "cert-profile ecdsa-p256: served leaf is EC (id-ecPublicKey)" test "$M7_EC_SERVED" = yes
+    check "cert-profile ecdsa-p256: served leaf curve is P-256" grep -q 'NIST CURVE: P-256' "$EVIDENCE/m7-ecdsa-cert.txt"
+    # reset to the RSA-4096 default and force regeneration the same way
+    snap unset $SNAP_NAME tls.cert-profile 2>/dev/null || true
+    rm -f "$M7_CERT_DIR/privkey.pem" "$M7_CERT_DIR/fullchain.pem"
+    snap restart $SNAP_NAME.nginx 2>/dev/null || true
+    M7_RS_SERVED=""
+    for _i in $(seq 1 12); do
+      echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -text -noout 2>/dev/null > "$EVIDENCE/m7-rsa-cert.txt" || true
+      grep -q 'rsaEncryption' "$EVIDENCE/m7-rsa-cert.txt" && { M7_RS_SERVED=yes; break; }
+      sleep 3
+    done
+    check "cert-profile reset: RSA-4096 default regenerated (rsaEncryption served)" test "$M7_RS_SERVED" = yes
+    check "cert-profile reset: served RSA key is 4096-bit" grep -q 'Public-Key: (4096 bit)' "$EVIDENCE/m7-rsa-cert.txt"
+    echo "  cert-profile finding: ecdsa-p256 served=$M7_EC_SERVED (P-256), rsa-4096 restored=$M7_RS_SERVED; gen-time ecdsa=${M7_ECGEN}s vs rsa-4096=${M7_RSGEN}s (scratch openssl)"
+  else
+    snap unset $SNAP_NAME tls.cert-profile 2>/dev/null || true
+    fail_ "cert-profile ecdsa-p256: served leaf is EC (cert dir absent: $M7_CERT_DIR)"
+    fail_ "cert-profile reset: RSA-4096 default regenerated"
+  fi
+
+  # (4) VERSIONED-BACKUP RESTORE SELECTION — forge three stamped backups and a newer-than-code
+  # sidecar; frigate-run's downgrade-restore must pick the newest backup whose version ≤ current
+  # (0.17.2), skipping the too-new 99.0.0 and the older 0.16.0. A fresh mark isolates this restore
+  # from the earlier rollback-machinery restore already in the journal since $MARK.
+  M7_BKDIR=/var/snap/$SNAP_NAME/common/db/backups
+  M7_DB=/var/snap/$SNAP_NAME/common/db/frigate.db
+  if [ -f "$M7_DB" ] && [ -d "$M7_BKDIR" ]; then
+    cp "$M7_DB" "$M7_BKDIR/frigate-pre-0.16.0-r1.db"
+    cp "$M7_DB" "$M7_BKDIR/frigate-pre-0.17.2-r2.db"
+    cp "$M7_DB" "$M7_BKDIR/frigate-pre-99.0.0-r3.db"
+    echo "99.0.0 x999" > /var/snap/$SNAP_NAME/common/db/.last-writer   # newer-than-code → downgrade path
+    M7_MARK4=$(date '+%Y-%m-%d %H:%M:%S')
+    snap restart $SNAP_NAME.frigate 2>/dev/null || true
+    sleep 20
+    journalctl -u snap.$SNAP_NAME.frigate --since "$M7_MARK4" 2>/dev/null | grep 'frigate-run: restored' | tail -1 > "$EVIDENCE/m7-backup-restore.txt" || true
+    check "backup-select: restore fired on forged newer sidecar" test -s "$EVIDENCE/m7-backup-restore.txt"
+    check "backup-select: chose a 0.17.2 backup (newest ≤ current)" grep -q 'frigate-pre-0\.17\.2-r' "$EVIDENCE/m7-backup-restore.txt"
+    check "backup-select: never chose the too-new 99.0.0 backup" sh -c "! grep -q 'frigate-pre-99\.0\.0' '$EVIDENCE/m7-backup-restore.txt'"
+    check "backup-select: never chose the older 0.16.0 backup" sh -c "! grep -q 'frigate-pre-0\.16\.0' '$EVIDENCE/m7-backup-restore.txt'"
+    check "backup-select: too-new 99.0.0 backup left intact (copy-not-consume)" test -f "$M7_BKDIR/frigate-pre-99.0.0-r3.db"
+    check "backup-select: frigate healthy after restore" sh -c "snap services $SNAP_NAME.frigate | grep -q ' active'"
+    echo "  backup-select finding: $(sed 's/.*frigate-run: //' "$EVIDENCE/m7-backup-restore.txt" 2>/dev/null) (0.17.2 chosen; 99.0.0 skipped as newer-schema; 0.16.0 skipped as older)"
+    rm -f "$M7_BKDIR/frigate-pre-0.16.0-r1.db" "$M7_BKDIR/frigate-pre-0.17.2-r2.db" "$M7_BKDIR/frigate-pre-99.0.0-r3.db"
+  else
+    fail_ "backup-select: restore fired on forged newer sidecar (db or backups dir absent)"
+  fi
+
+  # (5) LOGROTATE — seed a >10 MB log matching the conf glob, run the oneshot manually, observe the
+  # size-triggered rotation (copytruncate: .1 created, original truncated). Dedicated harness log so
+  # nginx's own live logs are untouched.
+  M7_NLOG=/var/snap/$SNAP_NAME/current/nginx/logs
+  mkdir -p "$M7_NLOG"
+  M7_ROT="$M7_NLOG/harness-rotate.log"
+  dd if=/dev/zero bs=1M count=11 2>/dev/null | tr '\0' 'x' > "$M7_ROT"   # 11 MiB, non-empty (> size 10M)
+  snap run $SNAP_NAME.logrotate 2>/dev/null || true
+  sleep 2
+  check "logrotate: >10 MB log rotated (harness-rotate.log.1 created)" test -f "$M7_ROT.1"
+  check "logrotate: original truncated after copytruncate (< 10 MB)" sh -c "[ \"\$(stat -c %s '$M7_ROT' 2>/dev/null || echo 99999999)\" -lt 10485760 ]"
+  echo "  logrotate finding: rotated .1 size=$(stat -c %s "$M7_ROT.1" 2>/dev/null || echo NA) orig-now=$(stat -c %s "$M7_ROT" 2>/dev/null || echo NA) bytes (size 10M trigger, copytruncate, rotate 3)"
+  rm -f "$M7_ROT" "$M7_ROT".*
+
+else
+  echo "SKIP: m7 render-once guard (detector snap-set) — no M7 config surface (configure hook absent; pre-M7 remote artifact)"
+  echo "SKIP: m7 auto-detect fresh render (ov) — no M7 config surface"
+  echo "SKIP: m7 literal-safe renderer (|&\\ byte-exact) — no M7 config surface"
+  echo "SKIP: m7 invalid-key rejection (snap set non-zero) — no M7 config surface"
+  echo "SKIP: m7 ports.https=9443 live rebind + reset — no M7 config surface"
+  echo "SKIP: m7 certsync.interval=15 fast reload (≤45 s) — no M7 config surface"
+  echo "SKIP: m7 tls.cert-profile ecdsa-p256 / rsa-4096 — no M7 config surface"
+  echo "SKIP: m7 versioned-backup restore selection (0.17.2 over 99.0.0) — no M7 config surface"
+  echo "SKIP: m7 logrotate >10 MB rotation — no M7 config surface"
 fi
 
 # --- AppArmor denial scan (keep last) ---
