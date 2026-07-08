@@ -1,6 +1,8 @@
 #!/bin/sh
 # M2 money test: real Frigate parses a real config under strict confinement.
 set -e
+# M7: cfg_get + detector_sed (render-once detector selection identical to frigate-run).
+. "$SNAP/bin/lib-wait.sh"
 export FRIGATE_CONFIG_DIR="$SNAP_DATA/config"
 export FRIGATE_BASE_DIR="$SNAP_COMMON/media/frigate"
 export FRIGATE_CACHE_DIR="/tmp/cache"
@@ -19,6 +21,8 @@ mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" /tmp/cache
 # '&' expands to the whole match; '\' is the escape prefix). M5/M7: switch to a literal-safe renderer.
 if [ ! -f "$CONFIG_FILE" ]; then
     umask 077
+    # M7 detector render — same helper/logic as frigate-run (keep active block, delete others).
+    DET_SED=$(detector_sed)
     LIVECAM_URL=""
     [ -f "$SNAP_COMMON/livecam-url" ] && LIVECAM_URL=$(head -1 "$SNAP_COMMON/livecam-url" | tr -d '[:space:]')
     if [ -n "$LIVECAM_URL" ]; then
@@ -27,11 +31,11 @@ if [ ! -f "$CONFIG_FILE" ]; then
         # credential-bearing script file never outlives this process (rm -f is idempotent)
         trap 'rm -f "${SEDF:-}"' EXIT
         printf 's|__LIVECAM_URL__|%s|g\n' "$LIVECAM_URL" > "$SEDF"
-        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -f "$SEDF" \
+        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -e "$DET_SED" -f "$SEDF" \
             "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
         rm -f "$SEDF"
     else
-        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" \
+        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -e "$DET_SED" \
             -e '/# LIVECAM-BEGIN/,/# LIVECAM-END/d' \
             "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
     fi

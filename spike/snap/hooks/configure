@@ -1,0 +1,32 @@
+#!/bin/sh
+# M7 configure hook: validate snap-set keys, then restart the services that consume them live.
+# NEVER touches config.yml (render-once: operator-owned after first boot; the `detector` key
+# applies at the NEXT config render only, not here). nginx re-renders listen.conf + reads
+# ports.https/tls.*; certsync re-reads ports.https/certsync.interval — both on restart below.
+# frigate is deliberately NOT restarted (detector is render-time only, config.yml is frozen).
+#
+# set -e discipline: `X=$(snapctl get k) || X=""` guards the assignment — snapctl get can exit
+# non-zero on an unset key, which would otherwise abort this hook (and any `snap set`) under set -e.
+set -e
+fail() { echo "configure: $1" >&2; exit 1; }
+
+P=$(snapctl get ports.https) || P=""
+[ -z "$P" ] || { case "$P" in *[!0-9]*) fail "ports.https must be an integer";; esac
+                 [ "$P" -ge 1024 ] && [ "$P" -le 65535 ] || fail "ports.https out of range 1024-65535"; }
+
+T=$(snapctl get tls.enabled) || T=""
+[ -z "$T" ] || [ "$T" = true ] || [ "$T" = false ] || fail "tls.enabled must be true|false"
+
+C=$(snapctl get tls.cert-profile) || C=""
+[ -z "$C" ] || [ "$C" = rsa-4096 ] || [ "$C" = ecdsa-p256 ] || fail "tls.cert-profile must be rsa-4096|ecdsa-p256"
+
+I=$(snapctl get certsync.interval) || I=""
+[ -z "$I" ] || { case "$I" in *[!0-9]*) fail "certsync.interval must be an integer";; esac
+                 [ "$I" -ge 10 ] && [ "$I" -le 3600 ] || fail "certsync.interval out of range 10-3600"; }
+
+D=$(snapctl get detector) || D=""
+[ -z "$D" ] || [ "$D" = ov ] || [ "$D" = coral ] || [ "$D" = cpu ] || fail "detector must be ov|coral|cpu"
+
+# Apply live: nginx (listen.conf/port/tls) + certsync (port/interval). No-op/absent-safe at
+# install time (services not yet started) via 2>/dev/null || true; frigate is left running.
+snapctl restart frigate.nginx frigate.certsync 2>/dev/null || true

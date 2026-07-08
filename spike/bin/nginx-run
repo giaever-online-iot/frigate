@@ -12,13 +12,23 @@ mkdir -p "$SNAP_DATA/nginx/conf" "$SNAP_DATA/nginx/logs" /tmp/nginx-tmp /tmp/ngi
 
 # TLS pre-start: ensure cert dirs exist (layout: /etc/letsencrypt -> $SNAP_DATA/letsencrypt)
 # and generate a self-signed default if no real cert has been placed/certsync'd yet.
+# M7: tls.cert-profile (snap-set) selects the key type — rsa-4096 (default, byte-identical to
+# the M5 command) or ecdsa-p256. Only consulted when generating; an existing cert is untouched.
+PROFILE=$(cfg_get tls.cert-profile rsa-4096)
 mkdir -p /etc/letsencrypt/www /etc/letsencrypt/live/frigate
 if [ ! -f /etc/letsencrypt/live/frigate/privkey.pem ] || [ ! -f /etc/letsencrypt/live/frigate/fullchain.pem ]; then
-    echo "nginx-run: no TLS certificate found - generating self-signed default"
-    "$SNAP/usr/bin/openssl" req -new -newkey rsa:4096 -days 365 -nodes -x509 \
-        -subj "/O=FRIGATE DEFAULT CERT/CN=*" \
-        -keyout /etc/letsencrypt/live/frigate/privkey.pem \
-        -out /etc/letsencrypt/live/frigate/fullchain.pem
+    echo "nginx-run: no TLS certificate found - generating self-signed default (profile=$PROFILE)"
+    if [ "$PROFILE" = ecdsa-p256 ]; then
+        "$SNAP/usr/bin/openssl" req -new -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 365 \
+            -subj "/O=FRIGATE DEFAULT CERT/CN=*" \
+            -keyout /etc/letsencrypt/live/frigate/privkey.pem \
+            -out /etc/letsencrypt/live/frigate/fullchain.pem
+    else
+        "$SNAP/usr/bin/openssl" req -new -newkey rsa:4096 -days 365 -nodes -x509 \
+            -subj "/O=FRIGATE DEFAULT CERT/CN=*" \
+            -keyout /etc/letsencrypt/live/frigate/privkey.pem \
+            -out /etc/letsencrypt/live/frigate/fullchain.pem
+    fi
 fi
 
 # Render all conf templates into $SNAP_DATA/nginx/conf/
@@ -27,6 +37,8 @@ fi
 # has __SNAP_DATA__ token for proxy_trusted_headers include path).
 for _src in "$SNAP/config/nginx/"*; do
     _base="${_src##*/}"
+    # listen.conf.in is TLS/port-aware — rendered separately below (heredoc, not token sed).
+    case "$_base" in listen.conf.in) continue ;; esac
     # strip .in suffix so nginx.conf.in -> nginx.conf
     _dst="${_base%.in}"
     sed -e "s|__SNAP__|$SNAP|g" \
@@ -34,6 +46,37 @@ for _src in "$SNAP/config/nginx/"*; do
         -e "s|__SNAP_DATA__|$SNAP_DATA|g" \
         "$_src" > "$SNAP_DATA/nginx/conf/$_dst"
 done
+
+# M7: render listen.conf — SERVICE config, regenerated EVERY start (unlike config.yml, which is
+# render-once and operator-owned). The static loopback directive comes from listen.conf.in (up to
+# the __TLS_BLOCK__ marker); the marker is replaced by the external block per snap-set keys:
+#   ports.https (default 8971), tls.enabled (default true).
+# TLS form (default): `listen PORT ssl;` + http2 + the M5 ssl_*/HSTS block (byte-identical).
+# Plain form (tls.enabled=false): `listen PORT;` only — no ssl_* lines, no HSTS.
+PORT=$(cfg_get ports.https 8971)
+TLS=$(cfg_get tls.enabled true)
+LISTEN_DST="$SNAP_DATA/nginx/conf/listen.conf"
+# Everything before the marker line (the loopback listen directive) is emitted verbatim.
+sed '/# __TLS_BLOCK__/,$d' "$SNAP/config/nginx/listen.conf.in" > "$LISTEN_DST"
+if [ "$TLS" = false ]; then
+    cat >> "$LISTEN_DST" <<EOF
+listen $PORT;
+EOF
+else
+    cat >> "$LISTEN_DST" <<EOF
+listen $PORT ssl;
+http2 on;
+ssl_certificate /etc/letsencrypt/live/frigate/fullchain.pem;
+ssl_certificate_key /etc/letsencrypt/live/frigate/privkey.pem;
+ssl_session_timeout 1d;
+ssl_session_cache shared:MozSSL:10m;
+ssl_session_tickets off;
+ssl_protocols TLSv1.3;
+ssl_prefer_server_ciphers off;
+add_header Strict-Transport-Security "max-age=63072000" always;
+EOF
+fi
+echo "nginx-run: listen.conf rendered (port=$PORT tls=$TLS)"
 umask 022
 
 # Readiness gate: wait for frigate API before starting nginx

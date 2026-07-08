@@ -19,6 +19,13 @@ tls:
   enabled: true
 database:
   path: __SNAP_COMMON__/db/frigate.db
+# M7 detector render: frigate-run/validate-config keep ONE of the three marker-wrapped blocks
+# below (snap-set `detector` = ov|coral|cpu; unset => auto-detect: renderD* present => ov, else
+# cpu) and delete the other two regions at render time. Markers are stripped from the kept block,
+# leaving a plain `detectors:` -> `model:` -> `cameras:` shape (the M6 coral phase awk transform
+# anchors on ^detectors:/^cameras: in the RENDERED file and depends on that shape). Upstream
+# v0.17.2 supports ONE model geometry across all detectors, so each block carries its own model:.
+# DETECTOR-OV-BEGIN
 detectors:
   ov:
     type: openvino
@@ -35,6 +42,37 @@ model:
   input_tensor: nhwc
   input_pixel_format: bgr
   model_type: ssd
+# DETECTOR-OV-END
+# DETECTOR-CPU-BEGIN
+detectors:
+  cpu:
+    type: cpu
+model:
+  # CPU fallback: ssdlite_mobiledet_coco_qat_postprocess tflite (c21de44); same COCO 90-class
+  # labelmap.txt and 320x320 nhwc/rgb/ssd geometry as the Coral EdgeTPU sibling below.
+  path: /opt/frigate/models/cpu/cpu_model.tflite
+  labelmap_path: /opt/frigate/models/labelmap.txt
+  width: 320
+  height: 320
+  input_tensor: nhwc
+  input_pixel_format: rgb
+  model_type: ssd
+# DETECTOR-CPU-END
+# DETECTOR-CORAL-BEGIN
+detectors:
+  coral:
+    type: edgetpu
+    device: usb
+model:
+  # M6 Coral phase: EdgeTPU compilation of the CPU-fallback network (c21de44)
+  path: /opt/frigate/models/edgetpu/edgetpu_model.tflite
+  labelmap_path: /opt/frigate/models/labelmap.txt
+  width: 320
+  height: 320
+  input_tensor: nhwc
+  input_pixel_format: rgb
+  model_type: ssd
+# DETECTOR-CORAL-END
 cameras:
   # LIVECAM-BEGIN
   # Live camera (M3 re-arm): rendered ONLY when the operator has provisioned

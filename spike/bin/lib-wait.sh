@@ -20,3 +20,43 @@ wait_for_url() {
     WAITED_MS=$(( _t1 - _t0 ))
     return 0
 }
+
+# M7: snap-set config reader. Snap options are unset until the operator `snap set`s them,
+# so every reader supplies a default. The `|| v=""` guard is deliberate: snapctl get can
+# exit non-zero on an unset (nested) key, and an unguarded `v=$(...)` would trip `set -e`
+# in the wrappers that source this file. The guard collapses that to the empty-default path.
+cfg_get() { v=$(snapctl get "$1" 2>/dev/null) || v=""; [ -n "$v" ] && printf '%s' "$v" || printf '%s' "$2"; }
+
+# M7: emit the sed script that renders the ONE active detector block from frigate-config.yml
+# and deletes the other two. `detector` is snap-set (ov|coral|cpu); unset => auto-detect:
+# a render node (/dev/dri/renderD*) present => ov (OpenVINO GPU), else cpu. RENDER-TIME ONLY —
+# config.yml is render-once (operator-owned after first boot), so this fixes the detector at
+# first render. The chosen block keeps its contents (markers stripped); the other two marker
+# regions are range-deleted (same idiom as the LIVECAM block). Callers: frigate-run,
+# validate-config (identical logic via this shared helper). Unknown values fall back to ov.
+detector_sed() {
+    _det=$(cfg_get detector "")
+    if [ -z "$_det" ]; then
+        ls /dev/dri/renderD* >/dev/null 2>&1 && _det=ov || _det=cpu
+    fi
+    case "$_det" in
+        cpu)
+            printf '%s\n' \
+                '/# DETECTOR-OV-BEGIN/,/# DETECTOR-OV-END/d' \
+                '/# DETECTOR-CORAL-BEGIN/,/# DETECTOR-CORAL-END/d' \
+                '/# DETECTOR-CPU-BEGIN/d' \
+                '/# DETECTOR-CPU-END/d' ;;
+        coral)
+            printf '%s\n' \
+                '/# DETECTOR-OV-BEGIN/,/# DETECTOR-OV-END/d' \
+                '/# DETECTOR-CPU-BEGIN/,/# DETECTOR-CPU-END/d' \
+                '/# DETECTOR-CORAL-BEGIN/d' \
+                '/# DETECTOR-CORAL-END/d' ;;
+        *)  # ov is the default and the fallback for any unexpected value
+            printf '%s\n' \
+                '/# DETECTOR-CPU-BEGIN/,/# DETECTOR-CPU-END/d' \
+                '/# DETECTOR-CORAL-BEGIN/,/# DETECTOR-CORAL-END/d' \
+                '/# DETECTOR-OV-BEGIN/d' \
+                '/# DETECTOR-OV-END/d' ;;
+    esac
+}

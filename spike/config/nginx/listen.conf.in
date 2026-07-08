@@ -1,0 +1,11 @@
+# M7 listen template — the ONLY nginx conf that is NOT token-rendered by nginx-run's generic
+# loop (it is skipped there). nginx-run renders the real listen.conf EVERY start: it copies the
+# loopback directive below verbatim, then replaces the __TLS_BLOCK__ marker with the external
+# block chosen from snap-set keys (ports.https, tls.enabled). This file is SERVICE config, not
+# config.yml — regenerating it every start is correct (config.yml is render-once, this is not).
+#
+# Internal port: loopback ONLY (deliberate divergence from upstream's all-interfaces container
+# bind — a host snap must not expose anonymous admin to the LAN; spec §2).
+listen 127.0.0.1:5000;
+# __TLS_BLOCK__ replaced at render: TLS form (default) — listen PORT ssl; + http2 + ssl_*/HSTS;
+# or plain-HTTP form (tls.enabled=false) — listen PORT; only. See nginx-run.
