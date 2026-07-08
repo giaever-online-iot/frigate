@@ -52,17 +52,13 @@ layout:
   /usr/lib/ffmpeg:
     bind: $SNAP/usr/lib/ffmpeg
 
-slots:
-  npu-dev:
-    interface: custom-device
-    custom-device: intel-npu
-    devices:
-      - /dev/accel/accel0
-
+# NOTE (M7 final review): the `npu-dev` custom-device SLOT, the `npu` PLUG, and the `npu-probe`
+# APP were removed from the SHIPPED snap before the first Store upload. NPU is documented
+# not-yet-supported and out of M7 scope (user ruling); a functionless super-privileged
+# custom-device slot/plug risks a manual-review hold on upload. The probe script stays dormant
+# in the repo (spike/bin/npu-probe + spike/probes/probe_npu.py) — re-add slot+plug+app with the
+# NPU milestone. (M0-C custom-device substrate retired from the artifact, not from the repo.)
 plugs:
-  npu:
-    interface: custom-device
-    custom-device: intel-npu
   # Task 5 finding: glibc sem_open(O_CREAT) mknods a RANDOM /dev/shm/sem.XXXXXX tempfile,
   # so the sem.snap.<name>.* AppArmor rule can never match (python multiprocessing SemLock
   # -> PermissionError). private:true gives the snap its own /dev/shm tmpfs — the canonical fix.
@@ -104,9 +100,6 @@ apps:
   coral-probe:
     command: bin/coral-probe
     plugs: [raw-usb, hardware-observe]
-  npu-probe:
-    command: bin/npu-probe
-    plugs: [npu]
   mdns-probe:
     command: bin/mdns-probe
     plugs: [network, network-bind]

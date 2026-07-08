@@ -175,9 +175,6 @@ directly, useful when troubleshooting a detector or accelerator:
 - `frigate.coral-probe` — loads the Coral USB Accelerator delegate and runs
   a test inference.
 - `frigate.vaapi-probe` — proves hardware video decode works end to end.
-- `frigate.npu-probe` — checks whether the Intel NPU device node is
-  reachable (see "Accelerators" below — NPU isn't a supported detector
-  yet).
 - `frigate.mdns-probe` — checks mDNS multicast reachability.
 - `frigate.validate-config` — validates `config.yml` the same way Frigate
   itself does at startup, without starting the full daemon.

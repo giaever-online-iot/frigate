@@ -237,10 +237,22 @@ check "coral inference ran" test "$(jqr coral '.inference.ok')" = "true"
 check "coral: device in initialized state (18d1) after probe" grep -q 18d1 "$EVIDENCE/coral-usb-after.txt"
 
 # --- NPU custom-device section ---
-snap connect $SNAP_NAME:npu $SNAP_NAME:npu-dev 2> "$EVIDENCE/npu-connect.txt" || true
-snap run $SNAP_NAME.npu-probe 2>> "$EVIDENCE/npu-connect.txt" || true
-check "npu probe produced evidence" sh -c "test -s $RESULTS/npu.json -o -s $EVIDENCE/npu-connect.txt"
-echo "  npu finding: open=$(jqr npu '.open_accel0.ok // "no-json"') connect-err=$(head -c120 "$EVIDENCE/npu-connect.txt" 2>/dev/null)"
+# FINDING (M7 final review): the NPU custom-device substrate (M0-C) is RETIRED from the SHIPPED
+# artifact — the npu-dev slot, the npu plug, and the npu-probe app were dropped from snapcraft.yaml
+# before the first Store upload (a functionless super-privileged custom-device slot risks a
+# manual-review hold; NPU is documented not-yet-supported, out of M7 scope). The probe stays
+# DORMANT in the repo (spike/bin/npu-probe + spike/probes/probe_npu.py) — re-add with the NPU
+# milestone. Robust app-existence gate: grep the built snap's meta/snap.yaml apps for npu-probe
+# (the wrapper binary is still dumped into bin/ by the wrappers part, so a file-existence probe
+# would false-positive; the generated meta/snap.yaml is the authoritative app list).
+if grep -q '^  npu-probe:' "/snap/$SNAP_NAME/current/meta/snap.yaml" 2>/dev/null; then
+  snap connect $SNAP_NAME:npu $SNAP_NAME:npu-dev 2> "$EVIDENCE/npu-connect.txt" || true
+  snap run $SNAP_NAME.npu-probe 2>> "$EVIDENCE/npu-connect.txt" || true
+  check "npu probe produced evidence" sh -c "test -s $RESULTS/npu.json -o -s $EVIDENCE/npu-connect.txt"
+  echo "  npu finding: open=$(jqr npu '.open_accel0.ok // "no-json"') connect-err=$(head -c120 "$EVIDENCE/npu-connect.txt" 2>/dev/null)"
+else
+  echo "SKIP: npu probe retired from shipped snap (M7 final review; custom-device dropped pre-Store)"
+fi
 
 # --- M2: ffmpeg matrix (Task 1) --- ffprobe app follows the tag-default 7.0 tree
 check "ffprobe app runs tag-default 7.0" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n7'"
@@ -1075,8 +1087,12 @@ echo "  coral-probe finding: CAP_NET_ADMIN denial during firmware upload (libedg
 #                 /dev/accel/accel0; denied by AppArmor but open() still SUCCEEDS (cap check
 #                 is advisory for this driver path). Branch (d): open OK confirmed. Same mechanism
 #                 applies to Coral-PCIe /dev/apex_0 via custom-device slot.
-# NOTE: this denial fires once per NPU device init (observed 2026-07-02 06:41 run, journal-verified); it may be absent from later runs' capture windows.
-echo "  npu-probe finding: CAP_SYS_ADMIN denial at accel open (advisory, non-blocking) — branch (d) open OK, custom-device works on classic Ubuntu"
+# NOTE (M7 final review): the npu-probe app is RETIRED from the shipped snap (custom-device dropped
+# pre-Store; see the NPU section above). The `npu-probe.*capname="sys_admin"` allowlist arm above is
+# RETAINED but now DORMANT — it references the probe only inside the denials.txt regex, so it is
+# harmless (never matches when the probe does not run). The finding below is a HISTORICAL record of
+# the last live run; the probe no longer executes in the shipped artifact.
+echo "  npu-probe finding: probe RETIRED from shipped snap (M7 final review; custom-device dropped pre-Store) — allowlist arm retained but dormant; historically the CAP_SYS_ADMIN-at-accel-open denial was advisory/non-blocking (open OK)"
 # FINDING (Task 4): vaapi-probe additional expected denials:
 #   vaapi-probe.*capname="sys_admin" - ffmpeg VAAPI init queries DRM GPU capabilities (CAP_SYS_ADMIN);
 #                 denied but hw decode succeeds — rc=0 confirmed; same mechanism as vainfo in gpu-probe.
