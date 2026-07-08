@@ -131,6 +131,15 @@ apps:
     after: [nginx]
     plugs: [network]
 
+  # --- logrotate: nginx log rotation (M7 Task 3) ---------------------------
+  # Oneshot timer app (fires daily at 00:00) that rotates nginx's access/error logs via
+  # copytruncate (nginx's open fds stay valid — no reopen signal needed, so no extra plugs).
+  # Operates only on the snap's own $SNAP_DATA logs, which need no interface.
+  logrotate:
+    command: bin/logrotate-run
+    daemon: oneshot
+    timer: "00:00"
+
 parts:
   python311:
     plugin: nil
@@ -184,9 +193,9 @@ parts:
     build-packages: [wget]
     stage-packages: [libusb-1.0-0]
     override-build: |
-      wget -O /tmp/libedgetpu.deb "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
-      echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  /tmp/libedgetpu.deb" | sha256sum -c -
-      dpkg-deb -x /tmp/libedgetpu.deb "$CRAFT_PART_INSTALL"
+      wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
+      echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
+      dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
   va-tools:
     plugin: nil
     stage-packages:
@@ -236,14 +245,21 @@ parts:
     plugin: nil
     build-packages: [wget]
     override-build: |
-      wget -O /tmp/go2rtc "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.13/go2rtc_linux_amd64"
-      echo "dce491325c28890ad0b85e83090753dc111b903ef83f43b834798f9114520dba  /tmp/go2rtc" | sha256sum -c -
-      install -D -m 0755 /tmp/go2rtc "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+      wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.13/go2rtc_linux_amd64"
+      echo "dce491325c28890ad0b85e83090753dc111b903ef83f43b834798f9114520dba  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
+      install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
   go2rtc-config:
     plugin: dump
     source: config
     organize:
       '*': config/
+    # logrotate REFUSES a config that is group/world-writable ("Ignoring ... because it is writable
+    # by group or others"). The dump plugin preserves the source file's mode, and a 0664 working-tree
+    # bit would carry through — force logrotate.conf to 0644 at prime so the mode is deterministic
+    # regardless of the committer's umask (observed M7 Task 3).
+    permissions:
+      - path: config/logrotate.conf
+        mode: "644"
   # M4 Task 1: upstream's exact nginx recipe (docker/main/build_nginx.sh @ v0.17.2) as a part.
   # nginx 1.27.4 + kaltura vod 1.31 (2 upstream patches, committed under patches/nginx/) +
   # secure-token 1.5 + set-misc v0.33 + ngx_devel_kit v0.3.3; upstream configure flags verbatim.
@@ -260,8 +276,11 @@ parts:
       - wget
     # openssl binary: staged so nginx-run can call "$SNAP/usr/bin/openssl" to generate
     # the self-signed default cert before nginx starts (M5 Task 2 TLS pre-start block).
+    # logrotate binary ("$SNAP/usr/sbin/logrotate"): the frigate.logrotate oneshot timer app
+    # rotates nginx's access/error logs (M7 hardening — bin/logrotate-run + config/logrotate.conf).
     stage-packages:
       - openssl
+      - logrotate
     override-build: |
       cd "$CRAFT_PART_BUILD"
       wget -nv -O nginx.tar.gz "https://nginx.org/download/nginx-1.27.4.tar.gz"

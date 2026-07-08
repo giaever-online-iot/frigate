@@ -78,13 +78,12 @@ cameras:
   # Live camera (M3 re-arm): rendered ONLY when the operator has provisioned
   # $SNAP_COMMON/livecam-url (single line: full stream URL incl. any credentials; root:root 0600).
   # frigate-run/validate-config substitute the URL token below at render time (umask 077 render;
-  # M4 Task 0 NOTE: keep the literal token text OUT of comments — sed would inject the credential
-  # into the comment too); when the file is absent this marker-delimited block is stripped.
+  # NOTE: keep the literal token text OUT of comments — the renderer's str.replace would inject the
+  # credential into a comment too); when the file is absent/blank this marker-delimited block is stripped.
   # The URL must never appear in committed files, harness output, or evidence (harness scrubs).
   # The harness preserves the file across its remove --purge/reinstall cycle.
-  # Caveat: '|', '&', '\' in the URL/credentials are unsupported (sed replacement semantics:
-  # '|' is the delimiter; '&' expands to the whole match; '\' is the escape prefix). M5/M7: switch
-  # to a literal-safe renderer.
+  # Credentials may contain ANY character (incl. '|', '&', '\'): the renderer is a literal python
+  # str.replace on a file-read URL, not sed — the earlier sed metacharacter limitation is retired.
   # detect width/height intentionally omitted: Frigate autodetects via ffprobe.
   livecam:
     ffmpeg:
@@ -105,8 +104,11 @@ cameras:
           roles: [detect, record]
     detect:
       enabled: true
-      # Detect at 1280x720 (downscale from 1920x1080 source; Frigate resizes to model 300x300 anyway).
-      # Documented downscale: reduces frame-buffer memory and FFmpeg scaling load during spike.
+      # The testclip go2rtc stream is 1920x1080 (testclip.mp4 re-encoded without scaling). Declaring
+      # detect at 1280x720 is a DELIBERATE downscale: Frigate's detect ffmpeg applies the scale filter
+      # (`-vf ...,scale=1280:720`, ffmpeg_presets.py), cutting /dev/shm frame memory + scaling load
+      # during the spike. Inference then resizes each detect frame to the ACTIVE detector's model input
+      # (OV 300x300, CPU/coral 320x320) — geometry set per detector block above.
       width: 1280
       height: 720
       fps: 5

@@ -16,24 +16,26 @@ MESA_LIB="$SNAP/gpu-2604/mesa-2604/usr/lib/x86_64-linux-gnu"
 if [ -d "$MESA_LIB" ]; then export LD_LIBRARY_PATH="$MESA_LIB:${LD_LIBRARY_PATH:-}"; fi
 mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" /tmp/cache
 # Same conditional livecam render as frigate-run (see frigate-config.yml LIVECAM block docs).
-# M4 Task 0 hardening: umask 077 render + sed -f script file (URL out of argv), as in frigate-run.
-# '|', '&', '\' in credentials unsupported (sed replacement semantics: '|' is delimiter;
-# '&' expands to the whole match; '\' is the escape prefix). M5/M7: switch to a literal-safe renderer.
+# Hardening (identical to frigate-run): umask 077 render; non-secret tokens via sed; the secret
+# __LIVECAM_URL__ via a staged-python literal str.replace that reads the URL from the FILE (never an
+# argv). Literal replace means '|', '&', '\' in credentials are legal (the old sed -f limitation is
+# retired).
 if [ ! -f "$CONFIG_FILE" ]; then
     umask 077
     # M7 detector render — same helper/logic as frigate-run (keep active block, delete others).
     DET_SED=$(detector_sed)
-    LIVECAM_URL=""
-    [ -f "$SNAP_COMMON/livecam-url" ] && LIVECAM_URL=$(head -1 "$SNAP_COMMON/livecam-url" | tr -d '[:space:]')
-    if [ -n "$LIVECAM_URL" ]; then
-        SEDF=$(mktemp)
-        # set -e would skip the rm below if sed/redirect fails - the trap guarantees the
-        # credential-bearing script file never outlives this process (rm -f is idempotent)
-        trap 'rm -f "${SEDF:-}"' EXIT
-        printf 's|__LIVECAM_URL__|%s|g\n' "$LIVECAM_URL" > "$SEDF"
-        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -e "$DET_SED" -f "$SEDF" \
+    # grep tests presence AND non-whitespace content without reading the URL into a shell variable.
+    if grep -q '[^[:space:]]' "$SNAP_COMMON/livecam-url" 2>/dev/null; then
+        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -e "$DET_SED" \
             "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
-        rm -f "$SEDF"
+        # Literal-safe secret substitution: URL read from the file (never argv), str.replace.
+        # In-place rewrite of $CONFIG_FILE (already 0600; python open("w") preserves the mode).
+        "$SNAP/usr/bin/python3.11" - "$CONFIG_FILE" "$SNAP_COMMON/livecam-url" <<'EOF'
+import sys
+cfg = open(sys.argv[1]).read()
+url = open(sys.argv[2]).read().strip()
+open(sys.argv[1], "w").write(cfg.replace("__LIVECAM_URL__", url))
+EOF
     else
         sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -e "$DET_SED" \
             -e '/# LIVECAM-BEGIN/,/# LIVECAM-END/d' \

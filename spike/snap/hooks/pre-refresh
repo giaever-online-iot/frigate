@@ -4,20 +4,51 @@ set -e
 DB="$SNAP_COMMON/db/frigate.db"
 if [ ! -f "$DB" ]; then echo "pre-refresh: no db, nothing to back up"; exit 0; fi
 mkdir -p "$SNAP_COMMON/db/backups"
-DEST="$SNAP_COMMON/db/backups/frigate-pre-${SNAP_REVISION}.db"
-"$SNAP/usr/bin/python3.11" - "$DB" "$DEST" <<'EOF'
-import sqlite3, sys
+# Version-stamp the backup so frigate-run's downgrade-restore can pick the newest backup whose
+# schema is COMPATIBLE with the code being booted. VERSION parsed exactly as frigate-run does
+# (this hook runs from the OUTGOING revision, so $SNAP/version.py = the version that wrote the db).
+VERSION=$(sed -n 's/^VERSION *= *"\([^"+-]*\).*/\1/p' "$SNAP/opt/frigate/frigate/version.py" | head -1)
+VERSION="${VERSION:-0.17.2}"
+DEST="$SNAP_COMMON/db/backups/frigate-pre-${VERSION}-r${SNAP_REVISION}.db"
+# 300s bound: a hung backup (lock contention / huge db) must not stall the refresh forever. The
+# bound is enforced INSIDE python because the base `timeout` binary is DENIED under the confined
+# pre-refresh hook AppArmor profile ("timeout: Permission denied", observed M7 Task 3) — only the
+# snap's own $SNAP/usr/bin binaries exec in a hook. The backup copies in page batches so the progress
+# callback regains control between steps and can raise once the deadline passes.
+# FAIL-CLOSED (project ruling): a timeout OR any backup error exits non-zero → set -e / the explicit
+# branch below BLOCK the refresh. The `if !` guard is required so we can print the remediation and
+# delete the partial DEST (a half-written backup must never survive to be chosen by a later restore).
+if ! "$SNAP/usr/bin/python3.11" - "$DB" "$DEST" <<'EOF'
+import sqlite3, sys, time
+deadline = time.monotonic() + 300
+def _guard(status, remaining, total):
+    if time.monotonic() > deadline:
+        raise TimeoutError("sqlite backup exceeded 300s")
 src = sqlite3.connect(sys.argv[1])
 dst = sqlite3.connect(sys.argv[2])
-with dst:
-    src.backup(dst)
-dst.close(); src.close()
+try:
+    with dst:
+        src.backup(dst, pages=256, progress=_guard)
+finally:
+    dst.close(); src.close()
 EOF
+then
+    rm -f "$DEST"
+    echo "pre-refresh: backup timed out/failed — refresh blocked; free space or remove stale backups, then retry" >&2
+    exit 1
+fi
 MSG="pre-refresh: backed up $DB -> $DEST"
 echo "$MSG"
 echo "$MSG" >> "$SNAP_COMMON/db/backups/hook.log"
-# retention: keep newest 2 (version-sort for determinism when mtimes tie)
-ls -1 "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | sort -V | head -n -2 | xargs -r rm -f
+# retention: keep the 2 MOST-RECENTLY-CREATED backups (by mtime). NOTE (why mtime, not sort -V by
+# name): the pre-M7 legacy name frigate-pre-<rev>.db sorts as "newer" than a stamped
+# frigate-pre-<ver>-r<rev>.db under sort -V (leading '0' of the version < the legacy rev's leading
+# char), so a name-sort would keep the OLD legacy files and delete the just-created stamped backup —
+# and legacy files would never age out. mtime is the correct recency signal (the just-written DEST is
+# always newest → always kept; legacy files age out within 2 refreshes). Per-refresh backups never
+# share an mtime second, so ordering is deterministic in practice. `tail -n +3` drops all but the 2
+# newest; the leading `--` guards the rm against any pathological name.
+ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | tail -n +3 | xargs -r rm -f --
 # retention: keep hook.log bounded (one line per refresh would otherwise grow forever)
 if [ -f "$SNAP_COMMON/db/backups/hook.log" ]; then
     tail -n 100 "$SNAP_COMMON/db/backups/hook.log" > "$SNAP_COMMON/db/backups/hook.log.tmp" \

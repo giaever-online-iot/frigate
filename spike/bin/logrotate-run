@@ -1,0 +1,10 @@
+#!/bin/sh
+# M7 Task 3: nginx log rotation. Oneshot timer app (fires daily at 00:00). copytruncate keeps
+# nginx's already-open log fds valid, so no reopen signal to nginx is needed. The state file lives
+# under $SNAP_DATA (writable, per-revision); the conf itself cannot reference $SNAP_DATA (it is a
+# plain logrotate config, not shell), so it uses the stable /var/snap/frigate/current path.
+set -e
+# nginx-run normally creates $SNAP_DATA/nginx; ensure the state-file dir exists in case the timer
+# fires before nginx has started (e.g. immediately after a fresh install).
+mkdir -p "$SNAP_DATA/nginx"
+exec "$SNAP/usr/sbin/logrotate" -s "$SNAP_DATA/nginx/logrotate.state" "$SNAP/config/logrotate.conf"

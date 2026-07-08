@@ -31,38 +31,38 @@ for _shm in /dev/shm/*; do
     esac
 done
 
-# MESA content mount (gpu extension cleanup strips libGL from the snap)
-MESA_LIB="$SNAP/gpu-2604/usr/lib/x86_64-linux-gnu"
-if [ -d "$MESA_LIB" ]; then export LD_LIBRARY_PATH="$MESA_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
-
 # Render config at FIRST start only — once config.yml exists, the OPERATOR owns it
 # (docs/accelerator-support.md instructs editing it, e.g. the Coral detector swap;
 # render-every-start clobbered operator edits — M6 gate discovery). Delete config.yml and
 # restart to regenerate from the template (this is also how the harness re-arms livecam after
-# restoring livecam-url). snap-set configurability still lands at M7.
+# restoring livecam-url).
 # Live camera: $SNAP_COMMON/livecam-url (0600, single-line stream URL) arms the LIVECAM block;
-# absent => the marker-delimited block is stripped. URL never logged. M4 Task 0 hardening:
-# umask 077 (config + sed script never transiently world-readable — replaces post-hoc chmod);
-# URL substitution via `sed -f <0600 script>` so the URL never appears in any argv
-# (/proc/<pid>/cmdline). '|', '&', '\' in credentials unsupported (sed replacement semantics:
-# '|' is delimiter; '&' expands to the whole match; '\' is the escape prefix).
+# absent/blank => the marker-delimited block is stripped. URL never logged. Hardening: umask 077
+# (config never transiently world-readable). Non-secret tokens (__SNAP_COMMON__, __SNAP__, detector
+# markers, LIVECAM strip) are rendered by sed; the secret __LIVECAM_URL__ is substituted by a staged-
+# python literal str.replace that reads the URL from the FILE (never an argv → never in
+# /proc/<pid>/cmdline). Literal replace means '|', '&', '\' in credentials are now legal — the old
+# `sed -f <0600 script>` machinery and its metacharacter limitation are retired.
 if [ ! -f "$CONFIG_FILE" ]; then
     umask 077
     # M7 detector render (render-time only; render-once guard unchanged): keep the active
     # detector block, delete the other two. Computed once, applied in both livecam branches.
     DET_SED=$(detector_sed)
-    LIVECAM_URL=""
-    [ -f "$SNAP_COMMON/livecam-url" ] && LIVECAM_URL=$(head -1 "$SNAP_COMMON/livecam-url" | tr -d '[:space:]')
-    if [ -n "$LIVECAM_URL" ]; then
-        SEDF=$(mktemp)
-        # set -e would skip the rm below if sed/redirect fails - the trap guarantees the
-        # credential-bearing script file never outlives this process (rm -f is idempotent)
-        trap 'rm -f "${SEDF:-}"' EXIT
-        # printf is a shell builtin: the URL reaches the script file without any process argv
-        printf 's|__LIVECAM_URL__|%s|g\n' "$LIVECAM_URL" > "$SEDF"
-        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -e "$DET_SED" -f "$SEDF" \
+    # grep tests presence AND non-whitespace content without ever reading the URL into a shell
+    # variable (defence in depth: the credential lives only in the file and the python heredoc).
+    if grep -q '[^[:space:]]' "$SNAP_COMMON/livecam-url" 2>/dev/null; then
+        # Non-secret tokens + detector selection via sed; the LIVECAM block is KEPT (markers stay).
+        sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -e "$DET_SED" \
             "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
-        rm -f "$SEDF"
+        # Literal-safe secret substitution: URL read from the file (never argv), str.replace (no sed
+        # metacharacter hazard). In-place rewrite of $CONFIG_FILE (created 0600 by the sed above;
+        # python open("w") truncates without chmod, so the mode is preserved).
+        "$SNAP/usr/bin/python3.11" - "$CONFIG_FILE" "$SNAP_COMMON/livecam-url" <<'EOF'
+import sys
+cfg = open(sys.argv[1]).read()
+url = open(sys.argv[2]).read().strip()
+open(sys.argv[1], "w").write(cfg.replace("__LIVECAM_URL__", url))
+EOF
         echo "frigate-run: livecam armed (url redacted)"
     else
         sed -e "s|__SNAP_COMMON__|$SNAP_COMMON|g" -e "s|__SNAP__|$SNAP|g" -e "$DET_SED" \
@@ -87,7 +87,30 @@ if [ -f "$SIDECAR" ]; then
     NEWEST=$(printf '%s\n%s\n' "$LAST_VERSION" "$CUR_VERSION" | sort -V | tail -1)
     if [ "$NEWEST" = "$LAST_VERSION" ] && [ "$LAST_VERSION" != "$CUR_VERSION" ]; then
         echo "frigate-run: DOWNGRADE detected (db last written by $LAST_VERSION, code is $CUR_VERSION)"
-        BACKUP=$(ls -1 "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | sort -V | tail -1)
+        # Pick the newest backup whose schema is COMPATIBLE with this code: iterate names
+        # descending (sort -V -r) and take the first stamped frigate-pre-<ver>-r<rev>.db whose
+        # <ver> <= CUR_VERSION (same sort -V pair-compare idiom as the sidecar above:
+        # max(<ver>,CUR)==CUR ⟺ <ver> <= CUR). A NEWER-than-code backup would carry the same
+        # advanced schema we are trying to escape, so it is skipped. Legacy unstamped
+        # frigate-pre-<rev>.db files (pre-M7) carry no version to check → treated as COMPATIBLE-
+        # LAST: used only as a fallback when no stamped-compatible backup exists (newest legacy).
+        BACKUP=""
+        LEGACY_FALLBACK=""
+        for _bk in $(ls -1 "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | sort -V -r); do
+            _name="${_bk##*/}"
+            case "$_name" in
+                frigate-pre-*-r*.db)
+                    _rest="${_name#frigate-pre-}"     # <ver>-r<rev>.db
+                    _ver="${_rest%-r*}"               # <ver>
+                    _max=$(printf '%s\n%s\n' "$_ver" "$CUR_VERSION" | sort -V | tail -1)
+                    if [ "$_max" = "$CUR_VERSION" ]; then BACKUP="$_bk"; break; fi
+                    ;;
+                *)
+                    [ -z "$LEGACY_FALLBACK" ] && LEGACY_FALLBACK="$_bk"
+                    ;;
+            esac
+        done
+        [ -z "$BACKUP" ] && BACKUP="$LEGACY_FALLBACK"
         if [ -n "$BACKUP" ]; then
             TS=$(date +%s)
             mv "$SNAP_COMMON/db/frigate.db" "$SNAP_COMMON/db/frigate.db.incompatible-$TS" 2>/dev/null || true
