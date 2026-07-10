@@ -65,14 +65,23 @@ jobs:
           PR="${{ steps.meta.outputs.pr }}"
           CHAN="latest/edge/PR$PR"
 
-          INFO="$(snap info "$SNAP")"
-
-          # branch-has-revisions joins its two args as "<track>/edge/<arg2>"; passing
-          # "PR$PR" (not just "$PR") reproduces frigate's latest/edge/PR<N> naming
-          # from the unmodified (verbatim) helper.
-          if [ "$("$SR" branch-has-revisions latest "PR$PR" <<<"$INFO")" != "yes" ]; then
-            echo "No revisions in $CHAN (docs-only merge / build failed / branch expired). Nothing to promote."
-            exit 0
+          # First-release tolerance (CI shakedown finding): an UNAUTHENTICATED `snap info`
+          # cannot see a never-released snap and exits non-zero ("error: no snap found"),
+          # which under set -e would kill the promote before it ever runs. When the info
+          # fetch fails there is no public channel map to guard against, so skip the
+          # branch-has-revisions guard and promote unconditionally — `snapcraft promote`
+          # below is authed, CAN see the branch channel, and its own failure still fails
+          # the job. The guard stays intact for every normal (already-released) merge.
+          if INFO="$(snap info "$SNAP")"; then
+            # branch-has-revisions joins its two args as "<track>/edge/<arg2>"; passing
+            # "PR$PR" (not just "$PR") reproduces frigate's latest/edge/PR<N> naming
+            # from the unmodified (verbatim) helper.
+            if [ "$("$SR" branch-has-revisions latest "PR$PR" <<<"$INFO")" != "yes" ]; then
+              echo "No revisions in $CHAN (docs-only merge / build failed / branch expired). Nothing to promote."
+              exit 0
+            fi
+          else
+            echo "first release: no public channel map yet — promoting unconditionally"
           fi
 
           echo "Merged $V; promoting $CHAN -> latest/edge"
