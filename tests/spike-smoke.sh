@@ -33,6 +33,17 @@ fail_() { echo "FAIL: $1"; FAIL=1; }
 # Note: check() always returns 0; failures accumulate in $FAIL. Do not use in && chains or if-conditions.
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass_ "$d"; else fail_ "$d"; fi; }
 jqr()   { jq -r "$2" "$RESULTS/$1.json" 2>/dev/null; }
+# PR#3 review (credential hygiene, layer 2 of 2): go2rtc /api/streams and frigate /stats emit
+# source URLs verbatim — an operator's REAL camera credentials leaked into evidence JSON. Layer 1
+# minimizes at capture (names-only streams list, del(.cpu_usages) on /stats, producer url strip);
+# this layer redacts ALL URL userinfo (user:pass@) across $EVIDENCE regardless of which writer
+# produced it. Called at end-of-run AND from the EXIT trap so aborted runs are covered. -I skips
+# binaries; the fixed-string $LIVECAM_URL scrub at end-of-run is kept as defense in depth.
+scrub_evidence() {
+  grep -rlEI '(rtsps?|rtmp|https?)://[^@/[:space:]]+@' "$EVIDENCE" 2>/dev/null | while IFS= read -r f; do
+    sed -i -E 's#(rtsps?|rtmp|https?)://[^@/[:space:]]+@#\1://REDACTED@#g' "$f"
+  done
+}
 
 command -v jq >/dev/null || { echo "jq required: sudo apt install -y jq"; exit 1; }
 
@@ -76,15 +87,21 @@ if [ -f "/var/tmp/frigate-livecam-url.stash" ] && \
     "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f /var/tmp/frigate-livecam-url.stash
 fi
 
-# PR#3 self-healing: same pattern for the operator's config.yml — if a prior run aborted with the
-# snap absent, the EXIT trap parked config.yml at a deterministic path. Recover it if the snap is
-# back and its config is missing (never echo contents).
+# PR#3 self-healing (narrow path): if a prior run aborted with the snap absent, the EXIT trap
+# parked the operator's config.yml at a deterministic path. Recover it here ONLY when config.yml
+# is genuinely missing (covers --skip-install runs, which never reach the install step). This
+# guard deliberately does NOT overwrite an existing config.yml — at top-of-run an existing file
+# may be newer operator work. The AUTHORITATIVE recovery is the post-install restore step, where
+# the /var/tmp stash wins over the fresh template render (review fix; see the install section).
+# rm only after the copy verifiably landed. Never echo contents.
 if [ -f "/var/tmp/frigate-operator-config.stash" ] && \
    [ ! -f "/var/snap/$SNAP_NAME/current/config/config.yml" ] && \
    [ -d "/var/snap/$SNAP_NAME/current/config" ]; then
   echo "RECOVER: restoring operator config.yml from /var/tmp/frigate-operator-config.stash"
   install -m 0600 -o root -g root /var/tmp/frigate-operator-config.stash \
-    "/var/snap/$SNAP_NAME/current/config/config.yml" && rm -f /var/tmp/frigate-operator-config.stash
+    "/var/snap/$SNAP_NAME/current/config/config.yml" && \
+    cmp -s /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml" && \
+    rm -f /var/tmp/frigate-operator-config.stash
 fi
 
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
@@ -124,24 +141,31 @@ trap '
   fi
   # PR#3: if the bridge test died mid-flight, restore the operator config it was mutating (it was
   # carrying the injected bridgeproof test stream) and cycle the whole snap so go2rtc regenerates.
+  # Review fix: rm the backup only after the copy succeeded (never destroy the last good copy).
   if [ -n "${BRIDGE_CFG_BAK:-}" ] && [ -f "${BRIDGE_CFG_BAK:-}" ]; then
-    cp -p "$BRIDGE_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null || true
-    rm -f "$BRIDGE_CFG_BAK"
+    if cp -p "$BRIDGE_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null; then
+      rm -f "$BRIDGE_CFG_BAK"
+    fi
     snap restart $SNAP_NAME 2>/dev/null || true
   fi
   # PR#3: operator config safety net — if the run aborted after the purge but before the explicit
   # restore, put the stashed config.yml back so the gate never leaves the operator config-less.
-  # If the snap is gone, park it at a deterministic root-0600 path for the next run to recover.
+  # Review fix: rm the stash only after the restore copy VERIFIABLY landed (install && cmp);
+  # otherwise park it at the deterministic /var/tmp path — the next full run restores it at the
+  # install-restore step, where it WINS over any template render (see that block).
   if [ -n "${OPERATOR_CFG_STASH:-}" ] && [ -f "${OPERATOR_CFG_STASH:-}" ]; then
-    if [ -d "/var/snap/$SNAP_NAME/current/config" ]; then
-      install -m 0600 -o root -g root "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null || true
+    if [ -d "/var/snap/$SNAP_NAME/current/config" ] && \
+       install -m 0600 -o root -g root "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null && \
+       cmp -s "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml"; then
       rm -f "$OPERATOR_CFG_STASH"
       snap restart $SNAP_NAME 2>/dev/null || true
     else
       mv "$OPERATOR_CFG_STASH" /var/tmp/frigate-operator-config.stash 2>/dev/null && \
-        echo "STASH: operator config.yml preserved at /var/tmp/frigate-operator-config.stash (snap absent; recovered on next run)"
+        echo "STASH: operator config.yml preserved at /var/tmp/frigate-operator-config.stash (next full harness run restores it — it wins over any template render)"
     fi
   fi
+  # PR#3 review: scrub evidence on EVERY exit path (aborted runs included) — see scrub_evidence.
+  scrub_evidence
 ' EXIT
 
 if [ "${1:-}" != "--skip-install" ]; then
@@ -194,9 +218,37 @@ if [ "${1:-}" != "--skip-install" ]; then
   # PR#3: restore the operator's config.yml OVER any template/livecam render — the operator owns
   # config.yml and the gate must not destroy their cameras. Authoritative last-writer; whole-snap
   # restart so go2rtc regenerates its config from the restored config.yml (the bridge under test).
+  # Review fixes: (a) rm the stash only after the copy VERIFIABLY landed (install && cmp);
+  # (b) a /var/tmp/frigate-operator-config.stash parked by an ABORTED PRIOR run is restored HERE
+  # and WINS over both the template render and this run's stash — an abort between purge and
+  # install means any config.yml this run stashed was itself a fresh TEMPLATE, while /var/tmp
+  # holds the real operator config (the old top-of-run [ ! -f config.yml ] guard never fired
+  # once a reinstall re-rendered the template, parking the config forever).
+  OPERATOR_CFG_RESTORED=""
   if [ -n "$OPERATOR_CFG_STASH" ] && [ -f "$OPERATOR_CFG_STASH" ]; then
-    install -m 0600 -o root -g root "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml"
-    rm -f "$OPERATOR_CFG_STASH"; OPERATOR_CFG_STASH=""
+    if install -m 0600 -o root -g root "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml" && \
+       cmp -s "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml"; then
+      rm -f "$OPERATOR_CFG_STASH"; OPERATOR_CFG_STASH=""
+      OPERATOR_CFG_RESTORED=yes
+    else
+      echo "PR#3: WARNING operator config restore copy failed — stash retained (EXIT trap will retry or park it)"
+    fi
+  fi
+  if [ -f /var/tmp/frigate-operator-config.stash ]; then
+    if install -m 0600 -o root -g root /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml" && \
+       cmp -s /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml"; then
+      rm -f /var/tmp/frigate-operator-config.stash
+      # This run's stash (if any) held the post-abort template — superseded; drop it.
+      [ -n "$OPERATOR_CFG_STASH" ] && rm -f "$OPERATOR_CFG_STASH" && OPERATOR_CFG_STASH=""
+      # Re-anchor the end-of-run survival sha to the RECOVERED config (the true operator config).
+      OPERATOR_CFG_SHA=$(sha256sum "/var/snap/$SNAP_NAME/current/config/config.yml" | awk '{print $1}')
+      OPERATOR_CFG_RESTORED=yes
+      echo "PR#3: RECOVERED operator config.yml from /var/tmp stash (aborted prior run; wins over template; sha256=$OPERATOR_CFG_SHA)"
+    else
+      echo "PR#3: WARNING /var/tmp operator-config recovery copy failed — stash left in place"
+    fi
+  fi
+  if [ -n "$OPERATOR_CFG_RESTORED" ]; then
     snap restart $SNAP_NAME 2>/dev/null || true
     echo "PR#3: operator config.yml restored after reinstall (hand-added cameras preserved)"
   fi
@@ -327,8 +379,11 @@ check "migrations staged" test -d /snap/frigate/current/opt/frigate/migrations
 
 # --- M1: go2rtc daemon (Task 2) ---
 check "go2rtc service active" sh -c "snap services frigate.go2rtc | grep -q ' active'"
-curl -sf --max-time 5 http://127.0.0.1:1984/api/streams > "$EVIDENCE/go2rtc-streams.json" 2>/dev/null || true
-check "go2rtc API lists test stream" sh -c "jq -e '.test' \"$EVIDENCE/go2rtc-streams.json\""
+# PR#3 review: NAMES-ONLY capture — /api/streams emits producer URLs verbatim (operator camera
+# credentials included); the assertions only need stream NAMES, so minimize at capture (layer 1;
+# layer 2 is the generalized scrub_evidence redaction at end-of-run + trap).
+curl -sf --max-time 5 http://127.0.0.1:1984/api/streams 2>/dev/null | jq 'keys' > "$EVIDENCE/go2rtc-streams.json" 2>/dev/null || true
+check "go2rtc API lists test stream" sh -c "jq -e 'index(\"test\")' \"$EVIDENCE/go2rtc-streams.json\""
 
 # --- M1: readiness gate evidence (Task 3) ---
 # Note: jqr is a shell function not available in subshells; inline jq with the expanded $RESULTS path.
@@ -343,7 +398,9 @@ timeout 30 snap run frigate.ffprobe -v error -print_format json -show_streams \
 check "rtsp: stream is h264" sh -c "jq -e '.streams[0].codec_name == \"h264\"' \"$EVIDENCE/rtsp-probe.json\""
 check "rtsp: 1280x720" sh -c "jq -e '.streams[0].width == 1280 and .streams[0].height == 720' \"$EVIDENCE/rtsp-probe.json\""
 # Confined subprocess evidence: the exec producer must appear in go2rtc's stream state.
-curl -sf --max-time 5 "http://127.0.0.1:1984/api/streams?src=test" > "$EVIDENCE/go2rtc-producer.json" 2>/dev/null || true
+# PR#3 review: producer .url fields stripped at capture (source URLs; the assertion only needs
+# producer PRESENCE). The test stream's url is a credential-free exec line, but minimize anyway.
+curl -sf --max-time 5 "http://127.0.0.1:1984/api/streams?src=test" 2>/dev/null | jq 'del(.producers[]?.url)' > "$EVIDENCE/go2rtc-producer.json" 2>/dev/null || true
 check "go2rtc exec producer active (confined ffmpeg spawned)" sh -c "jq -e '.producers[0]' \"$EVIDENCE/go2rtc-producer.json\""
 echo "  subprocess finding: exec producer state captured in go2rtc-producer.json"
 
@@ -394,7 +451,7 @@ check "openvino 91-class labelmap staged" test -s /snap/frigate/current/opt/frig
 
 # --- M3: real-object test clip + stream (Task 2) ---
 check "test clip staged" test -s /snap/frigate/current/media-samples/testclip.mp4
-check "go2rtc has testclip stream" sh -c "jq -e '.testclip' \"$EVIDENCE/go2rtc-streams.json\""
+check "go2rtc has testclip stream" sh -c "jq -e 'index(\"testclip\")' \"$EVIDENCE/go2rtc-streams.json\""
 
 # --- M3: frigate daemon (Task 3 - THE MILESTONE) ---
 check "frigate service active" sh -c "snap services frigate.frigate | grep -q ' active'"
@@ -566,8 +623,11 @@ if [ "$LIVECAM" = "yes" ]; then
   # Pipeline liveness FIRST — a dead stream/detector is a packaging regression and must FAIL
   # regardless of scene content. Zero person events on a LIVE pipeline is scene-content
   # (nobody in frame), not a packaging fault: SKIP, not FAIL (test-the-packaging directive).
+  # PR#3 review: del(.cpu_usages) at every /stats capture — that map's per-pid cmdline values
+  # carry the camera ffmpeg command lines VERBATIM (rtsp URLs with credentials); no assertion
+  # reads cpu_usages (.cameras.*/.detectors.* only). Same treatment at all 4 /stats captures.
   curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
-    http://127.0.0.1:5001/stats > "$EVIDENCE/livecam-stats.json" 2>/dev/null || true
+    http://127.0.0.1:5001/stats 2>/dev/null | jq 'del(.cpu_usages)' > "$EVIDENCE/livecam-stats.json" 2>/dev/null || true
   check "livecam: camera pipeline alive (ffmpeg_pid > 0)" sh -c "jq -e '.cameras.livecam.ffmpeg_pid > 0' \"$EVIDENCE/livecam-stats.json\""
   PIPE_ALIVE=""
   jq -e '.cameras.livecam.ffmpeg_pid > 0' "$EVIDENCE/livecam-stats.json" >/dev/null 2>&1 && PIPE_ALIVE=yes
@@ -604,7 +664,7 @@ fi
 echo "$CACHE_PEAK KiB peak" > "$EVIDENCE/cache-peak.txt"
 # GPU evidence via frigate's own stats (route: /stats, not /api/stats)
 curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
-  http://127.0.0.1:5001/stats > "$EVIDENCE/frigate-stats.json" 2>/dev/null || true
+  http://127.0.0.1:5001/stats 2>/dev/null | jq 'del(.cpu_usages)' > "$EVIDENCE/frigate-stats.json" 2>/dev/null || true
 check "gpu: openvino detector reporting + camera pipeline alive" sh -c "jq -e '.detectors.ov.inference_speed != null and .cameras.testclip.ffmpeg_pid > 0' \"$EVIDENCE/frigate-stats.json\""
 echo "  gpu finding: ov inference_speed=$(jq -r '.detectors.ov.inference_speed' "$EVIDENCE/frigate-stats.json" 2>/dev/null)ms"
 # Recordings on disk
@@ -824,7 +884,7 @@ if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
     CORAL_SPEED=""
     for i in $(seq 1 24); do
       curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
-        http://127.0.0.1:5001/stats > "$EVIDENCE/coral-phase-stats.json" 2>/dev/null || true
+        http://127.0.0.1:5001/stats 2>/dev/null | jq 'del(.cpu_usages)' > "$EVIDENCE/coral-phase-stats.json" 2>/dev/null || true
       if jq -e '.detectors.coral.pid > 0 and .detectors.coral.inference_speed != 10.0 and .detectors.coral.inference_speed > 0 and .detectors.coral.inference_speed < 100' \
           "$EVIDENCE/coral-phase-stats.json" >/dev/null 2>&1; then
         CORAL_SPEED=$(jq -r '.detectors.coral.inference_speed' "$EVIDENCE/coral-phase-stats.json")
@@ -836,7 +896,7 @@ if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
     echo "  coral finding: inference_speed=${CORAL_SPEED:-none}ms (init default 10.0 exactly; drift = real TPU inferences)"
   else
     curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
-      http://127.0.0.1:5001/stats > "$EVIDENCE/coral-phase-stats.json" 2>/dev/null || true
+      http://127.0.0.1:5001/stats 2>/dev/null | jq 'del(.cpu_usages)' > "$EVIDENCE/coral-phase-stats.json" 2>/dev/null || true
     check "coral phase: coral detector process alive on TPU config (pid > 0 in /stats)" \
       jq -e '.detectors.coral.pid > 0' "$EVIDENCE/coral-phase-stats.json"
     echo "SKIP: coral phase MONEY: inference_speed drift — $LIVECAM_SKIP_REASON; testclip cannot feed the detector (M3 calibration finding), so no inference source exists"
@@ -854,7 +914,7 @@ if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
       sleep 5
     done
     curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
-      http://127.0.0.1:5001/stats > "$EVIDENCE/coral-phase-stats2.json" 2>/dev/null || true
+      http://127.0.0.1:5001/stats 2>/dev/null | jq 'del(.cpu_usages)' > "$EVIDENCE/coral-phase-stats2.json" 2>/dev/null || true
     CORAL_PIPE=""
     jq -e '.cameras.livecam.ffmpeg_pid > 0' "$EVIDENCE/coral-phase-stats2.json" >/dev/null 2>&1 && CORAL_PIPE=yes
     if [ "$CORAL_DETECTED" = "yes" ]; then
@@ -1168,7 +1228,8 @@ PYEOF
   fi
   echo "  bridge finding: frigate->go2rtc /go2rtc/streams http=$BRIDGE_F2G (client target 127.0.0.1:1984)"
   # Restore the operator's pristine config (byte-exact) and re-cycle so go2rtc drops bridgeproof.
-  cp -p "$BRIDGE_CFG_BAK" "$BRIDGE_CFG"; rm -f "$BRIDGE_CFG_BAK"; BRIDGE_CFG_BAK=""
+  # Review fix: rm the backup only after the restore copy succeeded (trap retries otherwise).
+  if cp -p "$BRIDGE_CFG_BAK" "$BRIDGE_CFG"; then rm -f "$BRIDGE_CFG_BAK"; BRIDGE_CFG_BAK=""; fi
   snap restart $SNAP_NAME 2>/dev/null || true
   _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
   check "bridge: frigate healthy again after config restore (:5001/version, ${_b}s)" \
@@ -1363,14 +1424,21 @@ if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fa
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true
 
-# Livecam secret hygiene: scrub the URL (credentials embedded) from ALL evidence files, then
-# assert absence. Fixed-string grep/sed; runs last so every evidence writer above is covered.
+# PR#3 review: generalized credential redaction FIRST — covers every writer above (operator
+# camera creds from go2rtc /api/streams, /stats cmdlines, config-derived captures) regardless of
+# source. Then the livecam fixed-string scrub (defense in depth: catches token-in-path URLs with
+# no userinfo), then BOTH absence assertions (0 hits required across all of $EVIDENCE).
+scrub_evidence
 if [ -n "${LIVECAM_URL:-}" ]; then
   grep -rlF "$LIVECAM_URL" "$EVIDENCE" 2>/dev/null | while IFS= read -r f; do
     sed -i "s|$LIVECAM_URL|LIVECAM-URL-REDACTED|g" "$f"
   done
   check "livecam: no stream URL/credentials in evidence files" sh -c "! grep -rqF \"$LIVECAM_URL\" \"$EVIDENCE\""
 fi
+# Assertion uses the user:PASS@ credential shape — the scrubber's own '://REDACTED@' marker has
+# no colon, so redacted evidence passes while any unredacted credential fails the run.
+check "evidence: no URL credentials (user:pass@) anywhere in evidence files" \
+  sh -c "! grep -rqEI '(rtsps?|rtmp|https?)://[^@/[:space:]]+:[^@/[:space:]]+@' \"$EVIDENCE\""
 
 echo
 [ "$FAIL" -eq 0 ] && echo "SPIKE SMOKE: ALL PASS" || echo "SPIKE SMOKE: FAILURES"
