@@ -114,7 +114,15 @@ apps:
   frigate:
     command: bin/frigate-run
     daemon: simple
-    restart-condition: on-failure
+    # restart-condition: always (not on-failure) — the Web UI "Restart" button calls
+    # frigate.util.services.restart_frigate(), which under upstream's s6 sigterms pid 1 (s6
+    # restarts frigate on ANY exit). In the snap pid 1 is not s6-svscan, so it instead does
+    # os.kill(getpid(), SIGINT) — a CLEAN exit. With on-failure systemd would NOT restart a
+    # clean exit, leaving frigate DOWN after every UI restart (observed: journal 2026-07-10
+    # 13:58:53 "Deactivated successfully", no auto-restart). `always` mirrors s6 any-exit
+    # semantics so the UI restart button works. `snap stop` is unaffected — a systemd stop
+    # bypasses Restart= regardless of the condition.
+    restart-condition: always
     after: [go2rtc]
     extensions: [gpu]
     # mount-observe: psutil.disk_partitions(all=True) reads /proc/<pid>/mounts to compute
