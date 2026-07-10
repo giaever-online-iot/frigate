@@ -34,6 +34,7 @@ license: MIT
 contact: https://github.com/giaever-online-iot/frigate
 website: https://github.com/giaever-online-iot/frigate
 source-code: https://github.com/giaever-online-iot/frigate
+issues: https://github.com/giaever-online-iot/frigate/issues
 
 layout:
   # NOTE: /config bind is REJECTED at pack time (snapd: "defines a new top-level directory").

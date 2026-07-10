@@ -2,3 +2,7 @@
 .remember/
 # M7 Task 4: `snapcraft pack` at repo root drops the artifact at ./frigate_*.snap
 /frigate_*.snap
+
+# credential exports must never be stageable (M7 ship lesson)
+*.auth
+*creds*.txt
