@@ -1,3 +1,10 @@
+#!/usr/bin/env python3.11
+# shellcheck disable=SC1071
+# ^ This is PYTHON, not shell. It lives in spike/bin/ because the wrappers dump part ships
+# this directory to $SNAP/bin/, but CI's lint job shellchecks spike/bin/* wholesale; the
+# python shebang + directive make shellcheck skip the file (unsupported dialect, disabled)
+# instead of parsing python as sh. The shebang is documentation — bin/go2rtc-run invokes
+# this explicitly via the snap's python3.11, so the file needs no +x bit.
 """Generate the go2rtc config from the snap baseline layered with the operator's
 config.yml `go2rtc:` section.
 
@@ -11,7 +18,7 @@ produced RTSP 404s — go2rtc had never heard of those streams. This generator r
 upstream parity: config.yml's `go2rtc:` section now flows through to go2rtc.
 
 Invoked by bin/go2rtc-run on EVERY start with:
-    python3.11 go2rtc-gen.py <baseline.in> <config.yml> <SNAP> <output.yaml>
+    python3.11 go2rtc-config-gen.py <baseline.in> <config.yml> <SNAP> <output.yaml>
 
 MODEL (mirrors create_config.py's layering; divergences flagged DIVERGENCE below):
   1. Start from the snap BASELINE (config/go2rtc.yaml.in: loopback api listen,
@@ -70,7 +77,7 @@ FORCED_API_LISTEN = "127.0.0.1:1984"
 
 def log(msg: str) -> None:
     """Redacted-safe status line to stderr (systemd journal). Never emits config data."""
-    sys.stderr.write("go2rtc-gen: " + msg + "\n")
+    sys.stderr.write("go2rtc-config-gen: " + msg + "\n")
 
 
 def deep_merge(base: dict, over: dict) -> dict:
@@ -88,7 +95,7 @@ def deep_merge(base: dict, over: dict) -> dict:
 
 def main() -> int:
     if len(sys.argv) != 5:
-        log("ERROR usage: go2rtc-gen.py <baseline.in> <config.yml> <SNAP> <output.yaml>")
+        log("ERROR usage: go2rtc-config-gen.py <baseline.in> <config.yml> <SNAP> <output.yaml>")
         return 2
 
     baseline_path, config_path, snap, output_path = sys.argv[1:5]

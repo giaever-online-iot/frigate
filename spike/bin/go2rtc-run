@@ -4,7 +4,7 @@
 # Upstream Frigate GENERATES go2rtc's config from config.yml (create_config.py); the snap
 # previously rendered a STATIC template and never read config.yml, so cameras added the
 # upstream-documented way (a go2rtc: block + inputs via rtsp://127.0.0.1:8554/<stream>) got
-# RTSP 404s. bin/go2rtc-gen.py restores parity: the operator's config.yml go2rtc: section is
+# RTSP 404s. bin/go2rtc-config-gen.py restores parity: the operator's config.yml go2rtc: section is
 # deep-merged over the snap baseline (config/go2rtc.yaml.in), the control API is forced to
 # loopback, and upstream defaults are seeded — see that file's header for the full model and
 # the documented divergences.
@@ -14,7 +14,7 @@
 # may embed a camera secret) and writes $SNAP_DATA/go2rtc.yaml under umask 077.
 set -e
 umask 077  # defence in depth; the generator also sets 077 before writing
-"$SNAP/usr/bin/python3.11" "$SNAP/bin/go2rtc-gen.py" \
+"$SNAP/usr/bin/python3.11" "$SNAP/bin/go2rtc-config-gen.py" \
     "$SNAP/config/go2rtc.yaml.in" \
     "$SNAP_DATA/config/config.yml" \
     "$SNAP" \

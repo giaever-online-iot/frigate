@@ -1,5 +1,5 @@
 # go2rtc BASELINE — the operator's config.yml go2rtc: section is deep-merged OVER this by
-# bin/go2rtc-gen.py on every start (upstream create_config.py parity). __SNAP__ -> $SNAP.
+# bin/go2rtc-config-gen.py on every start (upstream create_config.py parity). __SNAP__ -> $SNAP.
 # Operator keys win per-key; streams UNION (operator cameras coexist with the test streams
 # below); api.listen is FORCED back to loopback afterward regardless of operator value.
 log:
