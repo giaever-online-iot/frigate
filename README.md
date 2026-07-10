@@ -50,6 +50,15 @@ sudo snap connect frigate:mount-observe
   (private shared-memory frame buffers, and sizing them correctly). Connect
   these regardless of which detector you use.
 
+Now restart so the daemons pick up the new permissions — they start at
+install time, *before* you run these connects, so `frigate` crash-loops (its
+boot-time `mount-observe` check fails) until you restart once, a step that
+becomes unnecessary once the Store auto-connect requests are approved:
+
+```
+sudo snap restart frigate
+```
+
 Your Intel/AMD GPU is wired up automatically via the `gpu` content
 interface — no manual connect needed there. This relies on the snap's
 default content-provider being auto-connected by snapd at install time; if
