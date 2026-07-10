@@ -29,7 +29,7 @@ cfg_get() { v=$(snapctl get "$1" 2>/dev/null) || v=""; [ -n "$v" ] && printf '%s
 
 # M7: emit the sed script that renders the ONE active detector block from frigate-config.yml
 # and deletes the other two. `detector` is snap-set (ov|coral|cpu); unset => auto-detect:
-# a render node (/dev/dri/renderD*) present => ov (OpenVINO GPU), else cpu. RENDER-TIME ONLY —
+# an Intel/AMD GPU render node present => ov (OpenVINO GPU), else cpu. RENDER-TIME ONLY —
 # config.yml is render-once (operator-owned after first boot), so this fixes the detector at
 # first render. The chosen block keeps its contents (markers stripped); the other two marker
 # regions are range-deleted (same idiom as the LIVECAM block). Callers: frigate-run,
@@ -37,7 +37,22 @@ cfg_get() { v=$(snapctl get "$1" 2>/dev/null) || v=""; [ -n "$v" ] && printf '%s
 detector_sed() {
     _det=$(cfg_get detector "")
     if [ -z "$_det" ]; then
-        ls /dev/dri/renderD* >/dev/null 2>&1 && _det=ov || _det=cpu
+        # Verify R3 (VM/clean-machine): mere render-node EXISTENCE is the wrong test. A
+        # fresh LXD VM exposes /dev/dri/renderD128 backed by virtio-gpu; auto-selecting ov
+        # there crash-loops the NVR on OpenVINO GPU init. Same class: BMC/ASPEED display on
+        # servers, Mali on ARM boards — all present a render node no OpenVINO GPU can use.
+        # OpenVINO's GPU plugin supports only Intel (0x8086) and AMD/ATI (0x1002) hardware,
+        # so gate on the PCI vendor id at /sys/class/drm/<node>/device/vendor. Reads are
+        # guarded (vendor absent for non-PCI nodes; glob may stay literal) to keep the
+        # set -e/-u wrappers safe. Default cpu; explicit `snap set detector=ov` still wins.
+        _det=cpu
+        for _rnode in /dev/dri/renderD*; do
+            [ -e "$_rnode" ] || continue
+            _vendor=$(cat "/sys/class/drm/${_rnode##*/}/device/vendor" 2>/dev/null || true)
+            case "$_vendor" in
+                0x8086|0x1002) _det=ov; break ;;
+            esac
+        done
     fi
     case "$_det" in
         cpu)
