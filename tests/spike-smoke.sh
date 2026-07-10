@@ -14,6 +14,15 @@ FAIL=0
 # M6: backup path of the pre-Coral (OpenVINO default) rendered config; empty unless the Coral
 # phase is mid-swap. Initialized here so the EXIT trap's restore hook can reference it safely.
 CORAL_CFG_BAK=""
+# PR#3: operator config.yml protection. OPERATOR_CFG_STASH holds a root-0600 copy of the operator's
+# config.yml across the purge/reinstall cycle (mirrors LIVECAM_STASH) — the purge regenerates config
+# from the template and would otherwise DESTROY the operator's hand-added cameras. OPERATOR_CFG_SHA
+# records its sha256 for the end-of-run survival check (proves it returned byte-identical, contents
+# never printed). BRIDGE_CFG_BAK is the bridge test's own backup while it injects the bridgeproof
+# stream. All three declared here so the EXIT trap's restore hooks can reference them safely.
+OPERATOR_CFG_STASH=""
+OPERATOR_CFG_SHA=""
+BRIDGE_CFG_BAK=""
 mkdir -p "$EVIDENCE"
 # Evidence dir is created by the root harness but must stay writable by the invoking user
 # (agents capture run transcripts here). chown to SUDO_USER when run via sudo.
@@ -67,6 +76,17 @@ if [ -f "/var/tmp/frigate-livecam-url.stash" ] && \
     "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f /var/tmp/frigate-livecam-url.stash
 fi
 
+# PR#3 self-healing: same pattern for the operator's config.yml — if a prior run aborted with the
+# snap absent, the EXIT trap parked config.yml at a deterministic path. Recover it if the snap is
+# back and its config is missing (never echo contents).
+if [ -f "/var/tmp/frigate-operator-config.stash" ] && \
+   [ ! -f "/var/snap/$SNAP_NAME/current/config/config.yml" ] && \
+   [ -d "/var/snap/$SNAP_NAME/current/config" ]; then
+  echo "RECOVER: restoring operator config.yml from /var/tmp/frigate-operator-config.stash"
+  install -m 0600 -o root -g root /var/tmp/frigate-operator-config.stash \
+    "/var/snap/$SNAP_NAME/current/config/config.yml" && rm -f /var/tmp/frigate-operator-config.stash
+fi
+
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
 # Capture expanded snapcraft yaml (gpu extension evidence); project root is the snapcraft
 # project since M7 Task 4 (snap/snapcraft.yaml), so this runs directly from repo root.
@@ -102,6 +122,26 @@ trap '
     rm -f "$CORAL_CFG_BAK"
     snap restart $SNAP_NAME.frigate 2>/dev/null || true
   fi
+  # PR#3: if the bridge test died mid-flight, restore the operator config it was mutating (it was
+  # carrying the injected bridgeproof test stream) and cycle the whole snap so go2rtc regenerates.
+  if [ -n "${BRIDGE_CFG_BAK:-}" ] && [ -f "${BRIDGE_CFG_BAK:-}" ]; then
+    cp -p "$BRIDGE_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null || true
+    rm -f "$BRIDGE_CFG_BAK"
+    snap restart $SNAP_NAME 2>/dev/null || true
+  fi
+  # PR#3: operator config safety net — if the run aborted after the purge but before the explicit
+  # restore, put the stashed config.yml back so the gate never leaves the operator config-less.
+  # If the snap is gone, park it at a deterministic root-0600 path for the next run to recover.
+  if [ -n "${OPERATOR_CFG_STASH:-}" ] && [ -f "${OPERATOR_CFG_STASH:-}" ]; then
+    if [ -d "/var/snap/$SNAP_NAME/current/config" ]; then
+      install -m 0600 -o root -g root "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null || true
+      rm -f "$OPERATOR_CFG_STASH"
+      snap restart $SNAP_NAME 2>/dev/null || true
+    else
+      mv "$OPERATOR_CFG_STASH" /var/tmp/frigate-operator-config.stash 2>/dev/null && \
+        echo "STASH: operator config.yml preserved at /var/tmp/frigate-operator-config.stash (snap absent; recovered on next run)"
+    fi
+  fi
 ' EXIT
 
 if [ "${1:-}" != "--skip-install" ]; then
@@ -109,6 +149,16 @@ if [ "${1:-}" != "--skip-install" ]; then
   if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
     LIVECAM_STASH=$(mktemp)
     cp -p "/var/snap/$SNAP_NAME/common/livecam-url" "$LIVECAM_STASH"
+  fi
+  # PR#3: stash the operator's config.yml (their hand-added cameras) across the purge/reinstall
+  # cycle — the purge regenerates config from the template and would otherwise DESTROY it. Root
+  # 0600 discipline (may embed a camera secret); sha256 recorded for the survival check. Protects
+  # ANY operator config from gate runs, not just this host's.
+  if [ -f "/var/snap/$SNAP_NAME/current/config/config.yml" ]; then
+    OPERATOR_CFG_STASH=$(mktemp)
+    cp -p "/var/snap/$SNAP_NAME/current/config/config.yml" "$OPERATOR_CFG_STASH"
+    OPERATOR_CFG_SHA=$(sha256sum "$OPERATOR_CFG_STASH" | awk '{print $1}')
+    echo "PR#3: operator config.yml stashed before purge (sha256=$OPERATOR_CFG_SHA; content never printed)"
   fi
   snap remove --purge "$SNAP_NAME" 2>/dev/null || true
   # FINDING (M4 Task 4): the snap's PRIVATE /tmp (/tmp/snap-private-tmp/snap.frigate/tmp) is HOST
@@ -140,6 +190,15 @@ if [ "${1:-}" != "--skip-install" ]; then
     rm -f "$LIVECAM_STASH"
     rm -f "/var/snap/$SNAP_NAME/current/config/config.yml"
     snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  fi
+  # PR#3: restore the operator's config.yml OVER any template/livecam render — the operator owns
+  # config.yml and the gate must not destroy their cameras. Authoritative last-writer; whole-snap
+  # restart so go2rtc regenerates its config from the restored config.yml (the bridge under test).
+  if [ -n "$OPERATOR_CFG_STASH" ] && [ -f "$OPERATOR_CFG_STASH" ]; then
+    install -m 0600 -o root -g root "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml"
+    rm -f "$OPERATOR_CFG_STASH"; OPERATOR_CFG_STASH=""
+    snap restart $SNAP_NAME 2>/dev/null || true
+    echo "PR#3: operator config.yml restored after reinstall (hand-added cameras preserved)"
   fi
   pass_ "snap install --dangerous ($SNAP_FILE)"
   sleep 30  # let daemons start and probes write; frigate needs extra time for Python imports (~12s) + startup
@@ -1048,6 +1107,107 @@ else
   echo "SKIP: m7 tls.cert-profile ecdsa-p256 / rsa-4096 — no M7 config surface"
   echo "SKIP: m7 versioned-backup restore selection (0.17.2 over 99.0.0) — no M7 config surface"
   echo "SKIP: m7 logrotate >10 MB rotation — no M7 config surface"
+fi
+
+# ===================== go2rtc config bridge + integration (PR#3) =============================
+# Proves: (1) the operator's config.yml go2rtc: section reaches go2rtc (the config bridge);
+# (2) the control API stays loopback-sealed after the merge (M5 seal); (3) frigate ITSELF can
+# reach go2rtc; (4) the Web-UI /logs API no longer 500s; (5) the Web-UI Restart endpoint brings
+# frigate back (restart-condition: always). Stream bodies are piped to grep, never persisted
+# (they may carry the operator's camera credentials).
+BRIDGE_CFG="/var/snap/$SNAP_NAME/current/config/config.yml"
+BRIDGE_PY="/snap/$SNAP_NAME/current/usr/bin/python3.11"
+if [ -f "$BRIDGE_CFG" ] && [ -x "$BRIDGE_PY" ]; then
+  # Backup (trap-guarded via BRIDGE_CFG_BAK) then inject a defined-but-idle stream INTO the
+  # operator's go2rtc.streams using the snap's yaml-aware python — preserves their cameras, never
+  # prints config contents, writes 0600 (mode preserved by open('w') on the pre-0600 file).
+  BRIDGE_CFG_BAK=$(mktemp); cp -p "$BRIDGE_CFG" "$BRIDGE_CFG_BAK"
+  "$BRIDGE_PY" - "$BRIDGE_CFG" <<'PYEOF'
+import os, sys, yaml
+p = sys.argv[1]
+with open(p) as f:
+    cfg = yaml.safe_load(f) or {}
+if not isinstance(cfg, dict):
+    cfg = {}
+g = cfg.get("go2rtc")
+if not isinstance(g, dict):
+    g = {}
+s = g.get("streams")
+if not isinstance(s, dict):
+    s = {}
+s["bridgeproof"] = "exec:true"   # defined-but-idle: appears in /api/streams, runs nothing
+g["streams"] = s
+cfg["go2rtc"] = g
+os.umask(0o077)
+with open(p, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False)
+PYEOF
+  snap restart $SNAP_NAME 2>/dev/null || true
+  # Bounded wait for frigate API (implies go2rtc :1984 is up — frigate starts after go2rtc).
+  _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
+  echo "  bridge finding: frigate API answered ${_b}s after whole-snap restart (bridgeproof injected)"
+  # (1) the injected stream reached go2rtc's runtime config:
+  if curl -sf --max-time 5 http://127.0.0.1:1984/api/streams 2>/dev/null | grep -q bridgeproof; then
+    pass_ "bridge: config.yml go2rtc: section reaches go2rtc (bridgeproof stream present)"
+  else
+    fail_ "bridge: config.yml go2rtc: section reaches go2rtc (bridgeproof stream present)"
+  fi
+  # (2) M5 seal MUST still hold after merging the operator section (api.listen forced loopback):
+  check "bridge: :1984 STILL loopback-only after config merge (M5 seal intact)" \
+    sh -c "ss -tln | grep -q '127\.0\.0\.1:1984' && ! ss -tln | grep -qE '0\.0\.0\.0:1984|\[\:\:\]:1984'"
+  # (3) frigate ITSELF reaches go2rtc — its /go2rtc/streams proxy (client target is hardcoded
+  # http://127.0.0.1:1984/api/streams, camera.py) returns 200 AND lists bridgeproof. Chosen over
+  # asserting absence of the "Failed to fetch streams" log line: this exercises the exact client
+  # path AND confirms the bridge stream is what frigate sees (the stronger proof).
+  BRIDGE_F2G=$(curl -s -o /dev/null -w '%{http_code}' -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/go2rtc/streams 2>/dev/null)
+  check "bridge: frigate reaches go2rtc (/go2rtc/streams HTTP 200)" test "$BRIDGE_F2G" = "200"
+  if curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/go2rtc/streams 2>/dev/null | grep -q bridgeproof; then
+    pass_ "bridge: frigate sees bridgeproof via its own go2rtc client"
+  else
+    fail_ "bridge: frigate sees bridgeproof via its own go2rtc client"
+  fi
+  echo "  bridge finding: frigate->go2rtc /go2rtc/streams http=$BRIDGE_F2G (client target 127.0.0.1:1984)"
+  # Restore the operator's pristine config (byte-exact) and re-cycle so go2rtc drops bridgeproof.
+  cp -p "$BRIDGE_CFG_BAK" "$BRIDGE_CFG"; rm -f "$BRIDGE_CFG_BAK"; BRIDGE_CFG_BAK=""
+  snap restart $SNAP_NAME 2>/dev/null || true
+  _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
+  check "bridge: frigate healthy again after config restore (:5001/version, ${_b}s)" \
+    sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1"
+else
+  echo "SKIP: bridge: config bridge proof — no operator config.yml or snap python (fresh/absent install)"
+fi
+
+# (4) Fix 3 — the Web-UI /logs API no longer 500s. It reads /dev/shm/logs/<svc>/current;
+# frigate-run now creates them (nginx/current -> real error.log; frigate/go2rtc placeholders).
+# Route is /logs/{service} with NO /api prefix on the internal :5001 (M3 route discipline);
+# allow_any_authenticated() needs a Remote-User header. A 500 here is the undefined.length crash.
+BRIDGE_LOGS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/nginx 2>/dev/null)
+check "logs: /logs/nginx returns 200 (UI /logs page no longer crashes)" test "$BRIDGE_LOGS" = "200"
+echo "  logs finding: GET :5001/logs/nginx http=$BRIDGE_LOGS (was 500 pre-fix; s6-log paths satisfied)"
+
+# (5) Fix 4 — the Web-UI Restart button. restart_frigate() SIGINTs frigate (clean exit, pid1 is
+# not s6-svscan); restart-condition: always brings it back. POST /restart (require_role admin ->
+# Remote-Role header) on :5001, then bound-wait for recovery. Placed AFTER the bridge proof so it
+# never disturbs the bridge's own state.
+curl -s -o /dev/null -X POST -H 'Remote-User: admin' -H 'Remote-Role: admin' --max-time 5 http://127.0.0.1:5001/restart 2>/dev/null || true
+echo "  restart finding: POST :5001/restart issued (frigate self-SIGINT; awaiting always-restart)"
+_b=0; while [ "$_b" -lt 120 ]; do
+  if snap services $SNAP_NAME.frigate 2>/dev/null | grep -q ' active' && curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1; then break; fi
+  sleep 3; _b=$((_b+3))
+done
+check "restart: frigate.frigate active again after UI restart (restart-condition: always)" \
+  sh -c "snap services $SNAP_NAME.frigate | grep -q ' active'"
+check "restart: frigate API answers again after UI restart (:5001/version)" \
+  sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1"
+echo "  restart finding: recovery after ${_b}s (clean-exit self-restart proven; on-failure would stay DOWN)"
+
+# Operator config survived the whole gate byte-identical (purge stash + bridge mutate/restore).
+if [ -n "$OPERATOR_CFG_SHA" ]; then
+  BRIDGE_NOW_SHA=$(sha256sum "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null | awk '{print $1}')
+  check "operator-config: config.yml byte-identical after the gate (sha256 match)" test "$BRIDGE_NOW_SHA" = "$OPERATOR_CFG_SHA"
+  echo "  operator-config finding: pre=$OPERATOR_CFG_SHA post=$BRIDGE_NOW_SHA (content never printed)"
+else
+  echo "SKIP: operator-config: survival sha check — no operator config.yml stashed (fresh host)"
 fi
 
 # --- AppArmor denial scan (keep last) ---
