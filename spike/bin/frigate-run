@@ -31,6 +31,23 @@ for _shm in /dev/shm/*; do
     esac
 done
 
+# Fix 3 (PR#3): satisfy the paths Frigate's /logs API reads. frigate.api.app serves
+# /logs/{frigate,go2rtc,nginx} from the FIXED upstream s6-log paths /dev/shm/logs/<svc>/current.
+# The snap has no s6 logging, so those files were absent and the API 500'd -> the Web UI /logs
+# page crashed (undefined.length). We create them HERE (not in nginx-run) because /dev/shm is
+# shared across the snap's apps but ONLY apps with shm-private (frigate, validate-config) may
+# write arbitrary /dev/shm paths — nginx's write is AppArmor-denied. Runs AFTER the shm-clear
+# above (the clear's top-level glob can't rm a directory, so this structure also survives frigate
+# restarts). LEAN variant: nginx/current is a symlink to the real error.log (zero duplication,
+# real content); frigate/go2rtc/current are empty placeholders so those tabs render empty instead
+# of 500ing. Full stdout tee (real frigate/go2rtc logs) is deferred: POSIX sh lacks pipefail, so
+# `exec daemon | tee` would break crash-exit propagation for the on-failure go2rtc service.
+# Authoritative logs stay `snap logs -f frigate.frigate` / journalctl (see README).
+mkdir -p /dev/shm/logs/frigate /dev/shm/logs/go2rtc /dev/shm/logs/nginx
+ln -sf "$SNAP_DATA/nginx/logs/error.log" /dev/shm/logs/nginx/current
+[ -e /dev/shm/logs/frigate/current ] || : > /dev/shm/logs/frigate/current
+[ -e /dev/shm/logs/go2rtc/current ] || : > /dev/shm/logs/go2rtc/current
+
 # Render config at FIRST start only — once config.yml exists, the OPERATOR owns it
 # (docs/accelerator-support.md instructs editing it, e.g. the Coral detector swap;
 # render-every-start clobbered operator edits — M6 gate discovery). Delete config.yml and
