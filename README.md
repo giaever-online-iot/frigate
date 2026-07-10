@@ -117,8 +117,13 @@ This file is generated once, the first time Frigate starts. After that,
 your changes:
 
 ```
-sudo snap restart frigate.frigate
+sudo snap restart frigate
 ```
+
+Restart the **whole snap** (`frigate`), not just `frigate.frigate`: the
+internal `go2rtc` regenerates its own config from your `config.yml` at
+start, so a camera change needs both services cycled — the whole-snap
+restart covers it.
 
 Snap refreshes never touch an existing `config.yml`; a new snap revision's
 template updates only apply to a config that doesn't exist yet. If you want
@@ -127,8 +132,45 @@ file and restart:
 
 ```
 sudo rm /var/snap/frigate/current/config/config.yml
-sudo snap restart frigate.frigate
+sudo snap restart frigate
 ```
+
+### Adding a camera (go2rtc restream)
+
+The recommended pattern is Frigate's standard one: declare each camera's
+streams once under a top-level `go2rtc:` block, then point the camera's
+ffmpeg inputs at the snap's internal `go2rtc` over loopback RTSP
+(`rtsp://127.0.0.1:8554/<stream>`). go2rtc pulls the camera once and
+restreams it, so Frigate's record and detect roles share a single
+connection to the camera. A worked example with a main (record) and a sub
+(detect) stream:
+
+```yaml
+go2rtc:
+  streams:
+    front_door:
+      - rtsp://USER:PASSWORD@192.168.1.10:554/stream1
+    front_door_sub:
+      - rtsp://USER:PASSWORD@192.168.1.10:554/stream2
+
+cameras:
+  front_door:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/front_door
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/front_door_sub
+          roles:
+            - detect
+    detect:
+      enabled: true
+```
+
+Then apply with `sudo snap restart frigate` (whole snap — see above). The
+snap reads your `go2rtc:` block straight out of `config.yml`, exactly as
+upstream Frigate does, so streams referenced as `rtsp://127.0.0.1:8554/...`
+resolve instead of returning RTSP 404s.
 
 ### Built-in demo camera
 
@@ -141,10 +183,10 @@ it costs CPU, and it records to disk (bounded — 1 day of retention).
 
 When you start adding real cameras, remove it. In `config.yml`, delete the
 whole `testclip:` block under `cameras:` (from the `testclip:` line through
-its `objects:` list), then restart Frigate:
+its `objects:` list), then restart the snap:
 
 ```
-sudo snap restart frigate.frigate
+sudo snap restart frigate
 ```
 
 The clip itself is streamed by the snap's internal `go2rtc` on demand:
@@ -213,6 +255,16 @@ directly, useful when troubleshooting a detector or accelerator:
   itself does at startup, without starting the full daemon.
 
 Run any of them directly, e.g. `sudo snap run frigate.gpu-probe`.
+
+The web UI's **Logs** page shows nginx logs in full; the Frigate and go2rtc
+tabs currently render empty (full in-UI log capture for those two is pending
+a later release). The authoritative logs are always available from the host:
+
+```
+sudo snap logs -f frigate.frigate
+sudo snap logs -f frigate.go2rtc
+sudo journalctl -u snap.frigate.frigate
+```
 
 ## Accelerators
 
