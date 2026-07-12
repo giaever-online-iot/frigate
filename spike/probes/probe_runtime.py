@@ -36,6 +36,22 @@ def imports_probe() -> dict:
         except Exception as e:
             out["imports"][mod] = {"ok": False,
                                    "error": f"{type(e).__name__}: {e}"}
+
+    # M8 (Task 2): sqlite-vec loadable extension. Frigate's semantic search loads vec0 from the
+    # HARDCODED absolute path /usr/local/lib/vec0 (frigate/db/sqlitevecq.py — NOT patched); the
+    # /usr/local/lib -> $SNAP/usr/local/lib layout makes that path resolve inside the snap. Python
+    # is built --enable-loadable-sqlite-extensions. Record vec_version so the harness can report it.
+    import sqlite3
+    try:
+        conn = sqlite3.connect(":memory:")
+        conn.enable_load_extension(True)
+        conn.load_extension("/usr/local/lib/vec0")
+        vec_version = conn.execute("select vec_version()").fetchone()[0]
+        conn.close()
+        out["imports"]["sqlite_vec"] = {"ok": True, "version": vec_version}
+    except Exception as e:
+        out["imports"]["sqlite_vec"] = {"ok": False,
+                                        "error": f"{type(e).__name__}: {e}"}
     return out
 
 

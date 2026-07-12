@@ -285,6 +285,10 @@ directly, useful when troubleshooting a detector or accelerator:
 - `frigate.mdns-probe` — checks mDNS multicast reachability.
 - `frigate.validate-config` — validates `config.yml` the same way Frigate
   itself does at startup, without starting the full daemon.
+- `frigate.imports-probe` — checks that every bundled Python module (numpy,
+  OpenVINO, TensorFlow, the sqlite-vec search extension, …) imports cleanly
+  and re-checks shared-memory behaviour under confinement. Handy when a
+  detector fails to start and you want to rule out a broken dependency.
 
 Run any of them directly, e.g. `sudo snap run frigate.gpu-probe`.
 

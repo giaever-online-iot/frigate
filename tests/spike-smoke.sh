@@ -304,15 +304,18 @@ if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
   sleep 30  # let daemons start and probes write; frigate needs extra time for Python imports (~12s) + startup
 fi
 
-check "svc-a active" sh -c "snap services $SNAP_NAME.svc-a | grep -q ' active'"
+# RETIRED (M8 Task 5): the M0 svc-a/b/c ordering-spike daemons are removed from the snap; their
+# probe payload is re-homed to the frigate.imports-probe CLI diagnostic (run below). The real
+# 4-daemon start chain (go2rtc -> frigate -> nginx -> certsync) is asserted by the service-active
+# checks further down (go2rtc L442, frigate L543, nginx L557, certsync L1176).
+echo "RETIRED (M8): M0 svc ordering spike — real-daemon chain asserted via services-active checks"
 
-# --- task assertions inserted below this line ---
-check "svc-b active" sh -c "snap services $SNAP_NAME.svc-b | grep -q ' active'"
-check "svc-c active" sh -c "snap services $SNAP_NAME.svc-c | grep -q ' active'"
-TA=$(jqr ordering-svc-a '.start_monotonic'); TB=$(jqr ordering-svc-b '.start_monotonic'); TC=$(jqr ordering-svc-c '.start_monotonic')
-# starttime has 10ms (jiffy) resolution: sub-jiffy starts tie. Ties allowed; inversions still fail.
-check "ordering: svc-a <= svc-b <= svc-c (jiffy resolution, ties allowed)" awk -v a="$TA" -v b="$TB" -v c="$TC" 'BEGIN{exit !(a<=b && b<=c)}'
-
+# --- M8 Task 5: re-homed imports/shm/layout/runtime/edgetpu probe (full-gate class) ---
+# The retired svc-a/b/c daemons wrote these JSONs at daemon start; a single CLI run now does.
+# The run execs Python inside the snap (imports tensorflow/openvino/cv2, dlopens edgetpu, creates a
+# psm_ shm to reproduce the M0 denial) — exec-inside-snap, so nvr-safe SKIPs the run AND the reads.
+if [ "$NVR_SAFE" -eq 0 ]; then
+snap run $SNAP_NAME.imports-probe >/dev/null 2>&1 || true
 check "shm probe complete" test "$(jqr shm '.status')" = "complete"
 check "shm probe has both sub-results" test "$(jqr shm '.default_name.ok, .snap_prefixed.ok' | wc -l)" = "2"
 echo "  shm finding: default(psm_*) ok=$(jqr shm '.default_name.ok') err=$(jqr shm '.default_name.error // "-"')"
@@ -331,19 +334,20 @@ check "private /tmp/cache (staging): layout probe write ok" sh -c "jq -e '.write
 
 check "daemons run on python 3.11" test "$(jqr runtime '.version_major_minor')" = "3.11"
 
-# The imports probe (tensorflow+openvino imports, ~30-75s under load) can outlive the fixed
-# post-install sleep: probe completion observed at +73s under host load (2026-07-05, two
-# consecutive runs) while earlier same-day runs completed within 30s. Poll to the probe's
-# actual completion instead of racing a fixed sleep (deadline 120s; edgetpu-dlopen is
-# written by the same probe sequence right after imports.json).
+# M8: the probe now runs SYNCHRONOUSLY via `snap run` just above (blocks until svc.py exits), so
+# imports.json/edgetpu-dlopen.json are already complete on return. The poll below is a cheap
+# defensive guard (normally breaks on the first iteration; deadline 120s under extreme host load).
 for i in $(seq 1 24); do
   [ "$(jqr imports '.status')" = "complete" ] && [ "$(jqr edgetpu-dlopen '.status')" = "complete" ] && break
   sleep 5
 done
 check "imports probe complete" test "$(jqr imports '.status')" = "complete"
-for MOD in numpy cv2 onnxruntime tflite_runtime tensorflow openvino fastapi uvicorn starlette peewee pydantic scipy norfair zmq cryptography ruamel.yaml paho.mqtt.client; do
+# sqlite_vec (M8 Task 2): loadable-extension load from /usr/local/lib/vec0 + vec_version() — same
+# hardcoded path Frigate's semantic search uses; the probe records vec_version in imports.json.
+for MOD in numpy cv2 onnxruntime tflite_runtime tensorflow openvino fastapi uvicorn starlette peewee pydantic scipy norfair zmq cryptography ruamel.yaml paho.mqtt.client sqlite_vec; do
   check "import $MOD" sh -c "jq -e '.imports.\"$MOD\".ok == true' \"$RESULTS/imports.json\""
 done
+echo "  sqlite-vec finding: vec0 loadable extension vec_version=$(jqr imports '.imports.sqlite_vec.version // "-"') (loaded from /usr/local/lib/vec0)"
 
 # FINDING (Task 6): /media/frigate layout REJECTED at snap pack time (same "defines a new top-level
 # directory" error as /config). snapd does not treat /media as a valid layout base even though the
@@ -355,6 +359,9 @@ printf '# RECORDED FINDING (Task 6): snapcraft pack-time rejection, replayed by 
 
 check "edgetpu dlopen probe complete" test "$(jqr edgetpu-dlopen '.status')" = "complete"
 echo "  edgetpu finding: dlopen ok=$(jqr edgetpu-dlopen '.dlopen.ok') err=$(jqr edgetpu-dlopen '.dlopen.error // "-"')"
+else
+  echo "SKIP (nvr-safe): imports-probe run + shm/layout/runtime/imports/edgetpu reads (exec-inside-snap)"
+fi
 
 if [ "$NVR_SAFE" -eq 0 ]; then
 # Ensure mesa-2604 is installed and connected (idempotent; also handles --skip-install path)
@@ -447,9 +454,10 @@ curl -sf --max-time 5 http://127.0.0.1:1984/api/streams 2>/dev/null | jq 'keys' 
 check "go2rtc API lists test stream" sh -c "jq -e 'index(\"test\")' \"$EVIDENCE/go2rtc-streams.json\""
 
 # --- M1: readiness gate evidence (Task 3) ---
-# Note: jqr is a shell function not available in subshells; inline jq with the expanded $RESULTS path.
-check "readiness: svc-a waited_ms recorded (>=0)" sh -c "WMS=\$(jq -r '.waited_ms // -2' \"$RESULTS/ordering-svc-a.json\" 2>/dev/null); [ -n \"\$WMS\" ] && [ \"\$WMS\" -ge 0 ]"
-echo "  readiness finding: svc-a waited_ms=$(jqr ordering-svc-a '.waited_ms')"
+# RETIRED (M8 Task 5): the M0 svc-a readiness-gate spike (wait_for_url -> waited_ms) is retired with
+# its daemon. The real daemons carry readiness gating in their own run wrappers — nginx-run/
+# frigate-run/certsync-run call wait_for_url (lib-wait.sh) before exec'ing their service.
+echo "RETIRED (M8): M0 svc-a readiness spike (waited_ms) — real daemons gate via wait_for_url in their run wrappers"
 
 # --- M1: RTSP end-to-end (Task 4) ---
 # ffprobe is BOTH the verifier and the first consumer: it triggers go2rtc's
@@ -1475,10 +1483,12 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
   > "$EVIDENCE/denials.txt" || true
 # Known expected denials (FINDINGS, not bugs) — enumerated EXACTLY; any new denial pattern must
 # fail the run and be triaged before being added here:
-#   psm_        - svc-a: unnamespaced POSIX shm (Task 3 finding)
+#   psm_        - imports-probe: unnamespaced POSIX shm denial (M0 Task 3 finding; re-homed M8 Task 5)
 #   name="/config/ - layout probe: /config not in layout (Task 5 finding)
-#   operation="create".*class="net".*comm="python3 - svc-c: tensorflow/openvino python3 socket
-#                 creation at import time (inet/inet6, telemetry) → needs 'network' interface
+#   operation="create".*class="net".*comm="python3 - tensorflow/openvino python3 socket creation
+#                 at import time (inet/inet6, telemetry). comm-bound + profile-agnostic; the
+#                 imports-probe app now holds the 'network' plug so its own imports run clean —
+#                 arm retained for any other python3 net-create denial.
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
@@ -1491,7 +1501,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   (1a6e) state. Non-blocking: same mechanism as the coral-probe sibling arm.
 #   Arm (PINNED profile+comm+capname): frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"
 # Evidence (journal 2026-07-10 03:45:53): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.frigate" pid=2565495 comm="frigate.detecto" capability=12  capname="net_admin"
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -1528,21 +1538,22 @@ echo "  npu-probe finding: probe RETIRED from shipped snap (M7 final review; cus
 #   vaapi-probe.*capname="perfmon"   - ffmpeg VAAPI queries performance counters (CAP_PERFMON);
 #                 denied but non-blocking. Production snap does NOT need these caps for VAAPI decode.
 echo "  vaapi-probe finding: CAP_SYS_ADMIN + CAP_PERFMON denials at VAAPI DRM init (advisory, non-blocking) — hw decode rc=0 confirmed"
-# FINDING (Task 3): matplotlib font-scan denials — matplotlib (transitive dep of norfair→filterpy)
-#   enumerates system font directories at import time. Profile: snap.frigate.svc-c (imports probe).
-#   Denied paths: /usr/share/fonts/ and /usr/local/share/fonts/ (comm="python3.11", operation="open").
-#   Arm is profile+name-bound: svc-c.*name="/usr(/local)?/share/fonts/ — matches both observed paths.
-#   Non-blocking: norfair import succeeds; matplotlib works without font access.
-#   Production snap: add AppArmor font-dir read rules OR exclude matplotlib from site-packages.
-echo "  wheels finding: matplotlib font-dir scan denials (/usr/share/fonts/, /usr/local/share/fonts/) — benign, non-blocking (Task 3 finding)"
-# FINDING (Task 5): validate-config / Task-5 wheel additions — three new benign patterns:
-#   svc-c.*name="/dev/shm/sem\.  - joblib (new transitive dep: librosa->scikit-learn), imported
-#                 during the tensorflow/keras import in the imports probe, creates a TEST semaphore
-#                 at import (glibc sem_open mknods random /dev/shm/sem.XXXXXX). Denied -> joblib
-#                 warns "[Errno 13] ... joblib will operate in serial mode" and falls back; all
-#                 import checks PASS. (validate-config app is immune: shm-private private /dev/shm.)
-#   svc-c.*name="/usr/bin/lscpu" - joblib/loky physical-core detection execs lscpu in the same
-#                 import window; denied, graceful core-count fallback, non-blocking.
+# RETIRED ARM (M8 Task 5): matplotlib font-scan denials — svc-c-era: matplotlib (transitive dep of
+#   norfair→filterpy) enumerated /usr/share/fonts/ + /usr/local/share/fonts/ at import (operation="open").
+#   The re-pointed imports-prob.*fonts arm was DELETED: the M8 VM full gate CAPTURED zero imports-probe
+#   denials (denials.txt 416 total, all frigate/nginx; journalctl -k: 0 snap.frigate.imports-probe lines).
+#   CAVEAT (honest): captured != produced — the same run's shm probe hit /psm_* with a Python-level
+#   EACCES yet that denial was ALSO uncaptured (VM kernel-audit gap over the ~8-min run). So the arm is
+#   retired for lack of a journal QUOTE (policy L1484-1485), not because the font scan is proven gone.
+#   On hardware it surfaces as an unexpected denial → triaged + re-added WITH a real quote.
+echo "  wheels finding: matplotlib font-scan arm RETIRED (M8 Task 5) — 0 imports-probe denials CAPTURED in the VM gate (capture gap: shm psm_ EACCES also uncaptured); re-add with a journal quote if captured on hardware"
+# FINDING (Task 5): validate-config / Task-5 wheel additions — remaining benign patterns:
+#   RETIRED ARMS (M8 Task 5): the svc-c-era joblib denials — /dev/shm/sem.XXXXXX (glibc sem_open at the
+#                 tensorflow/keras import → "joblib will operate in serial mode") and /usr/bin/lscpu
+#                 (joblib/loky physical-core detection) — were re-pointed to imports-prob then DELETED:
+#                 the M8 VM gate CAPTURED zero imports-probe denials (see the font-scan capture-gap caveat
+#                 above — captured != produced). Re-add WITH a journal quote if captured on hardware
+#                 (policy L1484-1485). validate-config stays immune anyway (shm-private private /dev/shm).
 #   validate-config.*cpu\.max    - the full frigate.app import chain reads its own cgroup
 #                 /sys/fs/cgroup/.../cpu.max + parent slice (cgroup v2 CPU quota probing; fires in
 #                 both the main and forkserver-preload interpreters). EACCES tolerated - validation
@@ -1550,7 +1561,7 @@ echo "  wheels finding: matplotlib font-dir scan denials (/usr/share/fonts/, /us
 #                 (numpy/cv2/ort/tf/openvino/sherpa/transformers/pandas/librosa each tested clean).
 #   product_(name|version)       - gpu-probe DMI arm widened: OpenVINO reads product_version next
 #                 to product_name (2026-07-04 run; same OpenVINO system-info probing, varies run-to-run).
-echo "  validate finding: joblib sem/lscpu import probes (svc-c, serial-mode fallback) + frigate chain cgroup cpu.max reads (validate-config) — benign, non-blocking (Task 5 finding)"
+echo "  validate finding: joblib sem/lscpu arms RETIRED (M8 Task 5; 0 imports-probe denials in VM gate) + frigate chain cgroup cpu.max reads (validate-config) — benign, non-blocking"
 # FINDING (Task 3): frigate daemon cgroup reads — multiple cgroup v2 paths read by the daemon
 #   and its subprocesses (comm="python3.11" main process, comm="frigate.detecto" OpenVINO detector,
 #   etc.). Two patterns observed:
@@ -1564,7 +1575,7 @@ echo "  frigate finding: frigate.frigate cgroup reads (cpu.max per-slice + top-l
 # FINDING (Task 3): frigate.frigate ptrace + /proc/<pid>/cmdline denials — psutil.process_iter()
 #   in the recording subprocess (comm="frigate.recordi") scans ALL processes to find spawned ffmpeg
 #   instances. Ptrace denied against every process peer: unconfined system processes AND other snap
-#   profiles (snap.frigate.go2rtc, snap.frigate.svc-a/b/c, snap.frigate.coral-probe,
+#   profiles (snap.frigate.go2rtc, snap.frigate.imports-probe, snap.frigate.coral-probe,
 #   snap.snapcraft.snapcraft etc. — whatever else runs on the host during the capture window).
 #   Same root cause as the unconfined case; psutil.process_iter() sends a ptrace read to every PID.
 #   Benign: recording degrades gracefully; ffmpeg is tracked via its own subprocess handle.

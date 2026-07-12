@@ -83,22 +83,6 @@ apps:
     daemon: simple
     restart-condition: on-failure
     plugs: [network, network-bind]
-  svc-a:
-    command: bin/svc-a
-    daemon: simple
-    restart-condition: never
-    after: [go2rtc]
-    plugs: [network]
-  svc-b:
-    command: bin/svc-b
-    daemon: simple
-    restart-condition: never
-    after: [svc-a]
-  svc-c:
-    command: bin/svc-c
-    daemon: simple
-    restart-condition: never
-    after: [svc-b]
   gpu-probe:
     command: bin/gpu-probe
     extensions: [gpu]
@@ -106,6 +90,13 @@ apps:
   coral-probe:
     command: bin/coral-probe
     plugs: [raw-usb, hardware-observe]
+  # imports-probe (M8 Task 5): re-homed payload of the retired M0 svc-a/b/c ordering-spike
+  # daemons. Runs the module-import + shm/layout/runtime/edgetpu probes once as an on-demand
+  # CLI diagnostic (writes $SNAP_COMMON/spike-results/*.json). network: tensorflow/openvino
+  # create sockets at import time (M0 net-denial finding) — the plug lets those imports run clean.
+  imports-probe:
+    command: bin/imports-probe
+    plugs: [network]
   mdns-probe:
     command: bin/mdns-probe
     plugs: [network, network-bind]
