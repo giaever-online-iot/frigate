@@ -165,7 +165,14 @@ cameras:
             - detect
     detect:
       enabled: true
+      fps: 5
 ```
+
+Detection runs inference on every frame of the detect stream, and most
+cameras deliver it at their native 20–30 fps — left unset, that's pure
+wasted inference. `fps: 5` above caps the detect stream at Frigate's
+recommended detection rate. Recordings are unaffected: the `record` role
+keeps decoding the full stream at its native rate regardless.
 
 Then apply with `sudo snap restart frigate` (whole snap — see above). The
 snap reads your `go2rtc:` block straight out of `config.yml`, exactly as
@@ -212,6 +219,28 @@ Two things worth knowing before you rely on this setup long-term:
   operator-owned like the rest of `config.yml` and isn't touched by
   `snap set`; if you turn TLS off, set `cookie_secure: false` there too or
   the login cookie won't be sent over plain HTTP.
+
+### Semantic search
+
+Frigate can index past events for natural-language search using an
+embeddings model. Enable it by adding a `semantic_search:` block to
+`config.yml`:
+
+```yaml
+semantic_search:
+  enabled: true
+```
+
+then restart the whole snap (`sudo snap restart frigate` — see above). The
+first time you enable it, Frigate downloads its embedding models over the
+network before indexing starts — this can take several minutes depending on
+your connection, so make sure outbound network access is available. Once
+the download finishes, Frigate indexes your existing events in the
+background.
+
+Semantic search requires a build with sqlite extension support (July 2026
+or later) — earlier builds log a `sqlite-vec` load error and semantic
+search stays unavailable.
 
 ## Configuration (`snap set`)
 
