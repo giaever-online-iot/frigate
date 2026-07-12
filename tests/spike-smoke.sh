@@ -102,7 +102,10 @@ fi
 # Self-healing: if a prior aborted run couldn't restore the livecam secret (snap was gone at
 # EXIT trap time), it was moved to a deterministic stash path. Recover it now if the snap is
 # installed and the credential is missing — no content echoed, just the path.
-if [ -f "/var/tmp/frigate-livecam-url.stash" ] && \
+# M8 T1 review (Important): NVR_SAFE-gated — a read-only run has no business self-healing
+# (install+rm host mutations, and this path sits outside the harmlessness proof's baseline).
+if [ "$NVR_SAFE" -eq 0 ] && \
+   [ -f "/var/tmp/frigate-livecam-url.stash" ] && \
    [ ! -f "/var/snap/$SNAP_NAME/common/livecam-url" ] && \
    [ -d "/var/snap/$SNAP_NAME/common" ]; then
   echo "RECOVER: restoring livecam secret from /var/tmp/frigate-livecam-url.stash"
@@ -117,7 +120,9 @@ fi
 # may be newer operator work. The AUTHORITATIVE recovery is the post-install restore step, where
 # the /var/tmp stash wins over the fresh template render (review fix; see the install section).
 # rm only after the copy verifiably landed. Never echo contents.
-if [ -f "/var/tmp/frigate-operator-config.stash" ] && \
+# M8 T1 review (Important): NVR_SAFE-gated — a read-only run has no business self-healing.
+if [ "$NVR_SAFE" -eq 0 ] && \
+   [ -f "/var/tmp/frigate-operator-config.stash" ] && \
    [ ! -f "/var/snap/$SNAP_NAME/current/config/config.yml" ] && \
    [ -d "/var/snap/$SNAP_NAME/current/config" ]; then
   echo "RECOVER: restoring operator config.yml from /var/tmp/frigate-operator-config.stash"
@@ -148,7 +153,7 @@ trap '
       if [ -d "/var/snap/$SNAP_NAME/common" ]; then
         install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f "$LIVECAM_STASH"
       else
-        # oldest-wins: run 2'\''s stash may be a template render; the parked file is the real operator config (PR#3 review, M8 B2)
+        # oldest-wins: run 2'\''s stash may be a template render; the parked file is the real livecam secret (PR#3 review, M8 B2)
         if [ -e /var/tmp/frigate-livecam-url.stash ]; then
           echo "STASH: /var/tmp/frigate-livecam-url.stash already exists (older run'\''s secret — oldest wins, NOT overwritten)."
           echo "STASH: this run'\''s copy left at $LIVECAM_STASH — reconcile manually, then delete both."
