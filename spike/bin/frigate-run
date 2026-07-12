@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # M3: the Frigate daemon under strict confinement.
 set -e
 . "$SNAP/bin/lib-wait.sh"
@@ -38,15 +38,20 @@ done
 # shared across the snap's apps but ONLY apps with shm-private (frigate, validate-config) may
 # write arbitrary /dev/shm paths — nginx's write is AppArmor-denied. Runs AFTER the shm-clear
 # above (the clear's top-level glob can't rm a directory, so this structure also survives frigate
-# restarts). LEAN variant: nginx/current is a symlink to the real error.log (zero duplication,
-# real content); frigate/go2rtc/current are empty placeholders so those tabs render empty instead
-# of 500ing. Full stdout tee (real frigate/go2rtc logs) is deferred: POSIX sh lacks pipefail, so
-# `exec daemon | tee` would break crash-exit propagation for the on-failure go2rtc service.
-# Authoritative logs stay `snap logs -f frigate.frigate` / journalctl (see README).
+# restarts). nginx/current stays a symlink to the real error.log (zero duplication, real content).
+# M8: full tee via bash process substitution — the daemon is exec'd (exit codes/signals propagate);
+# tee's stdout inherits the journal socket so journald still gets everything. Rotation: logrotate
+# stanza (copytruncate, size 10M, timer every ~4h). frigate/current is truncated here (fresh file
+# per frigate start, bounds tmpfs growth between rotations) and fed by the exec-tee at the bottom.
+# go2rtc has NO shm-private plug (its /dev/shm/logs write is AppArmor-DENIED — verified M8, same
+# reason nginx can't write here), so go2rtc-run tees to its own writable $SNAP_DATA/go2rtc-logs/current
+# and we symlink the shm path to it (mirrors the nginx symlink above). Caveat: a frigate-ONLY restart
+# re-truncates frigate/current but leaves the go2rtc symlink/view intact (go2rtc owns its file's
+# lifecycle); a go2rtc-only restart truncates go2rtc's file and frigate's view is untouched.
 mkdir -p /dev/shm/logs/frigate /dev/shm/logs/go2rtc /dev/shm/logs/nginx
 ln -sf "$SNAP_DATA/nginx/logs/error.log" /dev/shm/logs/nginx/current
-[ -e /dev/shm/logs/frigate/current ] || : > /dev/shm/logs/frigate/current
-[ -e /dev/shm/logs/go2rtc/current ] || : > /dev/shm/logs/go2rtc/current
+: > /dev/shm/logs/frigate/current
+ln -sf "$SNAP_DATA/go2rtc-logs/current" /dev/shm/logs/go2rtc/current
 
 # Render config at FIRST start only — once config.yml exists, the OPERATOR owns it
 # (docs/accelerator-support.md instructs editing it, e.g. the Coral detector swap;
@@ -146,4 +151,9 @@ fi
 printf '%s %s\n' "$CUR_VERSION" "$SNAP_REVISION" > "$SNAP_COMMON/db/.last-writer"
 
 cd /opt/frigate
-exec "$SNAP/usr/bin/python3.11" -u -m frigate
+# M8: tee stdout+stderr into the /logs shm file via process substitution (NOT a pipe) — the daemon
+# stays this unit's main process, so exit codes/signals propagate untouched; tee's own stdout inherits
+# the journal socket so journald keeps receiving every line. Secret note: frigate's stdout can echo
+# camera/go2rtc URLs with credentials on warnings — these land only in the snap's private /dev/shm
+# (same exposure class as journald), acceptable.
+exec "$SNAP/usr/bin/python3.11" -u -m frigate > >(exec tee -a /dev/shm/logs/frigate/current) 2>&1

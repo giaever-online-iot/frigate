@@ -156,14 +156,18 @@ apps:
     after: [nginx]
     plugs: [network]
 
-  # --- logrotate: nginx log rotation (M7 Task 3) ---------------------------
-  # Oneshot timer app (fires daily at 00:00) that rotates nginx's access/error logs via
-  # copytruncate (nginx's open fds stay valid — no reopen signal needed, so no extra plugs).
-  # Operates only on the snap's own $SNAP_DATA logs, which need no interface.
+  # --- logrotate: nginx + /logs tee rotation (M7 Task 3; M8 Task 7) --------
+  # Oneshot timer app that rotates nginx's access/error logs AND (M8) the /logs tee sinks — real
+  # frigate stdout at /dev/shm/logs/frigate/current and go2rtc stdout at $SNAP_DATA/go2rtc-logs/current
+  # — via copytruncate (the daemons' open fds stay valid, no reopen signal). timer "00:00-24:00/6" =
+  # six runs/day (~every 4 h) so a busy daemon can't overrun the 10M tmpfs cap between rotations.
+  # shm-private: needed only for the /dev/shm/logs/frigate path (go2rtc's sink is in $SNAP_DATA and
+  # needs no interface); the plug is snap-scoped and already connected — no new connection required.
   logrotate:
     command: bin/logrotate-run
     daemon: oneshot
-    timer: "00:00"
+    timer: "00:00-24:00/6"
+    plugs: [shm-private]
 
 parts:
   python311:

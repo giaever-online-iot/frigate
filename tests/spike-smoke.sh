@@ -1380,12 +1380,58 @@ else
 fi
 
 # (4) Fix 3 — the Web-UI /logs API no longer 500s. It reads /dev/shm/logs/<svc>/current;
-# frigate-run now creates them (nginx/current -> real error.log; frigate/go2rtc placeholders).
+# frigate-run creates them (nginx/current -> real error.log; M8: frigate/current is the tee sink,
+# go2rtc/current a symlink to $SNAP_DATA/go2rtc-logs/current — both carry real daemon stdout).
 # Route is /logs/{service} with NO /api prefix on the internal :5001 (M3 route discipline);
 # allow_any_authenticated() needs a Remote-User header. A 500 here is the undefined.length crash.
 BRIDGE_LOGS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/nginx 2>/dev/null)
 check "logs: /logs/nginx returns 200 (UI /logs page no longer crashes)" test "$BRIDGE_LOGS" = "200"
 echo "  logs finding: GET :5001/logs/nginx http=$BRIDGE_LOGS (was 500 pre-fix; s6-log paths satisfied)"
+
+# M8 Task 7: /logs full tee-parity. frigate-run and go2rtc-run now tee each daemon's stdout+stderr
+# into /dev/shm/logs/{frigate,go2rtc}/current (go2rtc via a $SNAP_DATA symlink — no shm-private plug)
+# using bash process substitution, so the previously-empty frigate/go2rtc tabs carry real output.
+# Same curl shape as the nginx check (Remote-User on :5001); bodies piped to grep -q ONLY — never
+# persisted to $EVIDENCE (daemon stdout can echo camera/producer URLs with credentials).
+check "m8: /logs frigate tab has real content (process-sub tee wrote daemon stdout)" sh -c \
+  "curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/frigate 2>/dev/null | grep -q 'frigate'"
+check "m8: /logs go2rtc tab has real content (tee -> \$SNAP_DATA symlink)" sh -c \
+  "curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/go2rtc 2>/dev/null | grep -qiE 'go2rtc|\[api\]|listen'"
+# Passthrough: the tee's own stdout inherits the journal socket, so journald must STILL receive
+# frigate lines after the change. grep -q . (non-empty) only — no journal excerpt persisted.
+check "m8: journald still receives frigate lines (tee passthrough)" sh -c \
+  "journalctl -u snap.$SNAP_NAME.frigate.service --since \"$MARK\" | grep -q ."
+
+# M8 Task 7 — go2rtc crash-propagation proof (FULL-GATE ONLY: kills the go2rtc daemon, which
+# --nvr-safe must never do to the production NVR). The tee is a bash PROCESS SUBSTITUTION, not a
+# `daemon | tee` pipe, so the go2rtc binary stays the unit's MainPID: a kill -9 is seen by systemd
+# as a unit failure and the on-failure restart-condition relaunches it. A pipe would make tee/the
+# shell the MainPID and swallow the daemon's exit — so this proves exit-code/signal propagation
+# survived the tee. journalctl grepped with -q ONLY (no excerpt persisted).
+if [ "${NVR_SAFE:-0}" -eq 0 ]; then
+  M8_G2_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
+  M8_G2_PID=$(systemctl show snap.$SNAP_NAME.go2rtc.service -p MainPID --value 2>/dev/null)
+  if [ -n "$M8_G2_PID" ] && [ "$M8_G2_PID" != "0" ]; then
+    kill -9 "$M8_G2_PID" 2>/dev/null || true
+    _b=0; M8_G2_UP=""; M8_G2_NEWPID=""
+    while [ "$_b" -lt 30 ]; do
+      if systemctl is-active snap.$SNAP_NAME.go2rtc.service >/dev/null 2>&1; then
+        M8_G2_NEWPID=$(systemctl show snap.$SNAP_NAME.go2rtc.service -p MainPID --value 2>/dev/null)
+        [ -n "$M8_G2_NEWPID" ] && [ "$M8_G2_NEWPID" != "0" ] && [ "$M8_G2_NEWPID" != "$M8_G2_PID" ] && { M8_G2_UP=yes; break; }
+      fi
+      sleep 2; _b=$((_b+2))
+    done
+    check "m8: go2rtc relaunched after kill -9 (on-failure survived process-sub tee, ${_b}s)" \
+      test "$M8_G2_UP" = yes
+    check "m8: journald shows go2rtc kill+restart (exit-code propagation)" sh -c \
+      "journalctl -u snap.$SNAP_NAME.go2rtc.service --since \"$M8_G2_MARK\" | grep -qiE 'killed|status=9|signal|scheduled restart|main process exited'"
+    echo "  m8 finding: go2rtc MainPID $M8_G2_PID -> ${M8_G2_NEWPID:-none} after SIGKILL (${_b}s; on-failure relaunch proves the process-sub tee did not intercept the daemon's exit)"
+  else
+    fail_ "m8: go2rtc MainPID resolvable for crash-propagation proof"
+  fi
+else
+  echo "SKIP (nvr-safe): m8 go2rtc crash-propagation kill -9 (would kill the production go2rtc)"
+fi
 
 if [ "$NVR_SAFE" -eq 0 ]; then
 # (5) Fix 4 — the Web-UI Restart button. restart_frigate() SIGINTs frigate (clean exit, pid1 is
@@ -1501,7 +1547,7 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   (1a6e) state. Non-blocking: same mechanism as the coral-probe sibling arm.
 #   Arm (PINNED profile+comm+capname): frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"
 # Evidence (journal 2026-07-10 03:45:53): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.frigate" pid=2565495 comm="frigate.detecto" capability=12  capname="net_admin"
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"' "$EVIDENCE/denials.txt" || true)
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"|comm="frigate-run".*capname="dac_override"|comm="go2rtc-run".*capname="dac_override"|imports-probe.*name="/dev/shm/sem\.|imports-probe.*name="/usr/bin/lscpu"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -1548,12 +1594,20 @@ echo "  vaapi-probe finding: CAP_SYS_ADMIN + CAP_PERFMON denials at VAAPI DRM in
 #   On hardware it surfaces as an unexpected denial → triaged + re-added WITH a real quote.
 echo "  wheels finding: matplotlib font-scan arm RETIRED (M8 Task 5) — 0 imports-probe denials CAPTURED in the VM gate (capture gap: shm psm_ EACCES also uncaptured); re-add with a journal quote if captured on hardware"
 # FINDING (Task 5): validate-config / Task-5 wheel additions — remaining benign patterns:
-#   RETIRED ARMS (M8 Task 5): the svc-c-era joblib denials — /dev/shm/sem.XXXXXX (glibc sem_open at the
-#                 tensorflow/keras import → "joblib will operate in serial mode") and /usr/bin/lscpu
-#                 (joblib/loky physical-core detection) — were re-pointed to imports-prob then DELETED:
-#                 the M8 VM gate CAPTURED zero imports-probe denials (see the font-scan capture-gap caveat
-#                 above — captured != produced). Re-add WITH a journal quote if captured on hardware
-#                 (policy L1484-1485). validate-config stays immune anyway (shm-private private /dev/shm).
+#   RE-ADDED ARMS (M8 Task 7 gate): the svc-c-era joblib denials — /dev/shm/sem.XXXXXX (glibc sem_open at
+#                 the tensorflow/keras import → "joblib will operate in serial mode") and /usr/bin/lscpu
+#                 (joblib/loky physical-core detection). Task 5 re-pointed them to imports-probe then DELETED
+#                 the arms for lack of a captured journal QUOTE (0 imports-probe denials that VM run). The
+#                 Task 7 --skip-install gate DID capture both (imports-probe ran in the wheels section and
+#                 the kernel-audit window caught them this time — capture is timing-dependent, cf. the
+#                 font-scan gap above). Per the authors' own "re-add WITH a journal quote if captured"
+#                 instruction + policy L1484-1485, they are RESTORED here, PINNED to imports-probe + name.
+#                 Benign: sem_open/lscpu are import-time joblib probes; imports-probe still runs (diagnostic
+#                 exits rc-clean). Unrelated to the M8 Task 7 /logs tee change. validate-config stays immune
+#                 anyway (shm-private private /dev/shm). Arms: imports-probe.*name="/dev/shm/sem\. and
+#                 imports-probe.*name="/usr/bin/lscpu".
+# Evidence (journal 2026-07-12, Task 7 gate): apparmor="DENIED" operation="mknod" class="file" profile="snap.frigate.imports-probe" name="/dev/shm/sem.NmSNLV" comm="python3.11" requested_mask="c" denied_mask="c" fsuid=0 ouid=0
+# Evidence (journal 2026-07-12, Task 7 gate): apparmor="DENIED" operation="exec" class="file" profile="snap.frigate.imports-probe" name="/usr/bin/lscpu" comm="python3.11" requested_mask="x" denied_mask="x" fsuid=0 ouid=0
 #   validate-config.*cpu\.max    - the full frigate.app import chain reads its own cgroup
 #                 /sys/fs/cgroup/.../cpu.max + parent slice (cgroup v2 CPU quota probing; fires in
 #                 both the main and forkserver-preload interpreters). EACCES tolerated - validation
@@ -1561,7 +1615,7 @@ echo "  wheels finding: matplotlib font-scan arm RETIRED (M8 Task 5) — 0 impor
 #                 (numpy/cv2/ort/tf/openvino/sherpa/transformers/pandas/librosa each tested clean).
 #   product_(name|version)       - gpu-probe DMI arm widened: OpenVINO reads product_version next
 #                 to product_name (2026-07-04 run; same OpenVINO system-info probing, varies run-to-run).
-echo "  validate finding: joblib sem/lscpu arms RETIRED (M8 Task 5; 0 imports-probe denials in VM gate) + frigate chain cgroup cpu.max reads (validate-config) — benign, non-blocking"
+echo "  validate finding: joblib sem/lscpu arms RE-ADDED (M8 Task 7 gate captured both with journal quotes; benign import-time probes, unrelated to /logs tee) + frigate chain cgroup cpu.max reads (validate-config) — benign, non-blocking"
 # FINDING (Task 3): frigate daemon cgroup reads — multiple cgroup v2 paths read by the daemon
 #   and its subprocesses (comm="python3.11" main process, comm="frigate.detecto" OpenVINO detector,
 #   etc.). Two patterns observed:
@@ -1630,6 +1684,22 @@ echo "  nginx finding: nginx worker CAP_SETGID denial at startup (worker privile
 #   non-blocking — nginx serves throughout the same run. Arm (profile+capname): nginx.*capname="setuid".
 # Evidence (journal 2026-07-06 02:54:22): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.nginx" pid=2909768 comm="nginx" capability=7  capname="setuid"
 echo "  nginx finding: nginx CAP_SETUID denial (setuid sibling of the setgid arm, worker/cache-manager privilege setup; benign, non-blocking) — M4 Task 4"
+# FINDING (M8 Task 7): frigate-run / go2rtc-run CAP_DAC_OVERRIDE capability denials — NEW with the
+#   sh -> bash shebang switch that the /logs tee-parity needed (process substitution is a bash
+#   feature). bash's builtin file-redirection path (the tee-sink truncation `: > current`, the
+#   go2rtc-symlink/mkdir, and the process-substitution setup on the daemon exec) issues a
+#   capable(CAP_DAC_OVERRIDE) probe during path resolution that dash never made — so gate runs on
+#   the pre-M8 (sh) wrapper showed zero of these. AppArmor DENIES the capability: this is the SECURE
+#   outcome — the wrapper is NOT granted DAC bypass. Every file op still SUCCEEDS via normal root DAC
+#   (proven every run: /dev/shm/logs/frigate/current + $SNAP_DATA/go2rtc-logs/current carry real
+#   daemon output, /logs tabs populate, logrotate copytruncate works, all daemons stay active across
+#   restarts/reinstalls). Advisory / non-blocking — same benign class as the nginx setgid/setuid and
+#   frigate sys_admin/perfmon capability arms above; surfaces only in the restart/reinstall-heavy gate
+#   phases, not on a plain single-service restart. Arms (PINNED comm+capname):
+#   comm="frigate-run".*capname="dac_override" and comm="go2rtc-run".*capname="dac_override".
+# Evidence (journal 2026-07-12 22:20:51): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.frigate" comm="frigate-run" capability=1  capname="dac_override"
+# Evidence (journal 2026-07-12 22:23:24): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.go2rtc" comm="go2rtc-run" capability=1  capname="dac_override"
+echo "  m8 finding: frigate-run/go2rtc-run CAP_DAC_OVERRIDE denials — advisory bash-redirection capability probe (sh->bash for tee-parity), denied = confinement holds, file ops succeed via root DAC, non-blocking"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true
