@@ -8,7 +8,7 @@ export FRIGATE_BASE_DIR="$SNAP_COMMON/media/frigate"
 export FRIGATE_CACHE_DIR="/tmp/cache"
 export CONFIG_FILE="$SNAP_DATA/config/config.yml"
 export DEFAULT_FFMPEG_VERSION="7.0"
-export INCLUDED_FFMPEG_VERSIONS="8.0:7.0:5.0"
+export INCLUDED_FFMPEG_VERSIONS="7.0:5.0"
 
 mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" "$SNAP_COMMON/db" /tmp/cache
 # Cache is staging-only and safe to clear at daemon start; stale segments from removed

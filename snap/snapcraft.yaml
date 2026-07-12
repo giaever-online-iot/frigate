@@ -267,12 +267,10 @@ parts:
     plugin: nil
     build-packages: [wget, xz-utils, bzip2]
     override-build: |
-      # --- 8.0 tree (autobuild, pinned) — temps migrated to $CRAFT_PART_BUILD (M1 review fix) ---
-      wget -O "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linux64-gpl-8.1.tar.xz"
-      echo "9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9  $CRAFT_PART_BUILD/ffmpeg-8.tar.xz" | sha256sum -c -
-      mkdir -p "$CRAFT_PART_BUILD/f8" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" -C "$CRAFT_PART_BUILD/f8" --strip-components=1
-      install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
-      install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
+      # 8.0 tree DROPPED (M8 A2): upstream v0.17.2 amd64 ships exactly 7.0 (default) + 5.0
+      # (docker/main/install_deps.sh amd64 block; Dockerfile INCLUDED_FFMPEG_VERSIONS="7.0:5.0")
+      # — upstream-parity; the 8.0 tree was OUR M1 addition, −409MB uncompressed.
+      # Build temps live in $CRAFT_PART_BUILD (M1 review fix).
       # --- 5.0 tree (tag-exact, v0.17.2 install_deps.sh) ---
       wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linux64-gpl-5.1.tar.xz"
       echo "377abec133f9d9e8014dee1b91c9684ac8bb0b5b7d80100a57116ff837c4c0d4  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -

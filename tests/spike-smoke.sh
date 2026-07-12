@@ -428,7 +428,8 @@ fi
 # --- M2: ffmpeg matrix (Task 1) --- ffprobe app follows the tag-default 7.0 tree
 check "ffprobe app runs tag-default 7.0" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n7'"
 # static builds run directly from the mounted squashfs (no confinement needed for -version)
-for V in 5.0 7.0 8.0; do
+# 8.0 dropped (M8 A2): upstream v0.17.2 amd64 ships only 7.0+5.0 — enumeration mirrors the verdict set
+for V in 5.0 7.0; do
   check "ffmpeg tree $V present+runs" sh -c "/snap/frigate/current/usr/lib/ffmpeg/$V/bin/ffprobe -version | head -1 | grep -q '^ffprobe version'"
 done
 
