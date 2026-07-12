@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M0 spike smoke harness. Run as root: sudo tests/spike-smoke.sh [--skip-install]
+# M0 spike smoke harness. Run as root: sudo tests/spike-smoke.sh [--skip-install | --nvr-safe | --provision-livecam]
 set -uo pipefail
 cd "$(dirname "$0")/.."
 SNAP_NAME=frigate
@@ -8,6 +8,26 @@ SNAP_NAME=frigate
 # spike/frigate_*.snap artifacts and Task 1's remote-built spike/frigate-remote_amd64.snap
 # (frigate*_*.snap matches both frigate_<ver>_<arch>.snap and frigate-remote_<arch>.snap).
 SNAP_FILE=$(ls -t frigate*_*.snap spike/frigate*_*.snap 2>/dev/null | head -1)
+# --nvr-safe: read-only mode for production hosts (M8 B1). Runs ONLY observation
+# assertions (status, curls, journal, sha256) and proves its own harmlessness.
+# Everything that installs, purges, restarts, sets, forges, or overwrites is skipped
+# with an explicit "SKIP (nvr-safe):" line. Mutually exclusive with other modes.
+# FUTURE EDITORS: any NEW mutating phase (install/purge/remove/set/unset/forge/overwrite/
+# restart/cert-swap) MUST be gated `if [ "${NVR_SAFE:-0}" -eq 0 ]; then <phase>; else
+# echo "SKIP (nvr-safe): <phase>"; fi` — otherwise it runs against the live production NVR.
+NVR_SAFE=0
+[ "${1:-}" = "--nvr-safe" ] && NVR_SAFE=1
+# Harmlessness baseline (M8 B1): sha of config.yml + TLS cert + service start-timestamps
+# captured BEFORE any gate runs; re-checked at end-of-run (Step 4) to prove --nvr-safe
+# mutated nothing. DB checksum is deliberately NOT captured — a live NVR's DB is written
+# continuously by frigate itself, so it can never hold (see task report finding).
+if [ "$NVR_SAFE" -eq 1 ]; then
+  NVRSAFE_CFG="/var/snap/$SNAP_NAME/current/config/config.yml"
+  NVRSAFE_CFG_SHA_PRE=$(sha256sum "$NVRSAFE_CFG" 2>/dev/null | awk '{print $1}')
+  NVRSAFE_CERT_SHA_PRE=$(sha256sum "/var/snap/$SNAP_NAME/current/letsencrypt/live/frigate/fullchain.pem" 2>/dev/null | awk '{print $1}')
+  NVRSAFE_STAMPS_PRE=$(for s in go2rtc frigate nginx certsync; do
+    systemctl show "snap.$SNAP_NAME.$s.service" -p ActiveEnterTimestamp --value; done)
+fi
 RESULTS=/var/snap/$SNAP_NAME/common/spike-results
 EVIDENCE=spike/results
 FAIL=0
@@ -125,8 +145,14 @@ trap '
       if [ -d "/var/snap/$SNAP_NAME/common" ]; then
         install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f "$LIVECAM_STASH"
       else
-        mv "$LIVECAM_STASH" /var/tmp/frigate-livecam-url.stash && \
-          echo "STASH: livecam secret preserved at /var/tmp/frigate-livecam-url.stash (snap absent; recover with: sudo tests/spike-smoke.sh or --provision-livecam)"
+        # oldest-wins: run 2'\''s stash may be a template render; the parked file is the real operator config (PR#3 review, M8 B2)
+        if [ -e /var/tmp/frigate-livecam-url.stash ]; then
+          echo "STASH: /var/tmp/frigate-livecam-url.stash already exists (older run'\''s secret — oldest wins, NOT overwritten)."
+          echo "STASH: this run'\''s copy left at $LIVECAM_STASH — reconcile manually, then delete both."
+        else
+          mv "$LIVECAM_STASH" /var/tmp/frigate-livecam-url.stash && \
+            echo "STASH: livecam secret preserved at /var/tmp/frigate-livecam-url.stash (snap absent; recover with: sudo tests/spike-smoke.sh or --provision-livecam)"
+        fi
       fi
     else
       rm -f "$LIVECAM_STASH"
@@ -160,15 +186,21 @@ trap '
       rm -f "$OPERATOR_CFG_STASH"
       snap restart $SNAP_NAME 2>/dev/null || true
     else
-      mv "$OPERATOR_CFG_STASH" /var/tmp/frigate-operator-config.stash 2>/dev/null && \
-        echo "STASH: operator config.yml preserved at /var/tmp/frigate-operator-config.stash (next full harness run restores it — it wins over any template render)"
+      # oldest-wins: run 2'\''s stash may be a template render; the parked file is the real operator config (PR#3 review, M8 B2)
+      if [ -e /var/tmp/frigate-operator-config.stash ]; then
+        echo "STASH: /var/tmp/frigate-operator-config.stash already exists (older run'\''s config — oldest wins, NOT overwritten)."
+        echo "STASH: this run'\''s copy left at $OPERATOR_CFG_STASH — reconcile manually, then delete both."
+      else
+        mv "$OPERATOR_CFG_STASH" /var/tmp/frigate-operator-config.stash 2>/dev/null && \
+          echo "STASH: operator config.yml preserved at /var/tmp/frigate-operator-config.stash (next full harness run restores it — it wins over any template render)"
+      fi
     fi
   fi
   # PR#3 review: scrub evidence on EVERY exit path (aborted runs included) — see scrub_evidence.
   scrub_evidence
 ' EXIT
 
-if [ "${1:-}" != "--skip-install" ]; then
+if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
   [ -n "$SNAP_FILE" ] || { echo "ERROR: no ${SNAP_NAME}_*.snap file found - build first (snapcraft pack)"; exit 1; }
   if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
     LIVECAM_STASH=$(mktemp)
@@ -308,6 +340,7 @@ printf '# RECORDED FINDING (Task 6): snapcraft pack-time rejection, replayed by 
 check "edgetpu dlopen probe complete" test "$(jqr edgetpu-dlopen '.status')" = "complete"
 echo "  edgetpu finding: dlopen ok=$(jqr edgetpu-dlopen '.dlopen.ok') err=$(jqr edgetpu-dlopen '.dlopen.error // "-"')"
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # Ensure mesa-2604 is installed and connected (idempotent; also handles --skip-install path)
 snap install mesa-2604 2>/dev/null || true
 snap connect $SNAP_NAME:gpu-2604 mesa-2604:gpu-2604 2>/dev/null || true
@@ -319,7 +352,11 @@ check "gpu probe complete" test "$(jqr gpu '.status')" = "complete"
 check "openvino sees GPU" grep -q '"GPU"' "$RESULTS/gpu.json"
 check "vainfo produced output" test -s /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt
 cp /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt "$EVIDENCE/" 2>/dev/null || true
+else
+  echo "SKIP (nvr-safe): mesa install + connects + gpu-probe run"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- Coral USB section ---
 # Once the Coral firmware is uploaded, the device stays in initialized state (18d1:9302) until
 # physically replugged. On re-runs, before==18d1 is the expected steady state — the 1a6e->18d1
@@ -346,7 +383,11 @@ check "coral probe complete" test "$(jqr coral '.status')" = "complete"
 check "coral delegate loaded (firmware upload)" test "$(jqr coral '.load_delegate.ok')" = "true"
 check "coral inference ran" test "$(jqr coral '.inference.ok')" = "true"
 check "coral: device in initialized state (18d1) after probe" grep -q 18d1 "$EVIDENCE/coral-usb-after.txt"
+else
+  echo "SKIP (nvr-safe): coral-probe firmware runs + connects"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- NPU custom-device section ---
 # FINDING (M7 final review): the NPU custom-device substrate (M0-C) is RETIRED from the SHIPPED
 # artifact — the npu-dev slot, the npu plug, and the npu-probe app were dropped from snapcraft.yaml
@@ -363,6 +404,9 @@ if grep -q '^  npu-probe:' "/snap/$SNAP_NAME/current/meta/snap.yaml" 2>/dev/null
   echo "  npu finding: open=$(jqr npu '.open_accel0.ok // "no-json"') connect-err=$(head -c120 "$EVIDENCE/npu-connect.txt" 2>/dev/null)"
 else
   echo "SKIP: npu probe retired from shipped snap (M7 final review; custom-device dropped pre-Store)"
+fi
+else
+  echo "SKIP (nvr-safe): npu custom-device probe block (dormant)"
 fi
 
 # --- M2: ffmpeg matrix (Task 1) --- ffprobe app follows the tag-default 7.0 tree
@@ -422,10 +466,15 @@ else
 fi
 
 # --- M1: mDNS multicast (Task 6) ---
+if [ "$NVR_SAFE" -eq 0 ]; then
 snap run frigate.mdns-probe || true
 check "mdns probe complete" test "$(jqr mdns '.status')" = "complete"
 echo "  mdns finding: join=$(jqr mdns '.multicast_join.ok') sent=$(jqr mdns '.query_sent.ok') responses=$(jqr mdns '.responses')"
+else
+  echo "SKIP (nvr-safe): mdns-probe transient exerciser"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- M2: VAAPI hardware decode (Task 4) ---
 # -hwaccel_output_format vaapi FORBIDS silent software fallback: rc=0 proves the hw path.
 check "vaapi: hw decode of synthetic stream (rc=0, no sw fallback)" snap run frigate.vaapi-probe
@@ -442,6 +491,9 @@ VC_RC=$?
 check "frigate validate-config exits 0" test "$VC_RC" = "0"
 check "validate-config evidence captured" test -s "$EVIDENCE/validate-config.txt"
 echo "  validate finding: rc=$VC_RC $(tail -1 "$EVIDENCE/validate-config.txt" 2>/dev/null)"
+else
+  echo "SKIP (nvr-safe): vaapi-probe + shm-private connect + validate-config run"
+fi
 
 # --- M3: detector models staged (Task 1) ---
 check "openvino model staged" sh -c "ls /snap/frigate/current/opt/frigate/models/openvino/*.xml"
@@ -721,6 +773,12 @@ if [ -n "$ADMIN_PW" ]; then
     echo "  auth finding: login=$LOGIN_STATUS cookie=frigate_token authed_get=$AUTHED_STATUS — JWT gate proven end-to-end"
     # Discard derived credentials (JWT in cookie jar + response headers — not the password)
     rm -f /tmp/m5-gate-cookie.jar /tmp/m5-gate-headers.txt
+elif [ "$NVR_SAFE" -eq 1 ]; then
+    # M8 B1: the bootstrap password is journal-logged ONLY on first boot after a purge (empty DB);
+    # nvr-safe never purges, so it can NEVER appear since $MARK on an established install — a FAIL
+    # here would be a deterministic false alarm, not a health signal. The login proof above stays
+    # armed whenever a password IS found; the 401-unauthenticated gate check still ran unconditionally.
+    echo "SKIP (nvr-safe): auth login money check (bootstrap password only logged on first boot after purge; unavailable by design without an install cycle)"
 else
     fail_ "auth: POST https://127.0.0.1:8971/api/login → 200 (bootstrap password not in journal)"
     fail_ "auth: login → frigate_token cookie set"
@@ -742,6 +800,7 @@ check "net: :1984 NOT all-interfaces (go2rtc control API/UI sealed)" sh -c "! ss
 ss -tln > "$EVIDENCE/ss-tln.txt" 2>/dev/null || true
 echo "  net finding: $(grep -E ':5000|:5001|:8971|:1984' "$EVIDENCE/ss-tln.txt" 2>/dev/null | sed 's/  */ /g' | tr '\n' '|')"
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # Money check 5: certsync — automated cert-swap proof (Task 3 manual → automated)
 # Swap the cert on disk; poll openssl s_client fingerprint; assert changed ≤90 s + journal reload line.
 OLD_FP=$(echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -fingerprint -noout 2>/dev/null || echo "failed")
@@ -784,7 +843,11 @@ else
     echo "  certsync finding: ERROR — cert dir not found at $CERT_DIR"
     rm -f /tmp/m5-cs-key.pem /tmp/m5-cs-cert.pem
 fi
+else
+  echo "SKIP (nvr-safe): certsync live cert swap"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- M3: rollback machinery (Task 4) ---
 # Proof 1: refresh fires the pre-refresh hook -> backup exists.
 snap install --dangerous "$SNAP_FILE" >/dev/null 2>&1 || fail_ "rollback: reinstall-refresh failed"
@@ -798,7 +861,11 @@ sleep 20
 check "rollback: downgrade detected + restored" sh -c "journalctl --since \"$MARK\" | grep -q 'frigate-run: restored'"
 check "rollback: incompatible db preserved" sh -c "ls /var/snap/frigate/common/db/frigate.db.incompatible-*"
 check "rollback: frigate healthy after restore" sh -c "snap services frigate.frigate | grep -q ' active'"
+else
+  echo "SKIP (nvr-safe): rollback reinstall + sidecar forge + restart"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- M6: Coral detector phase (spec §3.4) ---
 # Upstream v0.17.2 supports ONE model geometry across all object detectors
 # (config.py: per-detector model: is discarded — "users should not set model
@@ -946,7 +1013,11 @@ else
   echo "SKIP: coral phase: person event — no Coral USB attached"
   echo "SKIP: coral phase: OpenVINO default restored — no Coral USB attached"
 fi
+else
+  echo "SKIP (nvr-safe): Coral detector phase (config rewrite + restarts)"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- M7: snap-set surface + hardening (Task 5 — the M7 assertions) ---
 # Guarded on the M7 config surface: the configure hook is a Task-2 addition, so its presence in
 # the mounted snap distinguishes an M7 build from Task 1's remote artifact (built from kickoff
@@ -1168,7 +1239,11 @@ else
   echo "SKIP: m7 versioned-backup restore selection (0.17.2 over 99.0.0) — no M7 config surface"
   echo "SKIP: m7 logrotate >10 MB rotation — no M7 config surface"
 fi
+else
+  echo "SKIP (nvr-safe): M7 snap-set block (set/unset/cert-regen/backup-forge/logrotate seed)"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # ===================== go2rtc config bridge + integration (PR#3) =============================
 # Proves: (1) the operator's config.yml go2rtc: section reaches go2rtc (the config bridge);
 # (2) the control API stays loopback-sealed after the merge (M5 seal); (3) frigate ITSELF can
@@ -1237,6 +1312,9 @@ PYEOF
 else
   echo "SKIP: bridge: config bridge proof — no operator config.yml or snap python (fresh/absent install)"
 fi
+else
+  echo "SKIP (nvr-safe): go2rtc bridge injection + whole-snap restarts"
+fi
 
 # (4) Fix 3 — the Web-UI /logs API no longer 500s. It reads /dev/shm/logs/<svc>/current;
 # frigate-run now creates them (nginx/current -> real error.log; frigate/go2rtc placeholders).
@@ -1246,6 +1324,7 @@ BRIDGE_LOGS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Remote-User: admin' --m
 check "logs: /logs/nginx returns 200 (UI /logs page no longer crashes)" test "$BRIDGE_LOGS" = "200"
 echo "  logs finding: GET :5001/logs/nginx http=$BRIDGE_LOGS (was 500 pre-fix; s6-log paths satisfied)"
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # (5) Fix 4 — the Web-UI Restart button. restart_frigate() SIGINTs frigate (clean exit, pid1 is
 # not s6-svscan); restart-condition: always brings it back. POST /restart (require_role admin ->
 # Remote-Role header) on :5001, then bound-wait for recovery. Placed AFTER the bridge proof so it
@@ -1261,6 +1340,9 @@ check "restart: frigate.frigate active again after UI restart (restart-condition
 check "restart: frigate API answers again after UI restart (:5001/version)" \
   sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1"
 echo "  restart finding: recovery after ${_b}s (clean-exit self-restart proven; on-failure would stay DOWN)"
+else
+  echo "SKIP (nvr-safe): UI-restart POST /restart"
+fi
 
 # Operator config survived the whole gate byte-identical (purge stash + bridge mutate/restore).
 if [ -n "$OPERATOR_CFG_SHA" ]; then
@@ -1439,6 +1521,22 @@ fi
 # no colon, so redacted evidence passes while any unredacted credential fails the run.
 check "evidence: no URL credentials (user:pass@) anywhere in evidence files" \
   sh -c "! grep -rqEI '(rtsps?|rtmp|https?)://[^@/[:space:]]+:[^@/[:space:]]+@' \"$EVIDENCE\""
+
+# Harmlessness proof (M8 B1): re-hash config.yml + TLS cert + service start-timestamps and
+# assert byte/timestamp identity with the pre-gate baseline — the whole point of --nvr-safe.
+# NOTE (deliberate deviation from spec wording): the spec said "config.yml/DB checksums
+# identical"; a live NVR's DB is written continuously by frigate itself, so a DB checksum can
+# never hold. The honest proof is config-sha + cert-sha + zero service restarts + the gate's
+# only DB access being the existing read-only sqlite3 SELECT (money test).
+if [ "$NVR_SAFE" -eq 1 ]; then
+  NVRSAFE_CFG_SHA_POST=$(sha256sum "$NVRSAFE_CFG" 2>/dev/null | awk '{print $1}')
+  NVRSAFE_CERT_SHA_POST=$(sha256sum "/var/snap/$SNAP_NAME/current/letsencrypt/live/frigate/fullchain.pem" 2>/dev/null | awk '{print $1}')
+  NVRSAFE_STAMPS_POST=$(for s in go2rtc frigate nginx certsync; do
+    systemctl show "snap.$SNAP_NAME.$s.service" -p ActiveEnterTimestamp --value; done)
+  check "nvr-safe: config.yml untouched by gate" sh -c "[ '$NVRSAFE_CFG_SHA_PRE' = '$NVRSAFE_CFG_SHA_POST' ]"
+  check "nvr-safe: TLS cert untouched by gate" sh -c "[ '$NVRSAFE_CERT_SHA_PRE' = '$NVRSAFE_CERT_SHA_POST' ]"
+  check "nvr-safe: no service restarted by gate" sh -c "[ '$NVRSAFE_STAMPS_PRE' = '$NVRSAFE_STAMPS_POST' ]"
+fi
 
 echo
 [ "$FAIL" -eq 0 ] && echo "SPIKE SMOKE: ALL PASS" || echo "SPIKE SMOKE: FAILURES"
