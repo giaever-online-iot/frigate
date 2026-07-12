@@ -43,6 +43,9 @@ CORAL_CFG_BAK=""
 OPERATOR_CFG_STASH=""
 OPERATOR_CFG_SHA=""
 BRIDGE_CFG_BAK=""
+# M8 (R4): the semantic-search proof's own backup while it injects semantic_search.enabled into
+# the operator config; the EXIT trap restores from it if the proof dies mid-flight.
+M8_SEM_CFG_BAK=""
 mkdir -p "$EVIDENCE"
 # Evidence dir is created by the root harness but must stay writable by the invoking user
 # (agents capture run transcripts here). chown to SUDO_USER when run via sudo.
@@ -173,6 +176,14 @@ trap '
       rm -f "$BRIDGE_CFG_BAK"
     fi
     snap restart $SNAP_NAME 2>/dev/null || true
+  fi
+  # M8 (R4): if the semantic-search proof died mid-flight, restore the operator config it was
+  # mutating (semantic_search.enabled injected) and restart frigate. Same rm-after-copy discipline.
+  if [ -n "${M8_SEM_CFG_BAK:-}" ] && [ -f "${M8_SEM_CFG_BAK:-}" ]; then
+    if cp -p "$M8_SEM_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null; then
+      rm -f "$M8_SEM_CFG_BAK"
+    fi
+    snap restart $SNAP_NAME.frigate 2>/dev/null || true
   fi
   # PR#3: operator config safety net — if the run aborted after the purge but before the explicit
   # restore, put the stashed config.yml back so the gate never leaves the operator config-less.
@@ -1380,6 +1391,68 @@ check "restart: frigate API answers again after UI restart (:5001/version)" \
 echo "  restart finding: recovery after ${_b}s (clean-exit self-restart proven; on-failure would stay DOWN)"
 else
   echo "SKIP (nvr-safe): UI-restart POST /restart"
+fi
+
+# ===================== M8: semantic search (R4 — sqlite-vec loadable extension) =============
+# Proves the R4 fix: with --enable-loadable-sqlite-extensions in the python build and vec0.so
+# staged at /usr/local/lib (layout-resolved), enabling semantic_search lets frigate load the
+# sqlite-vec extension via frigate/db/sqlitevecq.py's hardcoded conn.load_extension('/usr/local/lib/vec0')
+# WITHOUT the R4 signature ("enable_load_extension" AttributeError / "no such module: vec"). DESTRUCTIVE
+# (config mutation + frigate restart) — gated out of --nvr-safe. Mirrors the bridge block:
+# backup config -> inject semantic_search.enabled -> restart frigate -> assert -> restore -> restart.
+# Journal is grepped with -q ONLY (no excerpts persisted — frigate logs may echo config values).
+if [ "$NVR_SAFE" -eq 0 ]; then
+M8_SEM_CFG="/var/snap/$SNAP_NAME/current/config/config.yml"
+M8_SEM_PY="/snap/$SNAP_NAME/current/usr/bin/python3.11"
+if [ -f "$M8_SEM_CFG" ] && [ -x "$M8_SEM_PY" ]; then
+  # Backup (trap-guarded via M8_SEM_CFG_BAK) then merge semantic_search.enabled: true into the
+  # operator's config, preserving their cameras/keys — yaml-aware, never prints config, writes 0600.
+  M8_SEM_CFG_BAK=$(mktemp); cp -p "$M8_SEM_CFG" "$M8_SEM_CFG_BAK"
+  "$M8_SEM_PY" - "$M8_SEM_CFG" <<'PYEOF'
+import os, sys, yaml
+p = sys.argv[1]
+with open(p) as f:
+    cfg = yaml.safe_load(f) or {}
+if not isinstance(cfg, dict):
+    cfg = {}
+ss = cfg.get("semantic_search")
+if not isinstance(ss, dict):
+    ss = {}
+ss["enabled"] = True
+cfg["semantic_search"] = ss
+os.umask(0o077)
+with open(p, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False)
+PYEOF
+  # Mark the journal window at the restart instant so the vec-load grep only sees this enablement.
+  M8_SEM_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
+  snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  # Bounded wait for frigate API. The sqlite-vec extension loads at DB-connect during app init
+  # (app.py: load_vec_extension=semantic_search.enabled), BEFORE the API answers — so a healthy
+  # :5001/version implies the extension loaded (a missing-flag build would crash-loop here instead).
+  _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
+  echo "  m8 finding: frigate API answered ${_b}s after restart with semantic_search enabled"
+  # (1) R4 DEFECT SIGNATURE (load-bearing): NO sqlite-vec extension-load error in the window.
+  #     Independent of the first-enable Jina/CLIP model download (that runs later, in the embeddings
+  #     maintainer) — the vec load is at DB connect. grep -q ONLY; no journal excerpt persisted.
+  check "m8: semantic search up (no sqlite-vec load error)" sh -c \
+    "! journalctl -u snap.$SNAP_NAME.frigate.service --since \"$M8_SEM_MARK\" | grep -qiE 'enable_load_extension|sqlite.*extension.*(error|not authorized)|no such module: vec'"
+  # (2) The embeddings maintainer came up (semantic_search runtime started). Broad 'embeddings'
+  #     match — its module logs appear at startup, independent of model-download completion.
+  check "m8: embeddings maintainer started" sh -c \
+    "journalctl -u snap.$SNAP_NAME.frigate.service --since \"$M8_SEM_MARK\" | grep -qiE 'embeddings'"
+  echo "  m8 finding: R4 fix exercised — vec0 loaded via conn.load_extension('/usr/local/lib/vec0'); first enable downloads Jina CLIP v1 models to \$SNAP_DATA/config/model_cache (network-gated, sizes not asserted)"
+  # Restore the operator's pristine config (byte-exact) and restart so semantic_search drops.
+  if cp -p "$M8_SEM_CFG_BAK" "$M8_SEM_CFG"; then rm -f "$M8_SEM_CFG_BAK"; M8_SEM_CFG_BAK=""; fi
+  snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
+  check "m8: frigate healthy again after semantic_search restore (:5001/version, ${_b}s)" \
+    sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1"
+else
+  echo "SKIP: m8 semantic search — no operator config.yml or snap python (fresh/absent install)"
+fi
+else
+  echo "SKIP (nvr-safe): m8 semantic search (config mutation + restart)"
 fi
 
 # Operator config survived the whole gate byte-identical (purge stash + bridge mutate/restore).

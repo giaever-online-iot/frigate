@@ -43,6 +43,11 @@ openvino == 2025.3.*
 onnxruntime == 1.22.*
 # Embeddings
 # (section deferred -> DEFERRED-frigate-ai.txt)
+# Semantic search (R4, M8): sqlite-vec loadable extension. Upstream v0.17.2 builds this from
+# source (docker/main/build_sqlite_vec.sh, SQLITE_VEC_VERSION=0.1.3) and drops vec0.so at
+# /usr/local/lib/vec0; the pip wheel bundles the SAME v0.1.3 vec0.so. spike-wheels copies it
+# to /usr/local/lib (see snapcraft.yaml) so frigate/db/sqlitevecq.py's hardcoded load resolves.
+sqlite-vec == 0.1.3
 # Generative AI
 # (section deferred -> DEFERRED-frigate-ai.txt)
 # push notifications

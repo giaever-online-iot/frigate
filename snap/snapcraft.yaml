@@ -52,6 +52,11 @@ layout:
     bind: $SNAP/usr/lib/x86_64-linux-gnu/intel-opencl
   /usr/lib/ffmpeg:
     bind: $SNAP/usr/lib/ffmpeg
+  # R4 (M8): Frigate loads the sqlite-vec loadable extension from the HARDCODED absolute path
+  # /usr/local/lib/vec0 (frigate/db/sqlitevecq.py) which we do NOT patch. This bind makes that
+  # path resolve to the staged vec0.so (spike-wheels part) under strict confinement.
+  /usr/local/lib:
+    bind: $SNAP/usr/local/lib
 
 # NOTE (M7 final review): the `npu-dev` custom-device SLOT, the `npu` PLUG, and the `npu-probe`
 # APP were removed from the SHIPPED snap before the first Store upload. NPU is documented
@@ -185,7 +190,8 @@ parts:
       - libreadline-dev
       - uuid-dev
     override-build: |
-      ./configure --prefix=/usr --enable-shared --with-ensurepip=install \
+      # --enable-loadable-sqlite-extensions: R4 (M8) — semantic search needs sqlite-vec via conn.load_extension
+      ./configure --prefix=/usr --enable-shared --enable-loadable-sqlite-extensions --with-ensurepip=install \
         LDFLAGS="-Wl,-rpath,/snap/frigate/current/usr/lib"
       make -j"$(nproc)"
       make install DESTDIR="$CRAFT_PART_INSTALL"
@@ -212,6 +218,15 @@ parts:
           -name 'distutils-precedence.pth' \
         \) -exec rm -rf {} +
       fi
+      # R4 (M8): Frigate loads the sqlite-vec extension from the HARDCODED path /usr/local/lib/vec0
+      # (frigate/db/sqlitevecq.py:11,26 — it does NOT import the pip package). The sqlite-vec==0.1.3
+      # wheel bundles the identical v0.1.3 vec0.so that upstream builds from source
+      # (docker/main/build_sqlite_vec.sh, SQLITE_VEC_VERSION=0.1.3). Copy it where Frigate expects it;
+      # the /usr/local/lib -> $SNAP/usr/local/lib layout makes that absolute path resolve under strict
+      # confinement (Frigate is NOT patched — user ruling). Fail loud if the wheel layout changed.
+      VEC0="$SP/sqlite_vec/vec0.so"
+      [ -f "$VEC0" ] || { echo "R4 ERROR: sqlite-vec vec0.so not found at $VEC0" >&2; exit 1; }
+      install -D -m 0644 "$VEC0" "$CRAFT_PART_INSTALL/usr/local/lib/vec0.so"
   probes:
     plugin: dump
     source: spike/probes
