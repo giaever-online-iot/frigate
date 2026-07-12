@@ -232,10 +232,14 @@ semantic_search:
 ```
 
 then restart the whole snap (`sudo snap restart frigate` — see above). The
-first time you enable it, Frigate downloads its embedding models — the
-download needs internet access and can take several minutes depending on
-your connection. Once it finishes, Frigate indexes your existing events in
-the background.
+first time you enable it, Frigate downloads its embedding models (Jina
+CLIP v1, plus face/OCR models if you enable those features) — the download
+needs internet access and can take several minutes depending on your
+connection. Once it finishes, Frigate indexes your existing events in the
+background. The models land in
+`/var/snap/frigate/current/config/model_cache`, alongside your config, and
+persist across snap refreshes — the download happens once, not on every
+update.
 
 If Frigate logs a `sqlite-vec` load error after you enable this, your
 installed snap build predates sqlite extension support — refresh to the
