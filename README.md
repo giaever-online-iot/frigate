@@ -232,15 +232,14 @@ semantic_search:
 ```
 
 then restart the whole snap (`sudo snap restart frigate` — see above). The
-first time you enable it, Frigate downloads its embedding models over the
-network before indexing starts — this can take several minutes depending on
-your connection, so make sure outbound network access is available. Once
-the download finishes, Frigate indexes your existing events in the
-background.
+first time you enable it, Frigate downloads its embedding models — the
+download needs internet access and can take several minutes depending on
+your connection. Once it finishes, Frigate indexes your existing events in
+the background.
 
-Semantic search requires a build with sqlite extension support (July 2026
-or later) — earlier builds log a `sqlite-vec` load error and semantic
-search stays unavailable.
+If Frigate logs a `sqlite-vec` load error after you enable this, your
+installed snap build predates sqlite extension support — refresh to the
+latest revision (`sudo snap refresh frigate`) and restart.
 
 ## Configuration (`snap set`)
 
