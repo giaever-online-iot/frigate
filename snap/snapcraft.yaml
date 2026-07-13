@@ -190,6 +190,31 @@ parts:
         LDFLAGS="-Wl,-rpath,/snap/frigate/current/usr/lib"
       make -j"$(nproc)"
       make install DESTDIR="$CRAFT_PART_INSTALL"
+    # M8 Task 6: prime pruning of non-content Python build residue (measured on the unsquashed
+    # artifact; every line carries its du figure). NOT content — none of these are on any runtime
+    # import path (proven by the 18-module artifact import proof after each exclusion batch).
+    #   Batch 1 (build residue; cannot affect imports):
+    #   - usr/lib/python3.11/test .................. 120,070,752 B  stdlib test suite (never run at runtime)
+    #   - config-3.11-.../libpython3.11.a ..........  46,045,686 B  static archive (we ship libpython3.11.so; nothing links the .a)
+    #   - usr/include (only python3.11/*.h) ........     890,786 B  C headers (frigate builds no C ext at runtime)
+    #   Batch 2 (pip/setuptools group; verified nothing imports them at runtime — pkg_resources KEPT
+    #   because tensorboard imports it; _distutils_hack + distutils-precedence.pth removed alongside
+    #   setuptools so the .pth shim can't redirect `import distutils` to a now-absent setuptools):
+    #   - site-packages/pip (+ dist-info) ..........  14,384,513 B  no runtime pip-install path (grep spike/bin snap/hooks)
+    #   - site-packages/setuptools (+ dist-info) ...   6,013,517 B  build-only; frigate imports none of it
+    #   - site-packages/_distutils_hack ............      17,657 B  setuptools distutils shim (dead once setuptools gone)
+    #   - distutils-precedence.pth .................. removes the shim activation (stdlib distutils stays)
+    prime:
+      - -usr/lib/python3.11/test
+      - -usr/lib/python3.11/config-3.11-x86_64-linux-gnu/libpython3.11.a
+      - -usr/include
+      - -usr/share/man                     # python3.11.1 man page (import-neutral)
+      - -usr/lib/python3.11/site-packages/pip
+      - -usr/lib/python3.11/site-packages/pip-24.0.dist-info
+      - -usr/lib/python3.11/site-packages/setuptools
+      - -usr/lib/python3.11/site-packages/setuptools-65.5.0.dist-info
+      - -usr/lib/python3.11/site-packages/_distutils_hack
+      - -usr/lib/python3.11/site-packages/distutils-precedence.pth
   spike-wheels:
     plugin: nil
     after: [python311]
@@ -235,6 +260,10 @@ parts:
       wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
       echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
       dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+    # M8 Task 6: drop this part's stage-package docs (libusb-1.0-0 + libedgetpu1-max = 8,052 B) —
+    # never needed at runtime. (doc/man are cross-part; excluded per owning part.)
+    prime:
+      - -usr/share/doc
   va-tools:
     plugin: nil
     stage-packages:
@@ -242,6 +271,11 @@ parts:
       - ocl-icd-libopencl1   # ICD loader: provides libOpenCL.so.1 for OpenVINO GPU plugin
       - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
       - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
+    # M8 Task 6: drop this part's stage-package docs (Intel OpenCL stack + vainfo = 63,458 B) and
+    # man pages (vainfo.1 + libOpenCL.7). None needed at runtime.
+    prime:
+      - -usr/share/doc
+      - -usr/share/man
   coral-model:
     plugin: nil
     build-packages: [wget]
@@ -372,6 +406,12 @@ parts:
       make -j"$(nproc)"
       make install DESTDIR="$CRAFT_PART_INSTALL"
       rm -rf "$CRAFT_PART_INSTALL/usr/local/nginx/html" "$CRAFT_PART_INSTALL/usr/local/nginx/conf"/*.default
+    # M8 Task 6: this part's stage-packages (openssl, logrotate + deps cron/adduser/sensible-utils)
+    # own the bulk of /usr/share/{doc,man}: doc ≈ 256,737 B, man ≈ 1,016,450 B (356 openssl .*ssl
+    # man7 pages dominate). None needed at runtime.
+    prime:
+      - -usr/share/doc
+      - -usr/share/man
   frigate-src:
     plugin: nil
     source: https://github.com/blakeblackshear/frigate.git
