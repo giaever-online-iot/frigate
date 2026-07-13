@@ -3,6 +3,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 SNAP_NAME=frigate
+# --nvr-safe detected HERE (hoisted, M8 final review): the artifact-ambiguity guard and the snap
+# size floor below both key off checkout .snap files and are gated OUT of nvr-safe (a production
+# run's outcome must not depend on stray .snap files in the checkout), so NVR_SAFE must be known
+# before those guards run. The descriptive --nvr-safe comment block stays at its original site below.
+NVR_SAFE=0
+[ "${1:-}" = "--nvr-safe" ] && NVR_SAFE=1
 # M7 Task 4: project root is now the snapcraft project (snap/snapcraft.yaml at root);
 # `snapcraft pack` at root produces ./frigate_*.snap. Root-first, but tolerate old
 # spike/frigate_*.snap artifacts and Task 1's remote-built spike/frigate-remote_amd64.snap
@@ -15,7 +21,9 @@ SNAP_NAME=frigate
 # one. spike/frigate*_*.snap (frigate_0.0.1-spike, frigate-remote — M7 evidence) is the documented
 # FALLBACK only when the repo root has none; it is NOT part of the ambiguity set.
 ROOT_SNAPS=$(ls -1 frigate*_*.snap 2>/dev/null)
-if [ "$(printf '%s\n' "$ROOT_SNAPS" | grep -c .)" -gt 1 ]; then
+# M8 final review (Task 6c): nvr-safe SKIPs this guard (gated on NVR_SAFE) — a read-only production
+# run must not fail on stray checkout .snap files it never installs.
+if [ "$NVR_SAFE" -eq 0 ] && [ "$(printf '%s\n' "$ROOT_SNAPS" | grep -c .)" -gt 1 ]; then
   if [ "$(for f in $ROOT_SNAPS; do sha256sum "$f"; done | awk '{print $1}' | sort -u | wc -l)" -gt 1 ]; then
     echo "ERROR: ambiguous artifact set — clean stale .snap files (repo root has multiple DIFFERING frigate*_*.snap):"
     printf '%s\n' "$ROOT_SNAPS" | sed 's/^/  /'
@@ -35,8 +43,8 @@ fi
 # FUTURE EDITORS: any NEW mutating phase (install/purge/remove/set/unset/forge/overwrite/
 # restart/cert-swap) MUST be gated `if [ "${NVR_SAFE:-0}" -eq 0 ]; then <phase>; else
 # echo "SKIP (nvr-safe): <phase>"; fi` — otherwise it runs against the live production NVR.
-NVR_SAFE=0
-[ "${1:-}" = "--nvr-safe" ] && NVR_SAFE=1
+# NVR_SAFE is detected at the TOP of this script now (hoisted so the artifact-ambiguity and size
+# guards can be nvr-safe-gated); this block stays here only for the descriptive contract above.
 # Harmlessness baseline (M8 B1): sha of config.yml + TLS cert + service start-timestamps
 # captured BEFORE any gate runs; re-checked at end-of-run (Step 4) to prove --nvr-safe
 # mutated nothing. DB checksum is deliberately NOT captured — a live NVR's DB is written
@@ -109,13 +117,41 @@ command -v jq >/dev/null || { echo "jq required: sudo apt install -y jq"; exit 1
 # earlier check() helpers are needed, so this rides just below their definition rather than at the
 # resolution line. Guarded on a non-empty SNAP_FILE (a bare --skip-install with no local artifact
 # leaves it empty; the size floor simply does not apply in that case).
-# M8 Task 6: retuned after the prime-prune size pass (was 943718400 = 900 MiB; lean artifact =
-# 989880320 bytes). New floor = 85% of the lean artifact, floored to a whole MiB = 802 MiB =
-# 840957952 bytes — still comfortably catches a gutted prime while tracking the leaner artifact.
-if [ -n "$SNAP_FILE" ]; then
+# M8 Task 6: retuned after the prime-prune size pass (was 943718400 = 900 MiB). M8 final review:
+# `snapcraft clean wrappers probes` + rebuild removed stale dump-part files (retired svc-a/b/c +
+# go2rtc-gen.py + its .pyc — 12288 bytes a dump overlay never prunes), so the CLEAN artifact is
+# 989868032 bytes (sha256 519e240ccd8e2410f4dd412fb0b86ce797d954f6f66764c089c61afc64065e04); the
+# certified-but-contaminated build was 989880320. Floor = 85% of the clean artifact, floored to a
+# whole MiB = 802 MiB = 840957952 bytes — UNCHANGED (the 12288-byte trim doesn't cross a MiB
+# boundary); still comfortably catches a gutted prime while tracking the leaner artifact.
+# M8 final review (Task 6c): gated OUT of nvr-safe — a production run's outcome must not depend on
+# stray checkout .snap files it never installs.
+if [ "$NVR_SAFE" -eq 1 ]; then
+  echo "SKIP (nvr-safe): snap size floor — production outcome must not depend on checkout .snap files"
+elif [ -n "$SNAP_FILE" ]; then
   SNAP_SZ=$(stat -c %s "$SNAP_FILE" 2>/dev/null || echo 0)
   check "m8: snap size floor (>=802 MiB, prime not gutted)" sh -c "[ '$SNAP_SZ' -ge 840957952 ]"
-  echo "  m8 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (floor 840957952 = 802 MiB; was 943718400)"
+  echo "  m8 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (floor 840957952 = 802 MiB; contaminated was 989880320, clean 989868032)"
+fi
+
+# M8 final review: app-census assertion — THE check that would have caught the stale-file
+# contamination. snapcraft `dump` parts overlay changed/new sources into the cached part install dir
+# but NEVER remove deleted ones; without a `snapcraft clean` of the wrappers/probes parts the retired
+# svc-a/b/c + go2rtc-gen.py wrappers lingered in the primed bin/ (certified into the size+sha a clean
+# CI build won't carry). This census reads the INSTALLED snap READ-ONLY, so it is nvr-safe safe. BUT a
+# production host still on a PRE-svc-retirement revision legitimately carries svc-a/b/c — a version
+# skew, not contamination. Gate like the /logs tee guard: if the installed meta/snap.yaml still
+# declares the svc-a app, the host predates the retirement -> SKIP; once refreshed (no svc-a app) the
+# census asserts no svc-* wrappers, exactly 5 daemon apps, and no bin/go2rtc-gen.py in prime.
+CENSUS_META="/snap/$SNAP_NAME/current/meta/snap.yaml"
+if [ ! -e "$CENSUS_META" ]; then
+  echo "SKIP: app census — no installed $SNAP_NAME snap (meta/snap.yaml absent)"
+elif grep -q '^  svc-a:' "$CENSUS_META" 2>/dev/null; then
+  echo "SKIP (version-skew): app census — installed snap predates svc retirement (svc-a app still declared)"
+else
+  check "m8: app census — no retired svc-* wrappers in prime bin/" sh -c "! ls /snap/$SNAP_NAME/current/bin/svc-* 2>/dev/null"
+  check "m8: app census — exactly 5 daemon apps in meta/snap.yaml" sh -c "[ \"\$(grep -c 'daemon:' '$CENSUS_META')\" -eq 5 ]"
+  check "m8: app census — no retired bin/go2rtc-gen.py in prime" sh -c "! test -e /snap/$SNAP_NAME/current/bin/go2rtc-gen.py"
 fi
 
 # Operator provisioning for the live camera (see spike/config/frigate-config.yml LIVECAM block).

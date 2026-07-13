@@ -6,4 +6,4 @@ set -e
 # The content interface is auto-connected at install time, so this path exists at daemon start.
 MESA_LIB="$SNAP/gpu-2604/mesa-2604/usr/lib/x86_64-linux-gnu"
 [ -d "$MESA_LIB" ] && export LD_LIBRARY_PATH="$MESA_LIB:${LD_LIBRARY_PATH:-}"
-exec "$SNAP/usr/bin/python3.11" "$SNAP/probes/svc.py" imports-probe
+exec "$SNAP/usr/bin/python3.11" "$SNAP/probes/svc.py"

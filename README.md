@@ -233,7 +233,7 @@ semantic_search:
 
 then restart the whole snap (`sudo snap restart frigate` — see above). The
 first time you enable it, Frigate downloads its embedding models (Jina
-CLIP v1, plus face/OCR models if you enable those features) — the download
+CLIP v1, plus the face and OCR models) — the download
 needs internet access and can take several minutes depending on your
 connection. Once it finishes, Frigate indexes your existing events in the
 background. The models land in
@@ -292,9 +292,9 @@ directly, useful when troubleshooting a detector or accelerator:
 
 Run any of them directly, e.g. `sudo snap run frigate.gpu-probe`.
 
-The web UI's **Logs** page shows nginx logs in full; the Frigate and go2rtc
-tabs currently render empty (full in-UI log capture for those two is pending
-a later release). The authoritative logs are always available from the host:
+The web UI's **Logs** page shows live output on all three tabs — nginx from its
+error log, and Frigate and go2rtc from the snap's log tee. The authoritative
+logs are always available from the host:
 
 ```
 sudo snap logs -f frigate.frigate

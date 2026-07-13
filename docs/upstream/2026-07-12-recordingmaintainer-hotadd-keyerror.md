@@ -45,8 +45,8 @@ mqtt:
 
 go2rtc:
   streams:
-    cam1: "exec:ffmpeg -hide_banner -re -f lavfi -i testsrc=size=1280x720:rate=5 -c:v libx264 -profile:v baseline -tune zerolatency -pix_fmt yuv420p -g 10 -bsf:v dump_extra -rtsp_transport tcp -f rtsp {{output}}"
-    cam2: "exec:ffmpeg -hide_banner -re -f lavfi -i testsrc=size=1280x720:rate=5 -c:v libx264 -profile:v baseline -tune zerolatency -pix_fmt yuv420p -g 10 -bsf:v dump_extra -rtsp_transport tcp -f rtsp {{output}}"
+    cam1: "exec:/usr/lib/ffmpeg/7.0/bin/ffmpeg -hide_banner -re -f lavfi -i testsrc=size=1280x720:rate=5 -c:v libx264 -profile:v baseline -tune zerolatency -pix_fmt yuv420p -g 10 -bsf:v dump_extra -rtsp_transport tcp -f rtsp {{output}}"
+    cam2: "exec:/usr/lib/ffmpeg/7.0/bin/ffmpeg -hide_banner -re -f lavfi -i testsrc=size=1280x720:rate=5 -c:v libx264 -profile:v baseline -tune zerolatency -pix_fmt yuv420p -g 10 -bsf:v dump_extra -rtsp_transport tcp -f rtsp {{output}}"
 
 record:
   enabled: true
@@ -67,8 +67,9 @@ cameras:
             - record
 ```
 
-(To run the synthetic `exec:` sources the container needs `GO2RTC_ALLOW_ARBITRARY_EXEC=true` and the
-absolute ffmpeg path `/usr/lib/ffmpeg/7.0/bin/ffmpeg`; neither is related to the bug — any two working
+(To run the synthetic `exec:` sources the container needs `GO2RTC_ALLOW_ARBITRARY_EXEC=true` set in
+its environment; the config above already spells out the absolute ffmpeg path
+`/usr/lib/ffmpeg/7.0/bin/ffmpeg` the image ships. Neither is related to the bug — any two working
 cameras reproduce it.)
 
 ### Relevant Frigate log output
