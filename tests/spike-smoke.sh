@@ -557,20 +557,25 @@ fi
 # A non-2xx HTTP response still proves the endpoint is alive (record; manual browser
 # check below is then the SDP-level evidence). Connection-refused fails the check.
 WHEP_OFFER='v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=rtpmap:96 H264/90000\r\na=ice-ufrag:spike\r\na=ice-pwd:spikespikespikespikespike\r\na=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r\na=setup:actpass\r\n'
-printf "%b" "$WHEP_OFFER" | curl -s --max-time 5 -X POST -H 'Content-Type: application/sdp' \
+# --max-time 10 (was 5), MEASURED (T6 review fix): go2rtc answers WHEP only after ICE gathering
+# completes; with the stun:8555 candidate behind NAT (m8-gate VM) the gathering timer runs its full
+# ~5 s and the 201+SDP answer lands at ~5.07 s — a 5 s curl deadline loses that race by ~70 ms EVERY
+# time (3/3 runs: 000 @ 5.01 s; the same request at max-time 20: 201 @ 5.069 s). 10 s decouples the
+# capture from go2rtc's own gathering timer; hosts answering <5 s are unaffected; a dead endpoint
+# still fails fast (connection refused returns immediately) and a hung one fails at 10 s.
+printf "%b" "$WHEP_OFFER" | curl -s --max-time 10 -X POST -H 'Content-Type: application/sdp' \
   --data-binary @- -o "$EVIDENCE/whep-response.txt" -w '%{http_code}' \
   "http://127.0.0.1:1984/api/webrtc?src=test" > "$EVIDENCE/whep-status.txt" 2>/dev/null || true
-# M8 Task 6 hardware-aware guard (webrtc-path/real-stream, mirrors the livecam/testclip capability
-# logic): go2rtc's :1984 is proven up by the "go2rtc API lists test stream" assertion above, so a
-# WHEP request that returns NO HTTP response (status 000 = curl timed out on ICE gathering) means
-# there is no real WebRTC/ICE negotiation path in THIS environment (headless VM), not that go2rtc is
-# down. On a host with a working WebRTC path the endpoint answers 1xx-5xx and the assertion runs
-# untouched; the no-path environment SKIPs with the reason. (go2rtc-down is still caught upstream.)
-WHEP_STATUS=$(cat "$EVIDENCE/whep-status.txt" 2>/dev/null)
-if printf '%s' "$WHEP_STATUS" | grep -qE '^[1-5][0-9][0-9]$'; then
-  pass_ "webrtc: WHEP endpoint alive (HTTP response)"
+# M8 Task 6 review fix (Important): capability probe DECOUPLED from the assertion. The first guard
+# used the assertion's own outcome (an HTTP status was returned) as the capability signal, so on
+# capable hardware a genuine WHEP regression (000) would have downgraded FAIL→SKIP. Capability is now
+# the assertion-independent ss signal the "webrtc: 8555/tcp bound" check above reads (second identical
+# ss call): go2rtc's webrtc listener not bound → SKIP with reason; bound → the ORIGINAL hard assertion
+# runs unchanged (a 000/no-response FAILS). go2rtc fully down is caught by the bound-check itself.
+if ss -tlnp | grep -q ':8555'; then
+  check "webrtc: WHEP endpoint alive (HTTP response)" sh -c "grep -qE '^[1-5][0-9][0-9]$' \"$EVIDENCE/whep-status.txt\""
 else
-  echo "SKIP (no capability): webrtc: WHEP endpoint alive (HTTP response) — endpoint returned no HTTP response (status='${WHEP_STATUS:-000}'); no real WebRTC/ICE negotiation path in this environment (go2rtc :1984 itself is up — see the test-stream assertion above)"
+  echo "SKIP (no capability): webrtc: WHEP endpoint alive (HTTP response) — go2rtc webrtc listener not bound (no capability)"
 fi
 if grep -q '^2' "$EVIDENCE/whep-status.txt" && grep -q '^v=0' "$EVIDENCE/whep-response.txt"; then
   pass_ "webrtc: WHEP returned SDP answer (automated full proof)"
@@ -1511,8 +1516,8 @@ if grep -q 'tee -a /dev/shm/logs/frigate/current' "/snap/$SNAP_NAME/current/bin/
   check "m8: /logs go2rtc tab has real content (tee -> \$SNAP_DATA symlink)" sh -c \
     "curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/go2rtc 2>/dev/null | grep -qiE 'go2rtc|\[api\]|listen'"
 else
-  echo "SKIP (nvr-safe): /logs frigate content — installed snap predates tee-parity (refresh pending)"
-  echo "SKIP (nvr-safe): /logs go2rtc content — installed snap predates tee-parity (refresh pending)"
+  echo "SKIP (version-skew): /logs frigate content — installed snap predates tee-parity (refresh pending)"
+  echo "SKIP (version-skew): /logs go2rtc content — installed snap predates tee-parity (refresh pending)"
 fi
 # Passthrough: the tee's own stdout inherits the journal socket, so journald must STILL receive
 # frigate lines after the change. grep -q . (non-empty) only — no journal excerpt persisted.
