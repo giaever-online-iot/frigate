@@ -6,3 +6,5 @@
 # credential exports must never be stageable (M7 ship lesson)
 *.auth
 *creds*.txt
+# snapcraft export-login output (observed untracked in a PUBLIC repo tree, M8 T10)
+*.login
