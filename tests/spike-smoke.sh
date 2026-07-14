@@ -193,8 +193,10 @@ fi
 # the /var/tmp stash wins over the fresh template render (review fix; see the install section).
 # rm only after the copy verifiably landed. Never echo contents.
 # M8 T1 review (Important): NVR_SAFE-gated — a read-only run has no business self-healing.
+# M8 T10 (parity-gate incident 2026-07-14): stash must be NON-EMPTY (-s, not -f) — an ENOSPC-
+# truncated 0-byte stash restored here would just re-poison the config it claims to recover.
 if [ "$NVR_SAFE" -eq 0 ] && \
-   [ -f "/var/tmp/frigate-operator-config.stash" ] && \
+   [ -s "/var/tmp/frigate-operator-config.stash" ] && \
    [ ! -f "/var/snap/$SNAP_NAME/current/config/config.yml" ] && \
    [ -d "/var/snap/$SNAP_NAME/current/config" ]; then
   echo "RECOVER: restoring operator config.yml from /var/tmp/frigate-operator-config.stash"
@@ -202,6 +204,19 @@ if [ "$NVR_SAFE" -eq 0 ] && \
     "/var/snap/$SNAP_NAME/current/config/config.yml" && \
     cmp -s /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml" && \
     rm -f /var/tmp/frigate-operator-config.stash
+fi
+
+# M8 T10 (parity-gate incident 2026-07-14): a 0-byte config.yml is DAMAGE, never operator work —
+# an ENOSPC mid-gate truncated it, and because every guard here tested existence (-e/-f) rather
+# than content (-s), the empty file survived self-heal AND a full purge/reinstall cycle (the stash
+# faithfully carried it across), poisoning two gate attempts (validate-config rc=1 NoneType, API/
+# nginx cascade). Refuse to gate on it: results would be garbage in any mode, and on a production
+# host (nvr-safe) it flags a real incident. Observation-only check — safe in all modes.
+if [ -f "/var/snap/$SNAP_NAME/current/config/config.yml" ] && \
+   [ ! -s "/var/snap/$SNAP_NAME/current/config/config.yml" ]; then
+  echo "FATAL: /var/snap/$SNAP_NAME/current/config/config.yml is 0 bytes — damaged state (ENOSPC?)."
+  echo "FATAL: repair before gating: rm the empty file and restart frigate (render-once re-renders), or restore a backup."
+  exit 1
 fi
 
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
@@ -298,7 +313,9 @@ if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
   # cycle — the purge regenerates config from the template and would otherwise DESTROY it. Root
   # 0600 discipline (may embed a camera secret); sha256 recorded for the survival check. Protects
   # ANY operator config from gate runs, not just this host's.
-  if [ -f "/var/snap/$SNAP_NAME/current/config/config.yml" ]; then
+  # M8 T10 (parity-gate incident 2026-07-14): -s not -f — never stash a 0-byte file; restoring it
+  # post-install would clobber the fresh render with poison (observed: attempt-2 carry-across).
+  if [ -s "/var/snap/$SNAP_NAME/current/config/config.yml" ]; then
     OPERATOR_CFG_STASH=$(mktemp)
     cp -p "/var/snap/$SNAP_NAME/current/config/config.yml" "$OPERATOR_CFG_STASH"
     OPERATOR_CFG_SHA=$(sha256sum "$OPERATOR_CFG_STASH" | awk '{print $1}')
@@ -345,7 +362,8 @@ if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
   # holds the real operator config (the old top-of-run [ ! -f config.yml ] guard never fired
   # once a reinstall re-rendered the template, parking the config forever).
   OPERATOR_CFG_RESTORED=""
-  if [ -n "$OPERATOR_CFG_STASH" ] && [ -f "$OPERATOR_CFG_STASH" ]; then
+  # M8 T10: -s not -f (empty stash must never overwrite the fresh render — see capture guard).
+  if [ -n "$OPERATOR_CFG_STASH" ] && [ -s "$OPERATOR_CFG_STASH" ]; then
     if install -m 0600 -o root -g root "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml" && \
        cmp -s "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml"; then
       rm -f "$OPERATOR_CFG_STASH"; OPERATOR_CFG_STASH=""
@@ -354,7 +372,8 @@ if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
       echo "PR#3: WARNING operator config restore copy failed — stash retained (EXIT trap will retry or park it)"
     fi
   fi
-  if [ -f /var/tmp/frigate-operator-config.stash ]; then
+  # M8 T10: -s not -f (a parked 0-byte stash is ENOSPC damage, not the operator's config).
+  if [ -s /var/tmp/frigate-operator-config.stash ]; then
     if install -m 0600 -o root -g root /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml" && \
        cmp -s /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml"; then
       rm -f /var/tmp/frigate-operator-config.stash
@@ -1717,7 +1736,17 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   (1a6e) state. Non-blocking: same mechanism as the coral-probe sibling arm.
 #   Arm (PINNED profile+comm+capname): frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"
 # Evidence (journal 2026-07-10 03:45:53): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.frigate" pid=2565495 comm="frigate.detecto" capability=12  capname="net_admin"
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"|comm="frigate-run".*capname="dac_override"|comm="go2rtc-run".*capname="dac_override"|imports-probe.*name="/dev/shm/sem\.|imports-probe.*name="/usr/bin/lscpu"|imports-probe.*name="[^"]*share/fonts' "$EVIDENCE/denials.txt" || true)
+# FINDING (M8 T10 remote-parity gate): frigate.frigate execs the snap's staged lscpu (py-cpuinfo
+#   hardware sniff inside the daemon) and lscpu reads /sys/kernel/cpu_byteorder — denied, advisory,
+#   non-blocking (lscpu tolerates the miss; all functional asserts passed in the same run). First
+#   observed on the Launchpad rev-4 artifact gate; timing/state-dependent (embeddings warm-start
+#   reached the cpuinfo path — models were already cached from a prior attempt). Same lscpu binary
+#   already has an exec arm for the imports-probe app (imports-probe.*name="/usr/bin/lscpu"); this
+#   is the daemon-profile file-read sibling.
+#   Arm (PINNED profile+path+comm; file-open audit lines order name= BEFORE comm=):
+#   frigate\.frigate.*name="/sys/kernel/cpu_byteorder".*comm="lscpu"
+# Evidence (journal 2026-07-14 23:12:23 m8-gate): apparmor="DENIED" operation="open" class="file" profile="snap.frigate.frigate" name="/sys/kernel/cpu_byteorder" pid=28168 comm="lscpu" requested_mask="r" denied_mask="r" fsuid=0 ouid=0
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"|comm="frigate-run".*capname="dac_override"|comm="go2rtc-run".*capname="dac_override"|imports-probe.*name="/dev/shm/sem\.|imports-probe.*name="/usr/bin/lscpu"|imports-probe.*name="[^"]*share/fonts|frigate\.frigate.*name="/sys/kernel/cpu_byteorder".*comm="lscpu"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -1872,6 +1901,7 @@ echo "  nginx finding: nginx CAP_SETUID denial (setuid sibling of the setgid arm
 # Evidence (journal 2026-07-12 22:20:51): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.frigate" comm="frigate-run" capability=1  capname="dac_override"
 # Evidence (journal 2026-07-12 22:23:24): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.go2rtc" comm="go2rtc-run" capability=1  capname="dac_override"
 echo "  m8 finding: frigate-run/go2rtc-run CAP_DAC_OVERRIDE denials — advisory bash-redirection capability probe (sh->bash for tee-parity), denied = confinement holds, file ops succeed via root DAC, non-blocking"
+echo "  m8 finding: daemon lscpu /sys/kernel/cpu_byteorder read denial (py-cpuinfo hardware sniff; advisory, non-blocking) — file-read sibling of the imports-probe lscpu exec arm (M8 T10 remote-parity gate)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true
