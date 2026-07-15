@@ -1,6 +1,9 @@
 #!/bin/sh
+# M8: re-homed from the retired svc-a/b/c ordering-spike daemons (M0). Runs the
+# import/shm probe once as a CLI diagnostic; harness + operators invoke it on demand.
+set -e
 # Add mesa-2604 GPU lib path: gpu/cleanup removes libGL.so.1 from snap prime (Task 10 finding).
 # The content interface is auto-connected at install time, so this path exists at daemon start.
 MESA_LIB="$SNAP/gpu-2604/mesa-2604/usr/lib/x86_64-linux-gnu"
 [ -d "$MESA_LIB" ] && export LD_LIBRARY_PATH="$MESA_LIB:${LD_LIBRARY_PATH:-}"
-exec "$SNAP/usr/bin/python3.11" "$SNAP/probes/svc.py" svc-b
+exec "$SNAP/usr/bin/python3.11" "$SNAP/probes/svc.py"

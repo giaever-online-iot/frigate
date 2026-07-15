@@ -18,7 +18,7 @@ webrtc:
 streams:
   # Synthetic camera: staged ffmpeg pushes lavfi testsrc2 as H.264 RTSP.
   # Also proves go2rtc can spawn ffmpeg subprocesses under strict confinement.
-  test: exec:__SNAP__/usr/lib/ffmpeg/8.0/bin/ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=15 -c:v libx264 -preset veryfast -tune zerolatency -g 30 -f rtsp {output}
+  test: exec:__SNAP__/usr/lib/ffmpeg/7.0/bin/ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=15 -c:v libx264 -preset veryfast -tune zerolatency -g 30 -f rtsp {output}
   # Real-object clip: CC0 pedestrian footage (Neuhauser Str., Munich). Loops forever.
   # testclip.mp4 is h264/MP4 (pre-converted from the CC0 WebM source - see spike/LICENSE-testclip for provenance + hashes).
   testclip: exec:__SNAP__/usr/lib/ffmpeg/7.0/bin/ffmpeg -re -stream_loop -1 -i __SNAP__/media-samples/testclip.mp4 -c:v libx264 -preset veryfast -tune zerolatency -g 30 -an -f rtsp {output}

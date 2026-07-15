@@ -52,6 +52,11 @@ layout:
     bind: $SNAP/usr/lib/x86_64-linux-gnu/intel-opencl
   /usr/lib/ffmpeg:
     bind: $SNAP/usr/lib/ffmpeg
+  # R4 (M8): Frigate loads the sqlite-vec loadable extension from the HARDCODED absolute path
+  # /usr/local/lib/vec0 (frigate/db/sqlitevecq.py) which we do NOT patch. This bind makes that
+  # path resolve to the staged vec0.so (spike-wheels part) under strict confinement.
+  /usr/local/lib:
+    bind: $SNAP/usr/local/lib
 
 # NOTE (M7 final review): the `npu-dev` custom-device SLOT, the `npu` PLUG, and the `npu-probe`
 # APP were removed from the SHIPPED snap before the first Store upload. NPU is documented
@@ -78,22 +83,6 @@ apps:
     daemon: simple
     restart-condition: on-failure
     plugs: [network, network-bind]
-  svc-a:
-    command: bin/svc-a
-    daemon: simple
-    restart-condition: never
-    after: [go2rtc]
-    plugs: [network]
-  svc-b:
-    command: bin/svc-b
-    daemon: simple
-    restart-condition: never
-    after: [svc-a]
-  svc-c:
-    command: bin/svc-c
-    daemon: simple
-    restart-condition: never
-    after: [svc-b]
   gpu-probe:
     command: bin/gpu-probe
     extensions: [gpu]
@@ -101,6 +90,13 @@ apps:
   coral-probe:
     command: bin/coral-probe
     plugs: [raw-usb, hardware-observe]
+  # imports-probe (M8 Task 5): re-homed payload of the retired M0 svc-a/b/c ordering-spike
+  # daemons. Runs the module-import + shm/layout/runtime/edgetpu probes once as an on-demand
+  # CLI diagnostic (writes $SNAP_COMMON/spike-results/*.json). network: tensorflow/openvino
+  # create sockets at import time (M0 net-denial finding) — the plug lets those imports run clean.
+  imports-probe:
+    command: bin/imports-probe
+    plugs: [network]
   mdns-probe:
     command: bin/mdns-probe
     plugs: [network, network-bind]
@@ -160,14 +156,18 @@ apps:
     after: [nginx]
     plugs: [network]
 
-  # --- logrotate: nginx log rotation (M7 Task 3) ---------------------------
-  # Oneshot timer app (fires daily at 00:00) that rotates nginx's access/error logs via
-  # copytruncate (nginx's open fds stay valid — no reopen signal needed, so no extra plugs).
-  # Operates only on the snap's own $SNAP_DATA logs, which need no interface.
+  # --- logrotate: nginx + /logs tee rotation (M7 Task 3; M8 Task 7) --------
+  # Oneshot timer app that rotates nginx's access/error logs AND (M8) the /logs tee sinks — real
+  # frigate stdout at /dev/shm/logs/frigate/current and go2rtc stdout at $SNAP_DATA/go2rtc-logs/current
+  # — via copytruncate (the daemons' open fds stay valid, no reopen signal). timer "00:00-24:00/6" =
+  # six runs/day (~every 4 h) so a busy daemon can't overrun the 10M tmpfs cap between rotations.
+  # shm-private: needed only for the /dev/shm/logs/frigate path (go2rtc's sink is in $SNAP_DATA and
+  # needs no interface); the plug is snap-scoped and already connected — no new connection required.
   logrotate:
     command: bin/logrotate-run
     daemon: oneshot
-    timer: "00:00"
+    timer: "00:00-24:00/6"
+    plugs: [shm-private]
 
 parts:
   python311:
@@ -185,10 +185,36 @@ parts:
       - libreadline-dev
       - uuid-dev
     override-build: |
-      ./configure --prefix=/usr --enable-shared --with-ensurepip=install \
+      # --enable-loadable-sqlite-extensions: R4 (M8) — semantic search needs sqlite-vec via conn.load_extension
+      ./configure --prefix=/usr --enable-shared --enable-loadable-sqlite-extensions --with-ensurepip=install \
         LDFLAGS="-Wl,-rpath,/snap/frigate/current/usr/lib"
       make -j"$(nproc)"
       make install DESTDIR="$CRAFT_PART_INSTALL"
+    # M8 Task 6: prime pruning of non-content Python build residue (measured on the unsquashed
+    # artifact; every line carries its du figure). NOT content — none of these are on any runtime
+    # import path (proven by the 18-module artifact import proof after each exclusion batch).
+    #   Batch 1 (build residue; cannot affect imports):
+    #   - usr/lib/python3.11/test .................. 120,070,752 B  stdlib test suite (never run at runtime)
+    #   - config-3.11-.../libpython3.11.a ..........  46,045,686 B  static archive (we ship libpython3.11.so; nothing links the .a)
+    #   - usr/include (only python3.11/*.h) ........     890,786 B  C headers (frigate builds no C ext at runtime)
+    #   Batch 2 (pip/setuptools group; verified nothing imports them at runtime — pkg_resources KEPT
+    #   because tensorboard imports it; _distutils_hack + distutils-precedence.pth removed alongside
+    #   setuptools so the .pth shim can't redirect `import distutils` to a now-absent setuptools):
+    #   - site-packages/pip (+ dist-info) ..........  14,384,513 B  no runtime pip-install path (grep spike/bin snap/hooks)
+    #   - site-packages/setuptools (+ dist-info) ...   6,013,517 B  build-only; frigate imports none of it
+    #   - site-packages/_distutils_hack ............      17,657 B  setuptools distutils shim (dead once setuptools gone)
+    #   - distutils-precedence.pth .................. removes the shim activation (stdlib distutils stays)
+    prime:
+      - -usr/lib/python3.11/test
+      - -usr/lib/python3.11/config-3.11-x86_64-linux-gnu/libpython3.11.a
+      - -usr/include
+      - -usr/share/man                     # python3.11.1 man page (import-neutral)
+      - -usr/lib/python3.11/site-packages/pip
+      - -usr/lib/python3.11/site-packages/pip-24.0.dist-info
+      - -usr/lib/python3.11/site-packages/setuptools
+      - -usr/lib/python3.11/site-packages/setuptools-65.5.0.dist-info
+      - -usr/lib/python3.11/site-packages/_distutils_hack
+      - -usr/lib/python3.11/site-packages/distutils-precedence.pth
   spike-wheels:
     plugin: nil
     after: [python311]
@@ -212,6 +238,15 @@ parts:
           -name 'distutils-precedence.pth' \
         \) -exec rm -rf {} +
       fi
+      # R4 (M8): Frigate loads the sqlite-vec extension from the HARDCODED path /usr/local/lib/vec0
+      # (frigate/db/sqlitevecq.py:11,26 — it does NOT import the pip package). The sqlite-vec==0.1.3
+      # wheel bundles the identical v0.1.3 vec0.so that upstream builds from source
+      # (docker/main/build_sqlite_vec.sh, SQLITE_VEC_VERSION=0.1.3). Copy it where Frigate expects it;
+      # the /usr/local/lib -> $SNAP/usr/local/lib layout makes that absolute path resolve under strict
+      # confinement (Frigate is NOT patched — user ruling). Fail loud if the wheel layout changed.
+      VEC0="$SP/sqlite_vec/vec0.so"
+      [ -f "$VEC0" ] || { echo "R4 ERROR: sqlite-vec vec0.so not found at $VEC0" >&2; exit 1; }
+      install -D -m 0644 "$VEC0" "$CRAFT_PART_INSTALL/usr/local/lib/vec0.so"
   probes:
     plugin: dump
     source: spike/probes
@@ -225,6 +260,10 @@ parts:
       wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
       echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
       dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+    # M8 Task 6: drop this part's stage-package docs (libusb-1.0-0 + libedgetpu1-max = 8,052 B) —
+    # never needed at runtime. (doc/man are cross-part; excluded per owning part.)
+    prime:
+      - -usr/share/doc
   va-tools:
     plugin: nil
     stage-packages:
@@ -232,6 +271,11 @@ parts:
       - ocl-icd-libopencl1   # ICD loader: provides libOpenCL.so.1 for OpenVINO GPU plugin
       - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
       - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
+    # M8 Task 6: drop this part's stage-package docs (Intel OpenCL stack + vainfo = 63,458 B) and
+    # man pages (vainfo.1 + libOpenCL.7). None needed at runtime.
+    prime:
+      - -usr/share/doc
+      - -usr/share/man
   coral-model:
     plugin: nil
     build-packages: [wget]
@@ -252,12 +296,10 @@ parts:
     plugin: nil
     build-packages: [wget, xz-utils, bzip2]
     override-build: |
-      # --- 8.0 tree (autobuild, pinned) — temps migrated to $CRAFT_PART_BUILD (M1 review fix) ---
-      wget -O "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linux64-gpl-8.1.tar.xz"
-      echo "9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9  $CRAFT_PART_BUILD/ffmpeg-8.tar.xz" | sha256sum -c -
-      mkdir -p "$CRAFT_PART_BUILD/f8" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" -C "$CRAFT_PART_BUILD/f8" --strip-components=1
-      install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
-      install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
+      # 8.0 tree DROPPED (M8 A2): upstream v0.17.2 amd64 ships exactly 7.0 (default) + 5.0
+      # (docker/main/install_deps.sh amd64 block; Dockerfile INCLUDED_FFMPEG_VERSIONS="7.0:5.0")
+      # — upstream-parity; the 8.0 tree was OUR M1 addition, −409MB uncompressed.
+      # Build temps live in $CRAFT_PART_BUILD (M1 review fix).
       # --- 5.0 tree (tag-exact, v0.17.2 install_deps.sh) ---
       wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linux64-gpl-5.1.tar.xz"
       echo "377abec133f9d9e8014dee1b91c9684ac8bb0b5b7d80100a57116ff837c4c0d4  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -
@@ -364,6 +406,12 @@ parts:
       make -j"$(nproc)"
       make install DESTDIR="$CRAFT_PART_INSTALL"
       rm -rf "$CRAFT_PART_INSTALL/usr/local/nginx/html" "$CRAFT_PART_INSTALL/usr/local/nginx/conf"/*.default
+    # M8 Task 6: this part's stage-packages (openssl, logrotate + deps cron/adduser/sensible-utils)
+    # own the bulk of /usr/share/{doc,man}: doc ≈ 256,737 B, man ≈ 1,016,450 B (356 openssl .*ssl
+    # man7 pages dominate). None needed at runtime.
+    prime:
+      - -usr/share/doc
+      - -usr/share/man
   frigate-src:
     plugin: nil
     source: https://github.com/blakeblackshear/frigate.git

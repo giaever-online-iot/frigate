@@ -1,13 +1,61 @@
 #!/usr/bin/env bash
-# M0 spike smoke harness. Run as root: sudo tests/spike-smoke.sh [--skip-install]
+# M0 spike smoke harness. Run as root: sudo tests/spike-smoke.sh [--skip-install | --nvr-safe | --provision-livecam]
 set -uo pipefail
 cd "$(dirname "$0")/.."
 SNAP_NAME=frigate
+# --nvr-safe detected HERE (hoisted, M8 final review): the artifact-ambiguity guard and the snap
+# size floor below both key off checkout .snap files and are gated OUT of nvr-safe (a production
+# run's outcome must not depend on stray .snap files in the checkout), so NVR_SAFE must be known
+# before those guards run. The descriptive --nvr-safe comment block stays at its original site below.
+NVR_SAFE=0
+[ "${1:-}" = "--nvr-safe" ] && NVR_SAFE=1
 # M7 Task 4: project root is now the snapcraft project (snap/snapcraft.yaml at root);
 # `snapcraft pack` at root produces ./frigate_*.snap. Root-first, but tolerate old
 # spike/frigate_*.snap artifacts and Task 1's remote-built spike/frigate-remote_amd64.snap
 # (frigate*_*.snap matches both frigate_<ver>_<arch>.snap and frigate-remote_<arch>.snap).
+# M8 Task 6 (T7 footgun fix): resolve the artifact identity ONCE, up front, and PIN it (path + sha256)
+# for the whole gate — the rollback-reinstall step reuses THIS exact pinned file, never a fresh `ls -t`
+# that could silently swap in a stale build mid-gate (the Task 7 VM incident: a stale pre-M8 artifact
+# left in the checkout got installed by the rollback step). Ambiguity is FATAL: two DIFFERING repo-root
+# frigate*_*.snap artifacts mean a stale .snap was left behind — fail loudly so nothing picks the wrong
+# one. spike/frigate*_*.snap (frigate_0.0.1-spike, frigate-remote — M7 evidence) is the documented
+# FALLBACK only when the repo root has none; it is NOT part of the ambiguity set.
+ROOT_SNAPS=$(ls -1 frigate*_*.snap 2>/dev/null)
+# M8 final review (Task 6c): nvr-safe SKIPs this guard (gated on NVR_SAFE) — a read-only production
+# run must not fail on stray checkout .snap files it never installs.
+if [ "$NVR_SAFE" -eq 0 ] && [ "$(printf '%s\n' "$ROOT_SNAPS" | grep -c .)" -gt 1 ]; then
+  if [ "$(for f in $ROOT_SNAPS; do sha256sum "$f"; done | awk '{print $1}' | sort -u | wc -l)" -gt 1 ]; then
+    echo "ERROR: ambiguous artifact set — clean stale .snap files (repo root has multiple DIFFERING frigate*_*.snap):"
+    printf '%s\n' "$ROOT_SNAPS" | sed 's/^/  /'
+    exit 1
+  fi
+fi
 SNAP_FILE=$(ls -t frigate*_*.snap spike/frigate*_*.snap 2>/dev/null | head -1)
+SNAP_FILE_SHA=""
+if [ -n "$SNAP_FILE" ]; then
+  SNAP_FILE_SHA=$(sha256sum "$SNAP_FILE" 2>/dev/null | awk '{print $1}')
+  echo "ARTIFACT: pinned $SNAP_FILE (sha256=$SNAP_FILE_SHA) — rollback reinstall reuses this exact file"
+fi
+# --nvr-safe: read-only mode for production hosts (M8 B1). Runs ONLY observation
+# assertions (status, curls, journal, sha256) and proves its own harmlessness.
+# Everything that installs, purges, restarts, sets, forges, or overwrites is skipped
+# with an explicit "SKIP (nvr-safe):" line. Mutually exclusive with other modes.
+# FUTURE EDITORS: any NEW mutating phase (install/purge/remove/set/unset/forge/overwrite/
+# restart/cert-swap) MUST be gated `if [ "${NVR_SAFE:-0}" -eq 0 ]; then <phase>; else
+# echo "SKIP (nvr-safe): <phase>"; fi` — otherwise it runs against the live production NVR.
+# NVR_SAFE is detected at the TOP of this script now (hoisted so the artifact-ambiguity and size
+# guards can be nvr-safe-gated); this block stays here only for the descriptive contract above.
+# Harmlessness baseline (M8 B1): sha of config.yml + TLS cert + service start-timestamps
+# captured BEFORE any gate runs; re-checked at end-of-run (Step 4) to prove --nvr-safe
+# mutated nothing. DB checksum is deliberately NOT captured — a live NVR's DB is written
+# continuously by frigate itself, so it can never hold (see task report finding).
+if [ "$NVR_SAFE" -eq 1 ]; then
+  NVRSAFE_CFG="/var/snap/$SNAP_NAME/current/config/config.yml"
+  NVRSAFE_CFG_SHA_PRE=$(sha256sum "$NVRSAFE_CFG" 2>/dev/null | awk '{print $1}')
+  NVRSAFE_CERT_SHA_PRE=$(sha256sum "/var/snap/$SNAP_NAME/current/letsencrypt/live/frigate/fullchain.pem" 2>/dev/null | awk '{print $1}')
+  NVRSAFE_STAMPS_PRE=$(for s in go2rtc frigate nginx certsync; do
+    systemctl show "snap.$SNAP_NAME.$s.service" -p ActiveEnterTimestamp --value; done)
+fi
 RESULTS=/var/snap/$SNAP_NAME/common/spike-results
 EVIDENCE=spike/results
 FAIL=0
@@ -23,6 +71,9 @@ CORAL_CFG_BAK=""
 OPERATOR_CFG_STASH=""
 OPERATOR_CFG_SHA=""
 BRIDGE_CFG_BAK=""
+# M8 (R4): the semantic-search proof's own backup while it injects semantic_search.enabled into
+# the operator config; the EXIT trap restores from it if the proof dies mid-flight.
+M8_SEM_CFG_BAK=""
 mkdir -p "$EVIDENCE"
 # Evidence dir is created by the root harness but must stay writable by the invoking user
 # (agents capture run transcripts here). chown to SUDO_USER when run via sudo.
@@ -33,6 +84,19 @@ fail_() { echo "FAIL: $1"; FAIL=1; }
 # Note: check() always returns 0; failures accumulate in $FAIL. Do not use in && chains or if-conditions.
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass_ "$d"; else fail_ "$d"; fi; }
 jqr()   { jq -r "$2" "$RESULTS/$1.json" 2>/dev/null; }
+# M8 Task 6: hardware/env capability probe for the HARDWARE-AWARE full gate. Each hardware- or
+# environment-dependent assertion runs UNTOUCHED when its capability is present (host full gates lose
+# NO coverage) and SKIPs with an explicit reason NAMING the missing capability when absent (headless
+# VM: no iGPU/TPU/renderD/livecam). Mirrors the existing lsusb-Coral-phase guard; never a blanket
+# "is this a VM" gate. GPU/vaapi/openvino/auto-detect-ov guards key off a real Intel/AMD render node.
+render_node_present() {  # Intel(0x8086)/AMD(0x1002) DRM render node under /sys/class/drm
+  for _v in /sys/class/drm/renderD*/device/vendor; do
+    [ -r "$_v" ] && grep -qiE '0x8086|0x1002' "$_v" 2>/dev/null && return 0
+  done
+  return 1
+}
+if render_node_present; then RENDER_NODE=yes; else RENDER_NODE=no; fi
+RENDER_NODE_REASON="no Intel(0x8086)/AMD(0x1002) render node under /sys/class/drm/renderD* (headless VM: virtio-gpu)"
 # PR#3 review (credential hygiene, layer 2 of 2): go2rtc /api/streams and frigate /stats emit
 # source URLs verbatim — an operator's REAL camera credentials leaked into evidence JSON. Layer 1
 # minimizes at capture (names-only streams list, del(.cpu_usages) on /stats, producer url strip);
@@ -48,15 +112,46 @@ scrub_evidence() {
 command -v jq >/dev/null || { echo "jq required: sudo apt install -y jq"; exit 1; }
 
 # m7: snap size floor — silent prime-gutting tripwire (controller addition, 2026-07-08). SNAP_FILE
-# was resolved above (line 10); a chosen artifact under 900 MB means the prime was gutted (a mid-
+# was resolved+pinned above; a chosen artifact under the floor means the prime was gutted (a mid-
 # write artifact read, or a silent pack failure) — catch it HERE, before anything installs it. The
 # earlier check() helpers are needed, so this rides just below their definition rather than at the
 # resolution line. Guarded on a non-empty SNAP_FILE (a bare --skip-install with no local artifact
 # leaves it empty; the size floor simply does not apply in that case).
-if [ -n "$SNAP_FILE" ]; then
+# M8 Task 6: retuned after the prime-prune size pass (was 943718400 = 900 MiB). M8 final review:
+# `snapcraft clean wrappers probes` + rebuild removed stale dump-part files (retired svc-a/b/c +
+# go2rtc-gen.py + its .pyc — 12288 bytes a dump overlay never prunes), so the CLEAN artifact is
+# 989868032 bytes (sha256 519e240ccd8e2410f4dd412fb0b86ce797d954f6f66764c089c61afc64065e04); the
+# certified-but-contaminated build was 989880320. Floor = 85% of the clean artifact, floored to a
+# whole MiB = 802 MiB = 840957952 bytes — UNCHANGED (the 12288-byte trim doesn't cross a MiB
+# boundary); still comfortably catches a gutted prime while tracking the leaner artifact.
+# M8 final review (Task 6c): gated OUT of nvr-safe — a production run's outcome must not depend on
+# stray checkout .snap files it never installs.
+if [ "$NVR_SAFE" -eq 1 ]; then
+  echo "SKIP (nvr-safe): snap size floor — production outcome must not depend on checkout .snap files"
+elif [ -n "$SNAP_FILE" ]; then
   SNAP_SZ=$(stat -c %s "$SNAP_FILE" 2>/dev/null || echo 0)
-  check "m7: snap size floor (>900 MB, prime not gutted)" sh -c "[ '$SNAP_SZ' -ge 943718400 ]"
-  echo "  m7 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (floor 943718400)"
+  check "m8: snap size floor (>=802 MiB, prime not gutted)" sh -c "[ '$SNAP_SZ' -ge 840957952 ]"
+  echo "  m8 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (floor 840957952 = 802 MiB; contaminated was 989880320, clean 989868032)"
+fi
+
+# M8 final review: app-census assertion — THE check that would have caught the stale-file
+# contamination. snapcraft `dump` parts overlay changed/new sources into the cached part install dir
+# but NEVER remove deleted ones; without a `snapcraft clean` of the wrappers/probes parts the retired
+# svc-a/b/c + go2rtc-gen.py wrappers lingered in the primed bin/ (certified into the size+sha a clean
+# CI build won't carry). This census reads the INSTALLED snap READ-ONLY, so it is nvr-safe safe. BUT a
+# production host still on a PRE-svc-retirement revision legitimately carries svc-a/b/c — a version
+# skew, not contamination. Gate like the /logs tee guard: if the installed meta/snap.yaml still
+# declares the svc-a app, the host predates the retirement -> SKIP; once refreshed (no svc-a app) the
+# census asserts no svc-* wrappers, exactly 5 daemon apps, and no bin/go2rtc-gen.py in prime.
+CENSUS_META="/snap/$SNAP_NAME/current/meta/snap.yaml"
+if [ ! -e "$CENSUS_META" ]; then
+  echo "SKIP: app census — no installed $SNAP_NAME snap (meta/snap.yaml absent)"
+elif grep -q '^  svc-a:' "$CENSUS_META" 2>/dev/null; then
+  echo "SKIP (version-skew): app census — installed snap predates svc retirement (svc-a app still declared)"
+else
+  check "m8: app census — no retired svc-* wrappers in prime bin/" sh -c "! ls /snap/$SNAP_NAME/current/bin/svc-* 2>/dev/null"
+  check "m8: app census — exactly 5 daemon apps in meta/snap.yaml" sh -c "[ \"\$(grep -c 'daemon:' '$CENSUS_META')\" -eq 5 ]"
+  check "m8: app census — no retired bin/go2rtc-gen.py in prime" sh -c "! test -e /snap/$SNAP_NAME/current/bin/go2rtc-gen.py"
 fi
 
 # Operator provisioning for the live camera (see spike/config/frigate-config.yml LIVECAM block).
@@ -79,7 +174,10 @@ fi
 # Self-healing: if a prior aborted run couldn't restore the livecam secret (snap was gone at
 # EXIT trap time), it was moved to a deterministic stash path. Recover it now if the snap is
 # installed and the credential is missing — no content echoed, just the path.
-if [ -f "/var/tmp/frigate-livecam-url.stash" ] && \
+# M8 T1 review (Important): NVR_SAFE-gated — a read-only run has no business self-healing
+# (install+rm host mutations, and this path sits outside the harmlessness proof's baseline).
+if [ "$NVR_SAFE" -eq 0 ] && \
+   [ -f "/var/tmp/frigate-livecam-url.stash" ] && \
    [ ! -f "/var/snap/$SNAP_NAME/common/livecam-url" ] && \
    [ -d "/var/snap/$SNAP_NAME/common" ]; then
   echo "RECOVER: restoring livecam secret from /var/tmp/frigate-livecam-url.stash"
@@ -94,7 +192,11 @@ fi
 # may be newer operator work. The AUTHORITATIVE recovery is the post-install restore step, where
 # the /var/tmp stash wins over the fresh template render (review fix; see the install section).
 # rm only after the copy verifiably landed. Never echo contents.
-if [ -f "/var/tmp/frigate-operator-config.stash" ] && \
+# M8 T1 review (Important): NVR_SAFE-gated — a read-only run has no business self-healing.
+# M8 T10 (parity-gate incident 2026-07-14): stash must be NON-EMPTY (-s, not -f) — an ENOSPC-
+# truncated 0-byte stash restored here would just re-poison the config it claims to recover.
+if [ "$NVR_SAFE" -eq 0 ] && \
+   [ -s "/var/tmp/frigate-operator-config.stash" ] && \
    [ ! -f "/var/snap/$SNAP_NAME/current/config/config.yml" ] && \
    [ -d "/var/snap/$SNAP_NAME/current/config" ]; then
   echo "RECOVER: restoring operator config.yml from /var/tmp/frigate-operator-config.stash"
@@ -102,6 +204,19 @@ if [ -f "/var/tmp/frigate-operator-config.stash" ] && \
     "/var/snap/$SNAP_NAME/current/config/config.yml" && \
     cmp -s /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml" && \
     rm -f /var/tmp/frigate-operator-config.stash
+fi
+
+# M8 T10 (parity-gate incident 2026-07-14): a 0-byte config.yml is DAMAGE, never operator work —
+# an ENOSPC mid-gate truncated it, and because every guard here tested existence (-e/-f) rather
+# than content (-s), the empty file survived self-heal AND a full purge/reinstall cycle (the stash
+# faithfully carried it across), poisoning two gate attempts (validate-config rc=1 NoneType, API/
+# nginx cascade). Refuse to gate on it: results would be garbage in any mode, and on a production
+# host (nvr-safe) it flags a real incident. Observation-only check — safe in all modes.
+if [ -f "/var/snap/$SNAP_NAME/current/config/config.yml" ] && \
+   [ ! -s "/var/snap/$SNAP_NAME/current/config/config.yml" ]; then
+  echo "FATAL: /var/snap/$SNAP_NAME/current/config/config.yml is 0 bytes — damaged state (ENOSPC?)."
+  echo "FATAL: repair before gating: rm the empty file and restart frigate (render-once re-renders), or restore a backup."
+  exit 1
 fi
 
 MARK=$(date '+%Y-%m-%d %H:%M:%S')
@@ -125,8 +240,14 @@ trap '
       if [ -d "/var/snap/$SNAP_NAME/common" ]; then
         install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url" && rm -f "$LIVECAM_STASH"
       else
-        mv "$LIVECAM_STASH" /var/tmp/frigate-livecam-url.stash && \
-          echo "STASH: livecam secret preserved at /var/tmp/frigate-livecam-url.stash (snap absent; recover with: sudo tests/spike-smoke.sh or --provision-livecam)"
+        # oldest-wins: run 2'\''s stash may be a template render; the parked file is the real livecam secret (PR#3 review, M8 B2)
+        if [ -e /var/tmp/frigate-livecam-url.stash ]; then
+          echo "STASH: /var/tmp/frigate-livecam-url.stash already exists (older run'\''s secret — oldest wins, NOT overwritten)."
+          echo "STASH: this run'\''s copy left at $LIVECAM_STASH — reconcile manually, then delete both."
+        else
+          mv "$LIVECAM_STASH" /var/tmp/frigate-livecam-url.stash && \
+            echo "STASH: livecam secret preserved at /var/tmp/frigate-livecam-url.stash (snap absent; recover with: sudo tests/spike-smoke.sh or --provision-livecam)"
+        fi
       fi
     else
       rm -f "$LIVECAM_STASH"
@@ -148,6 +269,14 @@ trap '
     fi
     snap restart $SNAP_NAME 2>/dev/null || true
   fi
+  # M8 (R4): if the semantic-search proof died mid-flight, restore the operator config it was
+  # mutating (semantic_search.enabled injected) and restart frigate. Same rm-after-copy discipline.
+  if [ -n "${M8_SEM_CFG_BAK:-}" ] && [ -f "${M8_SEM_CFG_BAK:-}" ]; then
+    if cp -p "$M8_SEM_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null; then
+      rm -f "$M8_SEM_CFG_BAK"
+    fi
+    snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  fi
   # PR#3: operator config safety net — if the run aborted after the purge but before the explicit
   # restore, put the stashed config.yml back so the gate never leaves the operator config-less.
   # Review fix: rm the stash only after the restore copy VERIFIABLY landed (install && cmp);
@@ -160,15 +289,21 @@ trap '
       rm -f "$OPERATOR_CFG_STASH"
       snap restart $SNAP_NAME 2>/dev/null || true
     else
-      mv "$OPERATOR_CFG_STASH" /var/tmp/frigate-operator-config.stash 2>/dev/null && \
-        echo "STASH: operator config.yml preserved at /var/tmp/frigate-operator-config.stash (next full harness run restores it — it wins over any template render)"
+      # oldest-wins: run 2'\''s stash may be a template render; the parked file is the real operator config (PR#3 review, M8 B2)
+      if [ -e /var/tmp/frigate-operator-config.stash ]; then
+        echo "STASH: /var/tmp/frigate-operator-config.stash already exists (older run'\''s config — oldest wins, NOT overwritten)."
+        echo "STASH: this run'\''s copy left at $OPERATOR_CFG_STASH — reconcile manually, then delete both."
+      else
+        mv "$OPERATOR_CFG_STASH" /var/tmp/frigate-operator-config.stash 2>/dev/null && \
+          echo "STASH: operator config.yml preserved at /var/tmp/frigate-operator-config.stash (next full harness run restores it — it wins over any template render)"
+      fi
     fi
   fi
   # PR#3 review: scrub evidence on EVERY exit path (aborted runs included) — see scrub_evidence.
   scrub_evidence
 ' EXIT
 
-if [ "${1:-}" != "--skip-install" ]; then
+if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
   [ -n "$SNAP_FILE" ] || { echo "ERROR: no ${SNAP_NAME}_*.snap file found - build first (snapcraft pack)"; exit 1; }
   if [ -f "/var/snap/$SNAP_NAME/common/livecam-url" ]; then
     LIVECAM_STASH=$(mktemp)
@@ -178,7 +313,9 @@ if [ "${1:-}" != "--skip-install" ]; then
   # cycle — the purge regenerates config from the template and would otherwise DESTROY it. Root
   # 0600 discipline (may embed a camera secret); sha256 recorded for the survival check. Protects
   # ANY operator config from gate runs, not just this host's.
-  if [ -f "/var/snap/$SNAP_NAME/current/config/config.yml" ]; then
+  # M8 T10 (parity-gate incident 2026-07-14): -s not -f — never stash a 0-byte file; restoring it
+  # post-install would clobber the fresh render with poison (observed: attempt-2 carry-across).
+  if [ -s "/var/snap/$SNAP_NAME/current/config/config.yml" ]; then
     OPERATOR_CFG_STASH=$(mktemp)
     cp -p "/var/snap/$SNAP_NAME/current/config/config.yml" "$OPERATOR_CFG_STASH"
     OPERATOR_CFG_SHA=$(sha256sum "$OPERATOR_CFG_STASH" | awk '{print $1}')
@@ -225,7 +362,8 @@ if [ "${1:-}" != "--skip-install" ]; then
   # holds the real operator config (the old top-of-run [ ! -f config.yml ] guard never fired
   # once a reinstall re-rendered the template, parking the config forever).
   OPERATOR_CFG_RESTORED=""
-  if [ -n "$OPERATOR_CFG_STASH" ] && [ -f "$OPERATOR_CFG_STASH" ]; then
+  # M8 T10: -s not -f (empty stash must never overwrite the fresh render — see capture guard).
+  if [ -n "$OPERATOR_CFG_STASH" ] && [ -s "$OPERATOR_CFG_STASH" ]; then
     if install -m 0600 -o root -g root "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml" && \
        cmp -s "$OPERATOR_CFG_STASH" "/var/snap/$SNAP_NAME/current/config/config.yml"; then
       rm -f "$OPERATOR_CFG_STASH"; OPERATOR_CFG_STASH=""
@@ -234,7 +372,8 @@ if [ "${1:-}" != "--skip-install" ]; then
       echo "PR#3: WARNING operator config restore copy failed — stash retained (EXIT trap will retry or park it)"
     fi
   fi
-  if [ -f /var/tmp/frigate-operator-config.stash ]; then
+  # M8 T10: -s not -f (a parked 0-byte stash is ENOSPC damage, not the operator's config).
+  if [ -s /var/tmp/frigate-operator-config.stash ]; then
     if install -m 0600 -o root -g root /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml" && \
        cmp -s /var/tmp/frigate-operator-config.stash "/var/snap/$SNAP_NAME/current/config/config.yml"; then
       rm -f /var/tmp/frigate-operator-config.stash
@@ -256,15 +395,26 @@ if [ "${1:-}" != "--skip-install" ]; then
   sleep 30  # let daemons start and probes write; frigate needs extra time for Python imports (~12s) + startup
 fi
 
-check "svc-a active" sh -c "snap services $SNAP_NAME.svc-a | grep -q ' active'"
+# RETIRED (M8 Task 5): the M0 svc-a/b/c ordering-spike daemons are removed from the snap; their
+# probe payload is re-homed to the frigate.imports-probe CLI diagnostic (run below). The real
+# 4-daemon start chain (go2rtc -> frigate -> nginx -> certsync) is asserted by the service-active
+# checks further down (go2rtc L442, frigate L543, nginx L557, certsync L1176).
+echo "RETIRED (M8): M0 svc ordering spike — real-daemon chain asserted via services-active checks"
 
-# --- task assertions inserted below this line ---
-check "svc-b active" sh -c "snap services $SNAP_NAME.svc-b | grep -q ' active'"
-check "svc-c active" sh -c "snap services $SNAP_NAME.svc-c | grep -q ' active'"
-TA=$(jqr ordering-svc-a '.start_monotonic'); TB=$(jqr ordering-svc-b '.start_monotonic'); TC=$(jqr ordering-svc-c '.start_monotonic')
-# starttime has 10ms (jiffy) resolution: sub-jiffy starts tie. Ties allowed; inversions still fail.
-check "ordering: svc-a <= svc-b <= svc-c (jiffy resolution, ties allowed)" awk -v a="$TA" -v b="$TB" -v c="$TC" 'BEGIN{exit !(a<=b && b<=c)}'
-
+# --- M8 Task 5: re-homed imports/shm/layout/runtime/edgetpu probe (full-gate class) ---
+# The retired svc-a/b/c daemons wrote these JSONs at daemon start; a single CLI run now does.
+# The run execs Python inside the snap (imports tensorflow/openvino/cv2, dlopens edgetpu, creates a
+# psm_ shm to reproduce the M0 denial) — exec-inside-snap, so nvr-safe SKIPs the run AND the reads.
+if [ "$NVR_SAFE" -eq 0 ]; then
+# M8 Task 6: run from a snap-readable cwd (/). imports-probe imports norfair→matplotlib, whose
+# cold-import config lookup opendir()s the process CWD; under a full gate the CWD is the harness
+# checkout root (owned by the invoking user, NOT readable by the strict snap), producing a benign but
+# capture-flappy AppArmor denial (name="<checkout>/" — captured this VM gate as the sole unexpected
+# denial). Running from / makes that probe read the base root (readable) so the denial cannot arise,
+# portably for ANY checkout path. imports-probe writes its JSON to absolute $SNAP_COMMON paths, so cwd
+# is irrelevant to its output (verified in-VM: imports.json still "complete"). The cwd-independent
+# matplotlib font scan (/usr/share/fonts) is re-allowlisted in the denial scan below.
+( cd / && snap run $SNAP_NAME.imports-probe >/dev/null 2>&1 ) || true
 check "shm probe complete" test "$(jqr shm '.status')" = "complete"
 check "shm probe has both sub-results" test "$(jqr shm '.default_name.ok, .snap_prefixed.ok' | wc -l)" = "2"
 echo "  shm finding: default(psm_*) ok=$(jqr shm '.default_name.ok') err=$(jqr shm '.default_name.error // "-"')"
@@ -283,19 +433,20 @@ check "private /tmp/cache (staging): layout probe write ok" sh -c "jq -e '.write
 
 check "daemons run on python 3.11" test "$(jqr runtime '.version_major_minor')" = "3.11"
 
-# The imports probe (tensorflow+openvino imports, ~30-75s under load) can outlive the fixed
-# post-install sleep: probe completion observed at +73s under host load (2026-07-05, two
-# consecutive runs) while earlier same-day runs completed within 30s. Poll to the probe's
-# actual completion instead of racing a fixed sleep (deadline 120s; edgetpu-dlopen is
-# written by the same probe sequence right after imports.json).
+# M8: the probe now runs SYNCHRONOUSLY via `snap run` just above (blocks until svc.py exits), so
+# imports.json/edgetpu-dlopen.json are already complete on return. The poll below is a cheap
+# defensive guard (normally breaks on the first iteration; deadline 120s under extreme host load).
 for i in $(seq 1 24); do
   [ "$(jqr imports '.status')" = "complete" ] && [ "$(jqr edgetpu-dlopen '.status')" = "complete" ] && break
   sleep 5
 done
 check "imports probe complete" test "$(jqr imports '.status')" = "complete"
-for MOD in numpy cv2 onnxruntime tflite_runtime tensorflow openvino fastapi uvicorn starlette peewee pydantic scipy norfair zmq cryptography ruamel.yaml paho.mqtt.client; do
+# sqlite_vec (M8 Task 2): loadable-extension load from /usr/local/lib/vec0 + vec_version() — same
+# hardcoded path Frigate's semantic search uses; the probe records vec_version in imports.json.
+for MOD in numpy cv2 onnxruntime tflite_runtime tensorflow openvino fastapi uvicorn starlette peewee pydantic scipy norfair zmq cryptography ruamel.yaml paho.mqtt.client sqlite_vec; do
   check "import $MOD" sh -c "jq -e '.imports.\"$MOD\".ok == true' \"$RESULTS/imports.json\""
 done
+echo "  sqlite-vec finding: vec0 loadable extension vec_version=$(jqr imports '.imports.sqlite_vec.version // "-"') (loaded from /usr/local/lib/vec0)"
 
 # FINDING (Task 6): /media/frigate layout REJECTED at snap pack time (same "defines a new top-level
 # directory" error as /config). snapd does not treat /media as a valid layout base even though the
@@ -307,7 +458,11 @@ printf '# RECORDED FINDING (Task 6): snapcraft pack-time rejection, replayed by 
 
 check "edgetpu dlopen probe complete" test "$(jqr edgetpu-dlopen '.status')" = "complete"
 echo "  edgetpu finding: dlopen ok=$(jqr edgetpu-dlopen '.dlopen.ok') err=$(jqr edgetpu-dlopen '.dlopen.error // "-"')"
+else
+  echo "SKIP (nvr-safe): imports-probe run + shm/layout/runtime/imports/edgetpu reads (exec-inside-snap)"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # Ensure mesa-2604 is installed and connected (idempotent; also handles --skip-install path)
 snap install mesa-2604 2>/dev/null || true
 snap connect $SNAP_NAME:gpu-2604 mesa-2604:gpu-2604 2>/dev/null || true
@@ -316,10 +471,20 @@ snap connect $SNAP_NAME:mount-observe 2>/dev/null || true
 snap connections $SNAP_NAME > "$EVIDENCE/connections.txt"
 snap run $SNAP_NAME.gpu-probe || true
 check "gpu probe complete" test "$(jqr gpu '.status')" = "complete"
-check "openvino sees GPU" grep -q '"GPU"' "$RESULTS/gpu.json"
+# M8 Task 6 hardware-aware guard: OpenVINO only enumerates a "GPU" device when a real Intel/AMD
+# render node is present. On capable hardware the assertion runs untouched; headless VM SKIPs.
+if [ "$RENDER_NODE" = yes ]; then
+  check "openvino sees GPU" grep -q '"GPU"' "$RESULTS/gpu.json"
+else
+  echo "SKIP (no capability): openvino sees GPU — $RENDER_NODE_REASON"
+fi
 check "vainfo produced output" test -s /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt
 cp /var/snap/$SNAP_NAME/common/spike-results/vainfo.txt "$EVIDENCE/" 2>/dev/null || true
+else
+  echo "SKIP (nvr-safe): mesa install + connects + gpu-probe run"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- Coral USB section ---
 # Once the Coral firmware is uploaded, the device stays in initialized state (18d1:9302) until
 # physically replugged. On re-runs, before==18d1 is the expected steady state — the 1a6e->18d1
@@ -343,10 +508,24 @@ fi
 printf '# RECORDED FINDING (Task 11): first-run transition, replayed by the harness - NOT live capture\nBus 003 Device 076: ID 1a6e:089a Global Unichip Corp.\nBus 003 Device 077: ID 18d1:9302 Google Inc.\n' \
   > "$EVIDENCE/coral-reenum-firstrun.txt"
 check "coral probe complete" test "$(jqr coral '.status')" = "complete"
-check "coral delegate loaded (firmware upload)" test "$(jqr coral '.load_delegate.ok')" = "true"
-check "coral inference ran" test "$(jqr coral '.inference.ok')" = "true"
-check "coral: device in initialized state (18d1) after probe" grep -q 18d1 "$EVIDENCE/coral-usb-after.txt"
+# M8 Task 6 hardware-aware guard: the delegate/inference/device asserts need a real Coral USB TPU.
+# Mirrors the coral-PHASE lsusb gate below; on a host WITH the stick the asserts run untouched, a
+# headless VM (no TPU passthrough) SKIPs each with the missing-capability reason. ("coral probe
+# complete" stays unconditional — the probe writes status=complete even when the delegate fails.)
+if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
+  check "coral delegate loaded (firmware upload)" test "$(jqr coral '.load_delegate.ok')" = "true"
+  check "coral inference ran" test "$(jqr coral '.inference.ok')" = "true"
+  check "coral: device in initialized state (18d1) after probe" grep -q 18d1 "$EVIDENCE/coral-usb-after.txt"
+else
+  echo "SKIP (no capability): coral delegate loaded (firmware upload) — no Coral USB TPU (1a6e:089a/18d1:9302 absent from lsusb)"
+  echo "SKIP (no capability): coral inference ran — no Coral USB TPU (1a6e:089a/18d1:9302 absent from lsusb)"
+  echo "SKIP (no capability): coral: device in initialized state (18d1) after probe — no Coral USB TPU (1a6e:089a/18d1:9302 absent from lsusb)"
+fi
+else
+  echo "SKIP (nvr-safe): coral-probe firmware runs + connects"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- NPU custom-device section ---
 # FINDING (M7 final review): the NPU custom-device substrate (M0-C) is RETIRED from the SHIPPED
 # artifact — the npu-dev slot, the npu plug, and the npu-probe app were dropped from snapcraft.yaml
@@ -364,11 +543,15 @@ if grep -q '^  npu-probe:' "/snap/$SNAP_NAME/current/meta/snap.yaml" 2>/dev/null
 else
   echo "SKIP: npu probe retired from shipped snap (M7 final review; custom-device dropped pre-Store)"
 fi
+else
+  echo "SKIP (nvr-safe): npu custom-device probe block (dormant)"
+fi
 
 # --- M2: ffmpeg matrix (Task 1) --- ffprobe app follows the tag-default 7.0 tree
 check "ffprobe app runs tag-default 7.0" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n7'"
 # static builds run directly from the mounted squashfs (no confinement needed for -version)
-for V in 5.0 7.0 8.0; do
+# 8.0 dropped (M8 A2): upstream v0.17.2 amd64 ships only 7.0+5.0 — enumeration mirrors the verdict set
+for V in 5.0 7.0; do
   check "ffmpeg tree $V present+runs" sh -c "/snap/frigate/current/usr/lib/ffmpeg/$V/bin/ffprobe -version | head -1 | grep -q '^ffprobe version'"
 done
 
@@ -386,9 +569,10 @@ curl -sf --max-time 5 http://127.0.0.1:1984/api/streams 2>/dev/null | jq 'keys' 
 check "go2rtc API lists test stream" sh -c "jq -e 'index(\"test\")' \"$EVIDENCE/go2rtc-streams.json\""
 
 # --- M1: readiness gate evidence (Task 3) ---
-# Note: jqr is a shell function not available in subshells; inline jq with the expanded $RESULTS path.
-check "readiness: svc-a waited_ms recorded (>=0)" sh -c "WMS=\$(jq -r '.waited_ms // -2' \"$RESULTS/ordering-svc-a.json\" 2>/dev/null); [ -n \"\$WMS\" ] && [ \"\$WMS\" -ge 0 ]"
-echo "  readiness finding: svc-a waited_ms=$(jqr ordering-svc-a '.waited_ms')"
+# RETIRED (M8 Task 5): the M0 svc-a readiness-gate spike (wait_for_url -> waited_ms) is retired with
+# its daemon. The real daemons carry readiness gating in their own run wrappers — nginx-run/
+# frigate-run/certsync-run call wait_for_url (lib-wait.sh) before exec'ing their service.
+echo "RETIRED (M8): M0 svc-a readiness spike (waited_ms) — real daemons gate via wait_for_url in their run wrappers"
 
 # --- M1: RTSP end-to-end (Task 4) ---
 # ffprobe is BOTH the verifier and the first consumer: it triggers go2rtc's
@@ -406,15 +590,48 @@ echo "  subprocess finding: exec producer state captured in go2rtc-producer.json
 
 # --- M1: WebRTC (Task 5) ---
 check "webrtc: 8555/tcp bound" sh -c "ss -tlnp | grep -q ':8555'"
-check "webrtc: 8555/udp bound" sh -c "ss -ulnp | grep -q ':8555'"
+# M8 T1 fix round, outcome (c) — environmental, TCP healthy: go2rtc (1.9.13) binds its fixed-port
+# UDP candidate sockets PER INTERFACE-ADDRESS at process start only; when the go2rtc daemon starts
+# at boot before the network is up (observed: boot 21:01:03, webrtc listen 21:01:30.9, wifi still
+# authenticating 21:01:33), zero UDP sockets exist for the process lifetime. The TCP mux is a
+# wildcard bind (address-independent) and WHEP still returns SDP answers (checked below). The
+# generated go2rtc.yaml is NOT at fault (same spec binds UDP when started with network up — every
+# full-gate restart). nvr-safe must not fail on this boot-order race: assert TCP (above) and
+# record the UDP state as a finding. Full gate asserts UDP as before.
+if [ "$NVR_SAFE" -eq 1 ]; then
+  if ss -ulnp | grep -q ':8555'; then
+    echo "  webrtc finding (nvr-safe): 8555/udp bound (go2rtc started with network up)"
+  else
+    echo "  webrtc finding (nvr-safe): 8555/udp NOT bound — go2rtc started before network-online (boot-order race; per-interface UDP candidate sockets bind at start only); TCP mux healthy"
+  fi
+  echo "SKIP (nvr-safe): webrtc: 8555/udp bound — TCP asserted; UDP state recorded as finding (boot-order dependent)"
+else
+  check "webrtc: 8555/udp bound" sh -c "ss -ulnp | grep -q ':8555'"
+fi
 # WHEP: POST a minimal recvonly offer; a 2xx + SDP answer is full automated proof.
 # A non-2xx HTTP response still proves the endpoint is alive (record; manual browser
 # check below is then the SDP-level evidence). Connection-refused fails the check.
 WHEP_OFFER='v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=rtpmap:96 H264/90000\r\na=ice-ufrag:spike\r\na=ice-pwd:spikespikespikespikespike\r\na=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r\na=setup:actpass\r\n'
-printf "%b" "$WHEP_OFFER" | curl -s --max-time 5 -X POST -H 'Content-Type: application/sdp' \
+# --max-time 10 (was 5), MEASURED (T6 review fix): go2rtc answers WHEP only after ICE gathering
+# completes; with the stun:8555 candidate behind NAT (m8-gate VM) the gathering timer runs its full
+# ~5 s and the 201+SDP answer lands at ~5.07 s — a 5 s curl deadline loses that race by ~70 ms EVERY
+# time (3/3 runs: 000 @ 5.01 s; the same request at max-time 20: 201 @ 5.069 s). 10 s decouples the
+# capture from go2rtc's own gathering timer; hosts answering <5 s are unaffected; a dead endpoint
+# still fails fast (connection refused returns immediately) and a hung one fails at 10 s.
+printf "%b" "$WHEP_OFFER" | curl -s --max-time 10 -X POST -H 'Content-Type: application/sdp' \
   --data-binary @- -o "$EVIDENCE/whep-response.txt" -w '%{http_code}' \
   "http://127.0.0.1:1984/api/webrtc?src=test" > "$EVIDENCE/whep-status.txt" 2>/dev/null || true
-check "webrtc: WHEP endpoint alive (HTTP response)" sh -c "grep -qE '^[1-5][0-9][0-9]$' \"$EVIDENCE/whep-status.txt\""
+# M8 Task 6 review fix (Important): capability probe DECOUPLED from the assertion. The first guard
+# used the assertion's own outcome (an HTTP status was returned) as the capability signal, so on
+# capable hardware a genuine WHEP regression (000) would have downgraded FAIL→SKIP. Capability is now
+# the assertion-independent ss signal the "webrtc: 8555/tcp bound" check above reads (second identical
+# ss call): go2rtc's webrtc listener not bound → SKIP with reason; bound → the ORIGINAL hard assertion
+# runs unchanged (a 000/no-response FAILS). go2rtc fully down is caught by the bound-check itself.
+if ss -tlnp | grep -q ':8555'; then
+  check "webrtc: WHEP endpoint alive (HTTP response)" sh -c "grep -qE '^[1-5][0-9][0-9]$' \"$EVIDENCE/whep-status.txt\""
+else
+  echo "SKIP (no capability): webrtc: WHEP endpoint alive (HTTP response) — go2rtc webrtc listener not bound (no capability)"
+fi
 if grep -q '^2' "$EVIDENCE/whep-status.txt" && grep -q '^v=0' "$EVIDENCE/whep-response.txt"; then
   pass_ "webrtc: WHEP returned SDP answer (automated full proof)"
 else
@@ -422,13 +639,25 @@ else
 fi
 
 # --- M1: mDNS multicast (Task 6) ---
+if [ "$NVR_SAFE" -eq 0 ]; then
 snap run frigate.mdns-probe || true
 check "mdns probe complete" test "$(jqr mdns '.status')" = "complete"
 echo "  mdns finding: join=$(jqr mdns '.multicast_join.ok') sent=$(jqr mdns '.query_sent.ok') responses=$(jqr mdns '.responses')"
+else
+  echo "SKIP (nvr-safe): mdns-probe transient exerciser"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- M2: VAAPI hardware decode (Task 4) ---
 # -hwaccel_output_format vaapi FORBIDS silent software fallback: rc=0 proves the hw path.
-check "vaapi: hw decode of synthetic stream (rc=0, no sw fallback)" snap run frigate.vaapi-probe
+# M8 Task 6 hardware-aware guard: VAAPI hw decode needs a real Intel/AMD render node (the probe
+# still RUNS so evidence documents the no-GPU state, but the rc=0 assertion only fires on capable HW).
+if [ "$RENDER_NODE" = yes ]; then
+  check "vaapi: hw decode of synthetic stream (rc=0, no sw fallback)" snap run frigate.vaapi-probe
+else
+  snap run frigate.vaapi-probe >/dev/null 2>&1 || true   # run anyway to capture the no-GPU evidence
+  echo "SKIP (no capability): vaapi: hw decode of synthetic stream (rc=0, no sw fallback) — $RENDER_NODE_REASON"
+fi
 cp /var/snap/frigate/common/spike-results/vaapi-decode.txt "$EVIDENCE/" 2>/dev/null || true
 check "vaapi: evidence captured" test -s "$EVIDENCE/vaapi-decode.txt"
 echo "  vaapi finding: $(grep -m1 -iE 'vaapi|hwaccel' "$EVIDENCE/vaapi-decode.txt" 2>/dev/null || echo 'see vaapi-decode.txt')"
@@ -442,6 +671,9 @@ VC_RC=$?
 check "frigate validate-config exits 0" test "$VC_RC" = "0"
 check "validate-config evidence captured" test -s "$EVIDENCE/validate-config.txt"
 echo "  validate finding: rc=$VC_RC $(tail -1 "$EVIDENCE/validate-config.txt" 2>/dev/null)"
+else
+  echo "SKIP (nvr-safe): vaapi-probe + shm-private connect + validate-config run"
+fi
 
 # --- M3: detector models staged (Task 1) ---
 check "openvino model staged" sh -c "ls /snap/frigate/current/opt/frigate/models/openvino/*.xml"
@@ -524,6 +756,17 @@ fi
 APIVER_STATUS=$(curl -so /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5000/api/version 2>/dev/null)
 check "webui: GET :5000/api/version → 200 (no auth headers)" test "$APIVER_STATUS" = "200"
 echo "  webui finding: /api/version HTTP $APIVER_STATUS without auth headers (/auth 202 viewer headers forwarded)"
+# M8 T1 fix round: fixture probe for nvr-safe — testclip is a HARNESS fixture camera (template
+# config); an operator-configured production host may run only real cameras. Probe the live
+# camera set via /stats, piped straight to jq (never persisted: /stats can embed camera cmdlines).
+# Default stays "yes" (assert) — if the API is unreachable the earlier "frigate API answers"
+# check has already failed the run, so nothing is masked. Full gate always asserts (template
+# config always carries testclip). Used by the vod check below and the gpu money check.
+TESTCLIP_FIXTURE=yes
+if [ "$NVR_SAFE" -eq 1 ]; then
+  curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
+    http://127.0.0.1:5001/stats 2>/dev/null | jq -e '.cameras | has("testclip")' >/dev/null 2>&1 || TESTCLIP_FIXTURE=""
+fi
 # 4. vod manifest check
 # URL shape (verified from Frigate source frigate/api/media.py line 853 + nginx-vod-module config):
 #   GET :5000/vod/{camera}/start/{start_ts}/end/{end_ts}/index.m3u8
@@ -538,6 +781,9 @@ echo "  webui finding: /api/version HTTP $APIVER_STATUS without auth headers (/a
 # start_time <= before, so every segment recorded AFTER boot is invisible to the bare route —
 # the poll saw [] for 90s while the DB held rows. Explicit after/before params (recomputed each
 # iteration) bypass the frozen defaults. M7/upstream: report; UI is immune (always sends params).
+if [ "$NVR_SAFE" -eq 1 ] && [ "$TESTCLIP_FIXTURE" != "yes" ]; then
+  echo "SKIP (nvr-safe): vod: GET :5000/vod/testclip/start/../end/../index.m3u8 → 200 + #EXTM3U — testclip fixture not in operator config"
+else
 VOD_START=""
 VOD_END=""
 for _vod_i in $(seq 1 18); do
@@ -561,6 +807,7 @@ if [ -n "$VOD_START" ] && [ -n "$VOD_END" ]; then
 else
     fail_ "vod: GET :5000/vod/testclip/start/../end/../index.m3u8 → 200 + #EXTM3U"
     echo "  vod finding: FAIL — no recordings in DB after 90s poll; check recording maintainer logs"
+fi
 fi
 # 5. go2rtc proxy check: GET :5000/live/webrtc/webrtc.html → 200
 # Nginx /live/webrtc/webrtc.html proxies to go2rtc :1984/webrtc.html (plain HTTP GET, no WebSocket).
@@ -665,7 +912,17 @@ echo "$CACHE_PEAK KiB peak" > "$EVIDENCE/cache-peak.txt"
 # GPU evidence via frigate's own stats (route: /stats, not /api/stats)
 curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
   http://127.0.0.1:5001/stats 2>/dev/null | jq 'del(.cpu_usages)' > "$EVIDENCE/frigate-stats.json" 2>/dev/null || true
-check "gpu: openvino detector reporting + camera pipeline alive" sh -c "jq -e '.detectors.ov.inference_speed != null and .cameras.testclip.ffmpeg_pid > 0' \"$EVIDENCE/frigate-stats.json\""
+# M8 T1 fix round: the pipeline half of this check reads the testclip fixture camera — fixture-
+# aware in nvr-safe (see TESTCLIP_FIXTURE probe at the vod check); full gate asserts as always.
+if [ "$NVR_SAFE" -eq 1 ] && [ "$TESTCLIP_FIXTURE" != "yes" ]; then
+  echo "SKIP (nvr-safe): gpu: openvino detector reporting + camera pipeline alive — testclip fixture not in operator config"
+elif [ "$RENDER_NODE" = yes ]; then
+  # M8 Task 6 hardware-aware guard: with no render node, auto-detect selects the cpu detector, so
+  # there is no .detectors.ov to report — SKIP. On capable hardware the ov assertion runs untouched.
+  check "gpu: openvino detector reporting + camera pipeline alive" sh -c "jq -e '.detectors.ov.inference_speed != null and .cameras.testclip.ffmpeg_pid > 0' \"$EVIDENCE/frigate-stats.json\""
+else
+  echo "SKIP (no capability): gpu: openvino detector reporting + camera pipeline alive — $RENDER_NODE_REASON (auto-detect selects cpu; no ov detector exists to report)"
+fi
 echo "  gpu finding: ov inference_speed=$(jq -r '.detectors.ov.inference_speed' "$EVIDENCE/frigate-stats.json" 2>/dev/null)ms"
 # Recordings on disk
 check "recordings: files under SNAP_COMMON" sh -c "find /var/snap/frigate/common/media/frigate/recordings -name '*.mp4' 2>/dev/null | head -1 | grep -q mp4"
@@ -721,6 +978,21 @@ if [ -n "$ADMIN_PW" ]; then
     echo "  auth finding: login=$LOGIN_STATUS cookie=frigate_token authed_get=$AUTHED_STATUS — JWT gate proven end-to-end"
     # Discard derived credentials (JWT in cookie jar + response headers — not the password)
     rm -f /tmp/m5-gate-cookie.jar /tmp/m5-gate-headers.txt
+elif [ "$NVR_SAFE" -eq 1 ]; then
+    # M8 B1: the bootstrap password is journal-logged ONLY on first boot after a purge (empty DB);
+    # nvr-safe never purges, so it can NEVER appear since $MARK on an established install — a FAIL
+    # here would be a deterministic false alarm, not a health signal. The login proof above stays
+    # armed whenever a password IS found; the 401-unauthenticated gate check still ran unconditionally.
+    echo "SKIP (nvr-safe): auth login money check (bootstrap password only logged on first boot after purge; unavailable by design without an install cycle)"
+elif [ "${1:-}" = "--skip-install" ]; then
+    # M8 Task 6 capability guard (extends the nvr-safe password-availability shape to the no-password
+    # --skip-install case): --skip-install performs no purge/install cycle, so the first-boot bootstrap
+    # password is never logged since $MARK — a FAIL here would be a deterministic false alarm, not a
+    # health signal. The full purge gate still hard-asserts the login money line (password IS logged
+    # there); the 401-unauthenticated gate check above ran unconditionally in every mode.
+    echo "SKIP (--skip-install): auth: POST https://127.0.0.1:8971/api/login → 200 — bootstrap password only logged on first boot after a purge; no install/purge cycle this run"
+    echo "SKIP (--skip-install): auth: login → frigate_token cookie set — bootstrap password unavailable without an install cycle"
+    echo "SKIP (--skip-install): auth: authed GET https://127.0.0.1:8971/api/version → 200 (M5 MONEY LINE) — bootstrap password unavailable without an install cycle"
 else
     fail_ "auth: POST https://127.0.0.1:8971/api/login → 200 (bootstrap password not in journal)"
     fail_ "auth: login → frigate_token cookie set"
@@ -742,6 +1014,7 @@ check "net: :1984 NOT all-interfaces (go2rtc control API/UI sealed)" sh -c "! ss
 ss -tln > "$EVIDENCE/ss-tln.txt" 2>/dev/null || true
 echo "  net finding: $(grep -E ':5000|:5001|:8971|:1984' "$EVIDENCE/ss-tln.txt" 2>/dev/null | sed 's/  */ /g' | tr '\n' '|')"
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # Money check 5: certsync — automated cert-swap proof (Task 3 manual → automated)
 # Swap the cert on disk; poll openssl s_client fingerprint; assert changed ≤90 s + journal reload line.
 OLD_FP=$(echo "" | openssl s_client -connect 127.0.0.1:8971 2>/dev/null | openssl x509 -fingerprint -noout 2>/dev/null || echo "failed")
@@ -784,10 +1057,21 @@ else
     echo "  certsync finding: ERROR — cert dir not found at $CERT_DIR"
     rm -f /tmp/m5-cs-key.pem /tmp/m5-cs-cert.pem
 fi
+else
+  echo "SKIP (nvr-safe): certsync live cert swap"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- M3: rollback machinery (Task 4) ---
 # Proof 1: refresh fires the pre-refresh hook -> backup exists.
-snap install --dangerous "$SNAP_FILE" >/dev/null 2>&1 || fail_ "rollback: reinstall-refresh failed"
+# M8 Task 6 (T7 footgun): reuse the PINNED artifact and refuse to reinstall if the file changed
+# identity since gate start (a stale build swapped in) — never silently install a different snap.
+SNAP_FILE_SHA_NOW=$(sha256sum "$SNAP_FILE" 2>/dev/null | awk '{print $1}')
+if [ -n "$SNAP_FILE_SHA" ] && [ "$SNAP_FILE_SHA_NOW" != "$SNAP_FILE_SHA" ]; then
+  fail_ "rollback: pinned artifact identity changed mid-gate ($SNAP_FILE: $SNAP_FILE_SHA -> $SNAP_FILE_SHA_NOW) — refusing to reinstall a swapped build"
+else
+  snap install --dangerous "$SNAP_FILE" >/dev/null 2>&1 || fail_ "rollback: reinstall-refresh failed"
+fi
 sleep 25   # services restart; frigate re-gates on go2rtc
 check "rollback: pre-refresh backup created" sh -c "ls /var/snap/frigate/common/db/backups/frigate-pre-*.db"
 check "rollback: hook logged" sh -c "grep -q 'pre-refresh: backed up' /var/snap/frigate/common/db/backups/hook.log"
@@ -798,7 +1082,11 @@ sleep 20
 check "rollback: downgrade detected + restored" sh -c "journalctl --since \"$MARK\" | grep -q 'frigate-run: restored'"
 check "rollback: incompatible db preserved" sh -c "ls /var/snap/frigate/common/db/frigate.db.incompatible-*"
 check "rollback: frigate healthy after restore" sh -c "snap services frigate.frigate | grep -q ' active'"
+else
+  echo "SKIP (nvr-safe): rollback reinstall + sidecar forge + restart"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- M6: Coral detector phase (spec §3.4) ---
 # Upstream v0.17.2 supports ONE model geometry across all object detectors
 # (config.py: per-detector model: is discarded — "users should not set model
@@ -946,7 +1234,11 @@ else
   echo "SKIP: coral phase: person event — no Coral USB attached"
   echo "SKIP: coral phase: OpenVINO default restored — no Coral USB attached"
 fi
+else
+  echo "SKIP (nvr-safe): Coral detector phase (config rewrite + restarts)"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # --- M7: snap-set surface + hardening (Task 5 — the M7 assertions) ---
 # Guarded on the M7 config surface: the configure hook is a Task-2 addition, so its presence in
 # the mounted snap distinguishes an M7 build from Task 1's remote artifact (built from kickoff
@@ -977,9 +1269,17 @@ if [ -f "/snap/$SNAP_NAME/current/meta/hooks/configure" ] || snap get $SNAP_NAME
   M7_OV=$(grep -c 'type: openvino' "$M7_CFG" 2>/dev/null); M7_OV=${M7_OV:-0}
   M7_CPU=$(grep -c 'type: cpu' "$M7_CFG" 2>/dev/null); M7_CPU=${M7_CPU:-0}
   M7_CORAL=$(grep -c 'type: edgetpu' "$M7_CFG" 2>/dev/null); M7_CORAL=${M7_CORAL:-0}
-  check "auto-detect: fresh render selected ov (renderD* present → type: openvino)" sh -c "[ '$M7_OV' -ge 1 ]"
-  check "auto-detect: the other two detector blocks were stripped (exactly one rendered)" sh -c "[ '$M7_CPU' -eq 0 ] && [ '$M7_CORAL' -eq 0 ]"
-  echo "  auto-detect finding: type:openvino=$M7_OV type:cpu=$M7_CPU type:edgetpu=$M7_CORAL (auto-detect → ov; cpu/coral marker regions deleted at render)"
+  # M8 Task 6 hardware-aware guard: auto-detect selects ov ONLY when a real Intel/AMD render node is
+  # present (the R3/M7 vendor guard); a headless VM (virtio-gpu) correctly renders type:cpu instead,
+  # so these two ov-specific asserts SKIP there. On capable hardware they run untouched.
+  if [ "$RENDER_NODE" = yes ]; then
+    check "auto-detect: fresh render selected ov (renderD* present → type: openvino)" sh -c "[ '$M7_OV' -ge 1 ]"
+    check "auto-detect: the other two detector blocks were stripped (exactly one rendered)" sh -c "[ '$M7_CPU' -eq 0 ] && [ '$M7_CORAL' -eq 0 ]"
+  else
+    echo "SKIP (no capability): auto-detect: fresh render selected ov (renderD* present → type: openvino) — $RENDER_NODE_REASON (auto-detect correctly selected cpu: type:openvino=$M7_OV type:cpu=$M7_CPU type:edgetpu=$M7_CORAL)"
+    echo "SKIP (no capability): auto-detect: the other two detector blocks were stripped (exactly one rendered) — $RENDER_NODE_REASON"
+  fi
+  echo "  auto-detect finding: type:openvino=$M7_OV type:cpu=$M7_CPU type:edgetpu=$M7_CORAL (render-node present=$RENDER_NODE → $([ "$RENDER_NODE" = yes ] && echo ov || echo cpu); non-selected marker regions deleted at render)"
 
   # (6) LITERAL-SAFE RENDERER — the shipped renderer is a python str.replace (frigate-run), so a
   # URL with sed-hostile bytes (| & \) must survive byte-exact. Proof on SCRATCH paths with a TEST
@@ -1168,7 +1468,11 @@ else
   echo "SKIP: m7 versioned-backup restore selection (0.17.2 over 99.0.0) — no M7 config surface"
   echo "SKIP: m7 logrotate >10 MB rotation — no M7 config surface"
 fi
+else
+  echo "SKIP (nvr-safe): M7 snap-set block (set/unset/cert-regen/backup-forge/logrotate seed)"
+fi
 
+if [ "$NVR_SAFE" -eq 0 ]; then
 # ===================== go2rtc config bridge + integration (PR#3) =============================
 # Proves: (1) the operator's config.yml go2rtc: section reaches go2rtc (the config bridge);
 # (2) the control API stays loopback-sealed after the merge (M5 seal); (3) frigate ITSELF can
@@ -1237,15 +1541,76 @@ PYEOF
 else
   echo "SKIP: bridge: config bridge proof — no operator config.yml or snap python (fresh/absent install)"
 fi
+else
+  echo "SKIP (nvr-safe): go2rtc bridge injection + whole-snap restarts"
+fi
 
 # (4) Fix 3 — the Web-UI /logs API no longer 500s. It reads /dev/shm/logs/<svc>/current;
-# frigate-run now creates them (nginx/current -> real error.log; frigate/go2rtc placeholders).
+# frigate-run creates them (nginx/current -> real error.log; M8: frigate/current is the tee sink,
+# go2rtc/current a symlink to $SNAP_DATA/go2rtc-logs/current — both carry real daemon stdout).
 # Route is /logs/{service} with NO /api prefix on the internal :5001 (M3 route discipline);
 # allow_any_authenticated() needs a Remote-User header. A 500 here is the undefined.length crash.
 BRIDGE_LOGS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/nginx 2>/dev/null)
 check "logs: /logs/nginx returns 200 (UI /logs page no longer crashes)" test "$BRIDGE_LOGS" = "200"
 echo "  logs finding: GET :5001/logs/nginx http=$BRIDGE_LOGS (was 500 pre-fix; s6-log paths satisfied)"
 
+# M8 Task 7: /logs full tee-parity. frigate-run and go2rtc-run now tee each daemon's stdout+stderr
+# into /dev/shm/logs/{frigate,go2rtc}/current (go2rtc via a $SNAP_DATA symlink — no shm-private plug)
+# using bash process substitution, so the previously-empty frigate/go2rtc tabs carry real output.
+# Same curl shape as the nginx check (Remote-User on :5001); bodies piped to grep -q ONLY — never
+# persisted to $EVIDENCE (daemon stdout can echo camera/producer URLs with credentials).
+# M8 Task 6 capability guard (version-skew, mirrors the other hardware-aware guards): these
+# tee-content checks assert real daemon stdout landed in the /logs sinks — which requires the
+# INSTALLED snap to carry the M8 Task 7 tee-parity wrappers. On a production host still running a
+# PRE-tee revision the sinks are empty placeholders, so probe the installed frigate-run for the tee
+# line (host-readable): has tee → assert as written; predates tee → SKIP (refresh pending). The full
+# gate always runs the fresh artifact (tee present → asserts); only a not-yet-refreshed host SKIPs.
+if grep -q 'tee -a /dev/shm/logs/frigate/current' "/snap/$SNAP_NAME/current/bin/frigate-run" 2>/dev/null; then
+  check "m8: /logs frigate tab has real content (process-sub tee wrote daemon stdout)" sh -c \
+    "curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/frigate 2>/dev/null | grep -q 'frigate'"
+  check "m8: /logs go2rtc tab has real content (tee -> \$SNAP_DATA symlink)" sh -c \
+    "curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/go2rtc 2>/dev/null | grep -qiE 'go2rtc|\[api\]|listen'"
+else
+  echo "SKIP (version-skew): /logs frigate content — installed snap predates tee-parity (refresh pending)"
+  echo "SKIP (version-skew): /logs go2rtc content — installed snap predates tee-parity (refresh pending)"
+fi
+# Passthrough: the tee's own stdout inherits the journal socket, so journald must STILL receive
+# frigate lines after the change. grep -q . (non-empty) only — no journal excerpt persisted.
+check "m8: journald still receives frigate lines (tee passthrough)" sh -c \
+  "journalctl -u snap.$SNAP_NAME.frigate.service --since \"$MARK\" | grep -q ."
+
+# M8 Task 7 — go2rtc crash-propagation proof (FULL-GATE ONLY: kills the go2rtc daemon, which
+# --nvr-safe must never do to the production NVR). The tee is a bash PROCESS SUBSTITUTION, not a
+# `daemon | tee` pipe, so the go2rtc binary stays the unit's MainPID: a kill -9 is seen by systemd
+# as a unit failure and the on-failure restart-condition relaunches it. A pipe would make tee/the
+# shell the MainPID and swallow the daemon's exit — so this proves exit-code/signal propagation
+# survived the tee. journalctl grepped with -q ONLY (no excerpt persisted).
+if [ "${NVR_SAFE:-0}" -eq 0 ]; then
+  M8_G2_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
+  M8_G2_PID=$(systemctl show snap.$SNAP_NAME.go2rtc.service -p MainPID --value 2>/dev/null)
+  if [ -n "$M8_G2_PID" ] && [ "$M8_G2_PID" != "0" ]; then
+    kill -9 "$M8_G2_PID" 2>/dev/null || true
+    _b=0; M8_G2_UP=""; M8_G2_NEWPID=""
+    while [ "$_b" -lt 30 ]; do
+      if systemctl is-active snap.$SNAP_NAME.go2rtc.service >/dev/null 2>&1; then
+        M8_G2_NEWPID=$(systemctl show snap.$SNAP_NAME.go2rtc.service -p MainPID --value 2>/dev/null)
+        [ -n "$M8_G2_NEWPID" ] && [ "$M8_G2_NEWPID" != "0" ] && [ "$M8_G2_NEWPID" != "$M8_G2_PID" ] && { M8_G2_UP=yes; break; }
+      fi
+      sleep 2; _b=$((_b+2))
+    done
+    check "m8: go2rtc relaunched after kill -9 (on-failure survived process-sub tee, ${_b}s)" \
+      test "$M8_G2_UP" = yes
+    check "m8: journald shows go2rtc kill+restart (exit-code propagation)" sh -c \
+      "journalctl -u snap.$SNAP_NAME.go2rtc.service --since \"$M8_G2_MARK\" | grep -qiE 'killed|status=9|signal|scheduled restart|main process exited'"
+    echo "  m8 finding: go2rtc MainPID $M8_G2_PID -> ${M8_G2_NEWPID:-none} after SIGKILL (${_b}s; on-failure relaunch proves the process-sub tee did not intercept the daemon's exit)"
+  else
+    fail_ "m8: go2rtc MainPID resolvable for crash-propagation proof"
+  fi
+else
+  echo "SKIP (nvr-safe): m8 go2rtc crash-propagation kill -9 (would kill the production go2rtc)"
+fi
+
+if [ "$NVR_SAFE" -eq 0 ]; then
 # (5) Fix 4 — the Web-UI Restart button. restart_frigate() SIGINTs frigate (clean exit, pid1 is
 # not s6-svscan); restart-condition: always brings it back. POST /restart (require_role admin ->
 # Remote-Role header) on :5001, then bound-wait for recovery. Placed AFTER the bridge proof so it
@@ -1261,6 +1626,83 @@ check "restart: frigate.frigate active again after UI restart (restart-condition
 check "restart: frigate API answers again after UI restart (:5001/version)" \
   sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1"
 echo "  restart finding: recovery after ${_b}s (clean-exit self-restart proven; on-failure would stay DOWN)"
+else
+  echo "SKIP (nvr-safe): UI-restart POST /restart"
+fi
+
+# ===================== M8: semantic search (R4 — sqlite-vec loadable extension) =============
+# Proves the R4 fix: with --enable-loadable-sqlite-extensions in the python build and vec0.so
+# staged at /usr/local/lib (layout-resolved), enabling semantic_search lets frigate load the
+# sqlite-vec extension via frigate/db/sqlitevecq.py's hardcoded conn.load_extension('/usr/local/lib/vec0')
+# WITHOUT the R4 signature ("enable_load_extension" AttributeError / "no such module: vec"). DESTRUCTIVE
+# (config mutation + frigate restart) — gated out of --nvr-safe. Mirrors the bridge block:
+# backup config -> inject semantic_search.enabled -> restart frigate -> assert -> restore -> restart.
+# Journal is grepped with -q ONLY (no excerpts persisted — frigate logs may echo config values).
+if [ "$NVR_SAFE" -eq 0 ]; then
+M8_SEM_CFG="/var/snap/$SNAP_NAME/current/config/config.yml"
+M8_SEM_PY="/snap/$SNAP_NAME/current/usr/bin/python3.11"
+if [ -f "$M8_SEM_CFG" ] && [ -x "$M8_SEM_PY" ]; then
+  # Backup (trap-guarded via M8_SEM_CFG_BAK) then merge semantic_search.enabled: true into the
+  # operator's config, preserving their cameras/keys — yaml-aware, never prints config, writes 0600.
+  M8_SEM_CFG_BAK=$(mktemp); cp -p "$M8_SEM_CFG" "$M8_SEM_CFG_BAK"
+  "$M8_SEM_PY" - "$M8_SEM_CFG" <<'PYEOF'
+import os, sys, yaml
+p = sys.argv[1]
+with open(p) as f:
+    cfg = yaml.safe_load(f) or {}
+if not isinstance(cfg, dict):
+    cfg = {}
+ss = cfg.get("semantic_search")
+if not isinstance(ss, dict):
+    ss = {}
+ss["enabled"] = True
+cfg["semantic_search"] = ss
+os.umask(0o077)
+with open(p, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False)
+PYEOF
+  # Mark the journal window at the restart instant so the vec-load grep only sees this enablement.
+  M8_SEM_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
+  snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  # Bounded wait for frigate API. The sqlite-vec extension loads at DB-connect during app init
+  # (app.py: load_vec_extension=semantic_search.enabled), BEFORE the API answers — so a healthy
+  # :5001/version implies the extension loaded (a missing-flag build would crash-loop here instead).
+  _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
+  echo "  m8 finding: frigate API answered ${_b}s after restart with semantic_search enabled"
+  # (1) R4 DEFECT SIGNATURE (load-bearing): NO sqlite-vec extension-load error in the window.
+  #     Independent of the first-enable Jina/CLIP model download (that runs later, in the embeddings
+  #     maintainer) — the vec load is at DB connect. grep -q ONLY; no journal excerpt persisted.
+  check "m8: semantic search up (no sqlite-vec load error)" sh -c \
+    "! journalctl -u snap.$SNAP_NAME.frigate.service --since \"$M8_SEM_MARK\" | grep -qiE 'enable_load_extension|sqlite.*extension.*(error|not authorized)|no such module: vec'"
+  # (2) The embeddings maintainer came up (semantic_search runtime started). M8 Task 6 env-aware
+  #     guard (per the Task 2 reviewer deferral): the load-error-ABSENCE assertion above stays HARD
+  #     (that is the R4 signature). The embeddings-STARTED line, however, is gated on the first-enable
+  #     Jina/CLIP model download, which is network-gated and needs a detector — in a headless/offline
+  #     VM it may not complete within the bound. So poll for it up to ~60s; PASS if observed, else SKIP
+  #     with the model-download reason (never a FAIL on a network/model-gated environment).
+  M8_EMB=""
+  for _e in $(seq 1 12); do
+    journalctl -u snap.$SNAP_NAME.frigate.service --since "$M8_SEM_MARK" 2>/dev/null | grep -qiE 'embeddings' && { M8_EMB=yes; break; }
+    sleep 5
+  done
+  if [ "$M8_EMB" = yes ]; then
+    pass_ "m8: embeddings maintainer started"
+  else
+    echo "SKIP (no capability): m8: embeddings maintainer started — embeddings line not observed within ~60s bound; first-enable Jina/CLIP model download is network-gated (and detector-dependent) and may not have completed in this environment (R4 vec-load signature above stays hard-asserted)"
+  fi
+  echo "  m8 finding: R4 fix exercised — vec0 loaded via conn.load_extension('/usr/local/lib/vec0'); first enable downloads Jina CLIP v1 models to \$SNAP_DATA/config/model_cache (network-gated, sizes not asserted)"
+  # Restore the operator's pristine config (byte-exact) and restart so semantic_search drops.
+  if cp -p "$M8_SEM_CFG_BAK" "$M8_SEM_CFG"; then rm -f "$M8_SEM_CFG_BAK"; M8_SEM_CFG_BAK=""; fi
+  snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
+  check "m8: frigate healthy again after semantic_search restore (:5001/version, ${_b}s)" \
+    sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1"
+else
+  echo "SKIP: m8 semantic search — no operator config.yml or snap python (fresh/absent install)"
+fi
+else
+  echo "SKIP (nvr-safe): m8 semantic search (config mutation + restart)"
+fi
 
 # Operator config survived the whole gate byte-identical (purge stash + bridge mutate/restore).
 if [ -n "$OPERATOR_CFG_SHA" ]; then
@@ -1276,10 +1718,12 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
   > "$EVIDENCE/denials.txt" || true
 # Known expected denials (FINDINGS, not bugs) — enumerated EXACTLY; any new denial pattern must
 # fail the run and be triaged before being added here:
-#   psm_        - svc-a: unnamespaced POSIX shm (Task 3 finding)
+#   psm_        - imports-probe: unnamespaced POSIX shm denial (M0 Task 3 finding; re-homed M8 Task 5)
 #   name="/config/ - layout probe: /config not in layout (Task 5 finding)
-#   operation="create".*class="net".*comm="python3 - svc-c: tensorflow/openvino python3 socket
-#                 creation at import time (inet/inet6, telemetry) → needs 'network' interface
+#   operation="create".*class="net".*comm="python3 - tensorflow/openvino python3 socket creation
+#                 at import time (inet/inet6, telemetry). comm-bound + profile-agnostic; the
+#                 imports-probe app now holds the 'network' plug so its own imports run clean —
+#                 arm retained for any other python3 net-create denial.
 #   nr_hugepages - openvino reads /proc/sys/vm/nr_hugepages (hugepage check)
 #   mountinfo    - openvino reads /proc/<pid>/mountinfo
 #   ca-certificates|host\.conf|stub-resolv|name="/etc/hosts" - network libs read DNS/TLS config
@@ -1292,7 +1736,17 @@ journalctl -k --since "$MARK" | grep -E "apparmor=\"DENIED\".*snap\.$SNAP_NAME" 
 #   (1a6e) state. Non-blocking: same mechanism as the coral-probe sibling arm.
 #   Arm (PINNED profile+comm+capname): frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"
 # Evidence (journal 2026-07-10 03:45:53): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.frigate" pid=2565495 comm="frigate.detecto" capability=12  capname="net_admin"
-UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|svc-c.*name="/usr(/local)?/share/fonts/|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|svc-c.*name="/dev/shm/sem\.|svc-c.*name="/usr/bin/lscpu"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"' "$EVIDENCE/denials.txt" || true)
+# FINDING (M8 T10 remote-parity gate): frigate.frigate execs the snap's staged lscpu (py-cpuinfo
+#   hardware sniff inside the daemon) and lscpu reads /sys/kernel/cpu_byteorder — denied, advisory,
+#   non-blocking (lscpu tolerates the miss; all functional asserts passed in the same run). First
+#   observed on the Launchpad rev-4 artifact gate; timing/state-dependent (embeddings warm-start
+#   reached the cpuinfo path — models were already cached from a prior attempt). Same lscpu binary
+#   already has an exec arm for the imports-probe app (imports-probe.*name="/usr/bin/lscpu"); this
+#   is the daemon-profile file-read sibling.
+#   Arm (PINNED profile+path+comm; file-open audit lines order name= BEFORE comm=):
+#   frigate\.frigate.*name="/sys/kernel/cpu_byteorder".*comm="lscpu"
+# Evidence (journal 2026-07-14 23:12:23 m8-gate): apparmor="DENIED" operation="open" class="file" profile="snap.frigate.frigate" name="/sys/kernel/cpu_byteorder" pid=28168 comm="lscpu" requested_mask="r" denied_mask="r" fsuid=0 ouid=0
+UNEXPECTED=$(grep -cvE 'psm_|name="/config/|operation="create".*class="net".*comm="python3|nr_hugepages|mountinfo|name="/proc/[^"]*/mounts"|ca-certificates|host\.conf|stub-resolv|name="/etc/hosts"|gpu-probe.*capname="sys_admin"|gpu-probe.*capname="perfmon"|name="[^"]*hugepages[/"]|name="/sys/devices/system/node/online"|name="/sys/bus/dax/|coral-probe.*capname="net_admin"|frigate\.frigate.*comm="frigate\.detecto".*capname="net_admin"|npu-probe.*capname="sys_admin"|gpu-probe.*name="/sys/devices/virtual/dmi/id/product_|vaapi-probe.*capname="sys_admin"|vaapi-probe.*capname="perfmon"|validate-config.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/[^"]*cpu\.max"|frigate\.frigate.*name="/sys/fs/cgroup/cgroup\.controllers"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="frigate\.recordi"|operation="ptrace".*profile="snap\.frigate\.frigate".*comm="python3\.11"|frigate\.frigate.*name="/proc/[^"]*/cmdline"|frigate\.frigate.*capname="sys_admin"|frigate\.frigate.*capname="perfmon"|frigate\.frigate.*name="/sys/devices/virtual/dmi/id/product_|frigate\.frigate.*comm="frigate\.recordi".*capname="sys_ptrace"|nginx.*capname="setgid"|nginx.*capname="setuid"|comm="frigate-run".*capname="dac_override"|comm="go2rtc-run".*capname="dac_override"|imports-probe.*name="/dev/shm/sem\.|imports-probe.*name="/usr/bin/lscpu"|imports-probe.*name="[^"]*share/fonts|frigate\.frigate.*name="/sys/kernel/cpu_byteorder".*comm="lscpu"' "$EVIDENCE/denials.txt" || true)
 echo "== denials: $(wc -l < "$EVIDENCE/denials.txt") total, $UNEXPECTED unexpected =="
 # FINDING (Task 8): tensorflow/openvino imports trigger network-related denials (inet/inet6 socket
 # creation, DNS resolution files, TLS CA certs, hugepages, mountinfo). Production snap will need:
@@ -1329,21 +1783,32 @@ echo "  npu-probe finding: probe RETIRED from shipped snap (M7 final review; cus
 #   vaapi-probe.*capname="perfmon"   - ffmpeg VAAPI queries performance counters (CAP_PERFMON);
 #                 denied but non-blocking. Production snap does NOT need these caps for VAAPI decode.
 echo "  vaapi-probe finding: CAP_SYS_ADMIN + CAP_PERFMON denials at VAAPI DRM init (advisory, non-blocking) — hw decode rc=0 confirmed"
-# FINDING (Task 3): matplotlib font-scan denials — matplotlib (transitive dep of norfair→filterpy)
-#   enumerates system font directories at import time. Profile: snap.frigate.svc-c (imports probe).
-#   Denied paths: /usr/share/fonts/ and /usr/local/share/fonts/ (comm="python3.11", operation="open").
-#   Arm is profile+name-bound: svc-c.*name="/usr(/local)?/share/fonts/ — matches both observed paths.
-#   Non-blocking: norfair import succeeds; matplotlib works without font access.
-#   Production snap: add AppArmor font-dir read rules OR exclude matplotlib from site-packages.
-echo "  wheels finding: matplotlib font-dir scan denials (/usr/share/fonts/, /usr/local/share/fonts/) — benign, non-blocking (Task 3 finding)"
-# FINDING (Task 5): validate-config / Task-5 wheel additions — three new benign patterns:
-#   svc-c.*name="/dev/shm/sem\.  - joblib (new transitive dep: librosa->scikit-learn), imported
-#                 during the tensorflow/keras import in the imports probe, creates a TEST semaphore
-#                 at import (glibc sem_open mknods random /dev/shm/sem.XXXXXX). Denied -> joblib
-#                 warns "[Errno 13] ... joblib will operate in serial mode" and falls back; all
-#                 import checks PASS. (validate-config app is immune: shm-private private /dev/shm.)
-#   svc-c.*name="/usr/bin/lscpu" - joblib/loky physical-core detection execs lscpu in the same
-#                 import window; denied, graceful core-count fallback, non-blocking.
+# RE-ADDED ARM (M8 Task 6): matplotlib cold-import filesystem scan by imports-probe — matplotlib
+#   (transitive dep norfair→filterpy) enumerates /usr/share/fonts (+ /usr/local/share/fonts) at first
+#   import (operation="open" on a strict snap without a desktop interface → EACCES, matplotlib falls back
+#   to bundled fonts — benign). Task 5 RETIRED this arm for lack of a captured journal QUOTE; per its own
+#   escape hatch ("re-add WITH a real quote if captured"), the Task 6 VM gate + a deliberate cold-cache
+#   reproduction CAPTURED it, so the arm is RESTORED, PINNED to imports-probe + share/fonts. Its SIBLING —
+#   the same cold import opendir()ing the process CWD (name="<checkout>/") — was the sole unexpected denial
+#   in the first Task 6 gate; that one is eliminated at SOURCE by running imports-probe from / (see the
+#   imports-probe run above), so no CWD-path arm is added (a checkout-path arm would be non-portable).
+# Evidence (VM cold-cache repro, 2026-07-13): apparmor="DENIED" operation="open" class="file" profile="snap.frigate.imports-probe" name="/usr/share/fonts/" comm="python3.11" requested_mask="r" denied_mask="r"
+echo "  wheels finding: matplotlib font-scan arm RE-ADDED (M8 Task 6; captured with a journal quote in the VM gate + cold-cache repro) — pinned to imports-probe + share/fonts; the CWD-read sibling is eliminated at source (imports-probe now runs from /), not allowlisted"
+# FINDING (Task 5): validate-config / Task-5 wheel additions — remaining benign patterns:
+#   RE-ADDED ARMS (M8 Task 7 gate): the svc-c-era joblib denials — /dev/shm/sem.XXXXXX (glibc sem_open at
+#                 the tensorflow/keras import → "joblib will operate in serial mode") and /usr/bin/lscpu
+#                 (joblib/loky physical-core detection). Task 5 re-pointed them to imports-probe then DELETED
+#                 the arms for lack of a captured journal QUOTE (0 imports-probe denials that VM run). The
+#                 Task 7 --skip-install gate DID capture both (imports-probe ran in the wheels section and
+#                 the kernel-audit window caught them this time — capture is timing-dependent, cf. the
+#                 font-scan gap above). Per the authors' own "re-add WITH a journal quote if captured"
+#                 instruction + policy L1484-1485, they are RESTORED here, PINNED to imports-probe + name.
+#                 Benign: sem_open/lscpu are import-time joblib probes; imports-probe still runs (diagnostic
+#                 exits rc-clean). Unrelated to the M8 Task 7 /logs tee change. validate-config stays immune
+#                 anyway (shm-private private /dev/shm). Arms: imports-probe.*name="/dev/shm/sem\. and
+#                 imports-probe.*name="/usr/bin/lscpu".
+# Evidence (journal 2026-07-12, Task 7 gate): apparmor="DENIED" operation="mknod" class="file" profile="snap.frigate.imports-probe" name="/dev/shm/sem.NmSNLV" comm="python3.11" requested_mask="c" denied_mask="c" fsuid=0 ouid=0
+# Evidence (journal 2026-07-12, Task 7 gate): apparmor="DENIED" operation="exec" class="file" profile="snap.frigate.imports-probe" name="/usr/bin/lscpu" comm="python3.11" requested_mask="x" denied_mask="x" fsuid=0 ouid=0
 #   validate-config.*cpu\.max    - the full frigate.app import chain reads its own cgroup
 #                 /sys/fs/cgroup/.../cpu.max + parent slice (cgroup v2 CPU quota probing; fires in
 #                 both the main and forkserver-preload interpreters). EACCES tolerated - validation
@@ -1351,7 +1816,7 @@ echo "  wheels finding: matplotlib font-dir scan denials (/usr/share/fonts/, /us
 #                 (numpy/cv2/ort/tf/openvino/sherpa/transformers/pandas/librosa each tested clean).
 #   product_(name|version)       - gpu-probe DMI arm widened: OpenVINO reads product_version next
 #                 to product_name (2026-07-04 run; same OpenVINO system-info probing, varies run-to-run).
-echo "  validate finding: joblib sem/lscpu import probes (svc-c, serial-mode fallback) + frigate chain cgroup cpu.max reads (validate-config) — benign, non-blocking (Task 5 finding)"
+echo "  validate finding: joblib sem/lscpu arms RE-ADDED (M8 Task 7 gate captured both with journal quotes; benign import-time probes, unrelated to /logs tee) + frigate chain cgroup cpu.max reads (validate-config) — benign, non-blocking"
 # FINDING (Task 3): frigate daemon cgroup reads — multiple cgroup v2 paths read by the daemon
 #   and its subprocesses (comm="python3.11" main process, comm="frigate.detecto" OpenVINO detector,
 #   etc.). Two patterns observed:
@@ -1365,7 +1830,7 @@ echo "  frigate finding: frigate.frigate cgroup reads (cpu.max per-slice + top-l
 # FINDING (Task 3): frigate.frigate ptrace + /proc/<pid>/cmdline denials — psutil.process_iter()
 #   in the recording subprocess (comm="frigate.recordi") scans ALL processes to find spawned ffmpeg
 #   instances. Ptrace denied against every process peer: unconfined system processes AND other snap
-#   profiles (snap.frigate.go2rtc, snap.frigate.svc-a/b/c, snap.frigate.coral-probe,
+#   profiles (snap.frigate.go2rtc, snap.frigate.imports-probe, snap.frigate.coral-probe,
 #   snap.snapcraft.snapcraft etc. — whatever else runs on the host during the capture window).
 #   Same root cause as the unconfined case; psutil.process_iter() sends a ptrace read to every PID.
 #   Benign: recording degrades gracefully; ffmpeg is tracked via its own subprocess handle.
@@ -1420,6 +1885,23 @@ echo "  nginx finding: nginx worker CAP_SETGID denial at startup (worker privile
 #   non-blocking — nginx serves throughout the same run. Arm (profile+capname): nginx.*capname="setuid".
 # Evidence (journal 2026-07-06 02:54:22): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.nginx" pid=2909768 comm="nginx" capability=7  capname="setuid"
 echo "  nginx finding: nginx CAP_SETUID denial (setuid sibling of the setgid arm, worker/cache-manager privilege setup; benign, non-blocking) — M4 Task 4"
+# FINDING (M8 Task 7): frigate-run / go2rtc-run CAP_DAC_OVERRIDE capability denials — NEW with the
+#   sh -> bash shebang switch that the /logs tee-parity needed (process substitution is a bash
+#   feature). bash's builtin file-redirection path (the tee-sink truncation `: > current`, the
+#   go2rtc-symlink/mkdir, and the process-substitution setup on the daemon exec) issues a
+#   capable(CAP_DAC_OVERRIDE) probe during path resolution that dash never made — so gate runs on
+#   the pre-M8 (sh) wrapper showed zero of these. AppArmor DENIES the capability: this is the SECURE
+#   outcome — the wrapper is NOT granted DAC bypass. Every file op still SUCCEEDS via normal root DAC
+#   (proven every run: /dev/shm/logs/frigate/current + $SNAP_DATA/go2rtc-logs/current carry real
+#   daemon output, /logs tabs populate, logrotate copytruncate works, all daemons stay active across
+#   restarts/reinstalls). Advisory / non-blocking — same benign class as the nginx setgid/setuid and
+#   frigate sys_admin/perfmon capability arms above; surfaces only in the restart/reinstall-heavy gate
+#   phases, not on a plain single-service restart. Arms (PINNED comm+capname):
+#   comm="frigate-run".*capname="dac_override" and comm="go2rtc-run".*capname="dac_override".
+# Evidence (journal 2026-07-12 22:20:51): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.frigate" comm="frigate-run" capability=1  capname="dac_override"
+# Evidence (journal 2026-07-12 22:23:24): apparmor="DENIED" operation="capable" class="cap" profile="snap.frigate.go2rtc" comm="go2rtc-run" capability=1  capname="dac_override"
+echo "  m8 finding: frigate-run/go2rtc-run CAP_DAC_OVERRIDE denials — advisory bash-redirection capability probe (sh->bash for tee-parity), denied = confinement holds, file ops succeed via root DAC, non-blocking"
+echo "  m8 finding: daemon lscpu /sys/kernel/cpu_byteorder read denial (py-cpuinfo hardware sniff; advisory, non-blocking) — file-read sibling of the imports-probe lscpu exec arm (M8 T10 remote-parity gate)"
 if [ "$UNEXPECTED" -eq 0 ]; then pass_ "no unexpected AppArmor denials"; else fail_ "unexpected denials"; cat "$EVIDENCE/denials.txt"; fi
 
 cp -r "$RESULTS" "$EVIDENCE/" 2>/dev/null || true
@@ -1439,6 +1921,22 @@ fi
 # no colon, so redacted evidence passes while any unredacted credential fails the run.
 check "evidence: no URL credentials (user:pass@) anywhere in evidence files" \
   sh -c "! grep -rqEI '(rtsps?|rtmp|https?)://[^@/[:space:]]+:[^@/[:space:]]+@' \"$EVIDENCE\""
+
+# Harmlessness proof (M8 B1): re-hash config.yml + TLS cert + service start-timestamps and
+# assert byte/timestamp identity with the pre-gate baseline — the whole point of --nvr-safe.
+# NOTE (deliberate deviation from spec wording): the spec said "config.yml/DB checksums
+# identical"; a live NVR's DB is written continuously by frigate itself, so a DB checksum can
+# never hold. The honest proof is config-sha + cert-sha + zero service restarts + the gate's
+# only DB access being the existing read-only sqlite3 SELECT (money test).
+if [ "$NVR_SAFE" -eq 1 ]; then
+  NVRSAFE_CFG_SHA_POST=$(sha256sum "$NVRSAFE_CFG" 2>/dev/null | awk '{print $1}')
+  NVRSAFE_CERT_SHA_POST=$(sha256sum "/var/snap/$SNAP_NAME/current/letsencrypt/live/frigate/fullchain.pem" 2>/dev/null | awk '{print $1}')
+  NVRSAFE_STAMPS_POST=$(for s in go2rtc frigate nginx certsync; do
+    systemctl show "snap.$SNAP_NAME.$s.service" -p ActiveEnterTimestamp --value; done)
+  check "nvr-safe: config.yml untouched by gate" sh -c "[ '$NVRSAFE_CFG_SHA_PRE' = '$NVRSAFE_CFG_SHA_POST' ]"
+  check "nvr-safe: TLS cert untouched by gate" sh -c "[ '$NVRSAFE_CERT_SHA_PRE' = '$NVRSAFE_CERT_SHA_POST' ]"
+  check "nvr-safe: no service restarted by gate" sh -c "[ '$NVRSAFE_STAMPS_PRE' = '$NVRSAFE_STAMPS_POST' ]"
+fi
 
 echo
 [ "$FAIL" -eq 0 ] && echo "SPIKE SMOKE: ALL PASS" || echo "SPIKE SMOKE: FAILURES"

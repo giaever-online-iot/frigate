@@ -165,7 +165,14 @@ cameras:
             - detect
     detect:
       enabled: true
+      fps: 5
 ```
+
+Detection runs inference on every frame of the detect stream, and most
+cameras deliver it at their native 20–30 fps — left unset, that's pure
+wasted inference. `fps: 5` above caps the detect stream at Frigate's
+recommended detection rate. Recordings are unaffected: the `record` role
+keeps decoding the full stream at its native rate regardless.
 
 Then apply with `sudo snap restart frigate` (whole snap — see above). The
 snap reads your `go2rtc:` block straight out of `config.yml`, exactly as
@@ -213,6 +220,31 @@ Two things worth knowing before you rely on this setup long-term:
   `snap set`; if you turn TLS off, set `cookie_secure: false` there too or
   the login cookie won't be sent over plain HTTP.
 
+### Semantic search
+
+Frigate can index past events for natural-language search using an
+embeddings model. Enable it by adding a `semantic_search:` block to
+`config.yml`:
+
+```yaml
+semantic_search:
+  enabled: true
+```
+
+then restart the whole snap (`sudo snap restart frigate` — see above). The
+first time you enable it, Frigate downloads its embedding models (Jina
+CLIP v1, plus the face and OCR models) — the download
+needs internet access and can take several minutes depending on your
+connection. Once it finishes, Frigate indexes your existing events in the
+background. The models land in
+`/var/snap/frigate/current/config/model_cache`, alongside your config, and
+persist across snap refreshes — the download happens once, not on every
+update.
+
+If Frigate logs a `sqlite-vec` load error after you enable this, your
+installed snap build predates sqlite extension support — refresh to the
+latest revision (`sudo snap refresh frigate`) and restart.
+
 ## Configuration (`snap set`)
 
 The snap exposes a small set of configuration keys via `snap set`/`snap
@@ -253,12 +285,16 @@ directly, useful when troubleshooting a detector or accelerator:
 - `frigate.mdns-probe` — checks mDNS multicast reachability.
 - `frigate.validate-config` — validates `config.yml` the same way Frigate
   itself does at startup, without starting the full daemon.
+- `frigate.imports-probe` — checks that every bundled Python module (numpy,
+  OpenVINO, TensorFlow, the sqlite-vec search extension, …) imports cleanly
+  and re-checks shared-memory behaviour under confinement. Handy when a
+  detector fails to start and you want to rule out a broken dependency.
 
 Run any of them directly, e.g. `sudo snap run frigate.gpu-probe`.
 
-The web UI's **Logs** page shows nginx logs in full; the Frigate and go2rtc
-tabs currently render empty (full in-UI log capture for those two is pending
-a later release). The authoritative logs are always available from the host:
+The web UI's **Logs** page shows live output on all three tabs — nginx from its
+error log, and Frigate and go2rtc from the snap's log tee. The authoritative
+logs are always available from the host:
 
 ```
 sudo snap logs -f frigate.frigate

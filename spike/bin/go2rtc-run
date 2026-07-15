@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Generate go2rtc's config from config.yml on EVERY start, then exec go2rtc.
 #
 # Upstream Frigate GENERATES go2rtc's config from config.yml (create_config.py); the snap
@@ -19,4 +19,15 @@ umask 077  # defence in depth; the generator also sets 077 before writing
     "$SNAP_DATA/config/config.yml" \
     "$SNAP" \
     "$SNAP_DATA/go2rtc.yaml"
-exec "$SNAP/usr/local/go2rtc/bin/go2rtc" -config "$SNAP_DATA/go2rtc.yaml"
+# M8 /logs tee: go2rtc has NO shm-private plug, so it CANNOT write /dev/shm/logs itself
+# (AppArmor-DENIED — verified M8). It tees to its own writable $SNAP_DATA/go2rtc-logs/current
+# instead; frigate-run (the shm-private holder, and the app that starts AFTER go2rtc) symlinks
+# /dev/shm/logs/go2rtc/current -> this file so the Web-UI /logs go2rtc tab reads real output.
+# Truncated fresh per go2rtc start (bounds growth between logrotate runs). Process substitution
+# (NOT a pipe): go2rtc stays the unit's main process so its exit code/signals propagate untouched
+# — the on-failure restart-condition survives — and tee's stdout inherits the journal socket so
+# journald still gets everything. Secret note: go2rtc's stdout can echo producer URLs with
+# credentials on warnings; these land only in the snap's private $SNAP_DATA (same exposure class
+# as journald), acceptable — the generator above still never prints config contents.
+mkdir -p "$SNAP_DATA/go2rtc-logs" && : > "$SNAP_DATA/go2rtc-logs/current"
+exec "$SNAP/usr/local/go2rtc/bin/go2rtc" -config "$SNAP_DATA/go2rtc.yaml" > >(exec tee -a "$SNAP_DATA/go2rtc-logs/current") 2>&1
