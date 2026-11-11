@@ -84,6 +84,9 @@ fail_() { echo "FAIL: $1"; FAIL=1; }
 # Note: check() always returns 0; failures accumulate in $FAIL. Do not use in && chains or if-conditions.
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass_ "$d"; else fail_ "$d"; fi; }
 jqr()   { jq -r "$2" "$RESULTS/$1.json" 2>/dev/null; }
+# W-3: /logs go2rtc predicate (cwd is the repo root after the cd above).
+# shellcheck source=tests/lib-go2rtc-logs.sh
+. tests/lib-go2rtc-logs.sh
 # M8 Task 6: hardware/env capability probe for the HARDWARE-AWARE full gate. Each hardware- or
 # environment-dependent assertion runs UNTOUCHED when its capability is present (host full gates lose
 # NO coverage) and SKIPs with an explicit reason NAMING the missing capability when absent (headless
@@ -1568,8 +1571,10 @@ echo "  logs finding: GET :5001/logs/nginx http=$BRIDGE_LOGS (was 500 pre-fix; s
 if grep -q 'tee -a /dev/shm/logs/frigate/current' "/snap/$SNAP_NAME/current/bin/frigate-run" 2>/dev/null; then
   check "m8: /logs frigate tab has real content (process-sub tee wrote daemon stdout)" sh -c \
     "curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/frigate 2>/dev/null | grep -q 'frigate'"
-  check "m8: /logs go2rtc tab has real content (tee -> \$SNAP_DATA symlink)" sh -c \
-    "curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/go2rtc 2>/dev/null | grep -qiE 'go2rtc|\[api\]|listen'"
+  # W-3 (M8 F1): assert HTTP 200 + JSON lines in go2rtc's line SHAPE (time + level + module), not
+  # startup words — a long-running host's bounded log is all "WRN [rtsp]" with the banner rotated
+  # out. Predicate + its mutation-tested fixtures: tests/lib-go2rtc-logs{,.test}.sh.
+  check "m8: /logs go2rtc tab has real content (tee -> \$SNAP_DATA symlink)" go2rtc_logs_has_content
 else
   echo "SKIP (version-skew): /logs frigate content — installed snap predates tee-parity (refresh pending)"
   echo "SKIP (version-skew): /logs go2rtc content — installed snap predates tee-parity (refresh pending)"
