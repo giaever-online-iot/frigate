@@ -61,6 +61,15 @@ printf '%s' '{"success": false, "message": "go2rtc log not ready"}' >"$T/err200w
   done
   printf ']}'
 } >"$T/flooded"
+# Host-sized flood (M8 F1: 67,458 lines / 9.2 MB). Under `set -o pipefail` an early-exiting
+# `grep -q` SIGPIPEs the upstream writer (exit 141) — the pipeline must still count as a match.
+{
+  printf '{"totalLines": 70000, "lines": ['
+  awk -v ts="$TS" 'BEGIN { for (i = 1; i <= 70000; i++) {
+    if (i > 1) printf ",";
+    printf "\"%s  04:%02d:%02d.%03d WRN [rtsp] error=\\\"synthetic dial error %0100d\\\" stream=cam%d\"", ts, int(i/60)%60, i%60, i%1000, i, i%2+1 } }'
+  printf ']}'
+} >"$T/hostflood"
 # Fresh install: startup banner lines present.
 cat >"$T/banner" <<EOF
 {"totalLines": 4, "lines": [
@@ -86,6 +95,7 @@ expect FAIL "HTTP 200 + non-go2rtc line shape"        200 "$T/wrongshape"
 expect FAIL "HTTP 500 even with go2rtc-shaped body"   500 "$T/banner"
 expect FAIL "HTTP 200 + plain text, not JSON lines"   200 "$T/plaintext"
 expect PASS "flooded WRN [rtsp] (banner rotated out)" 200 "$T/flooded"
+expect PASS "host-sized flood, 70k lines (pipefail+SIGPIPE)" 200 "$T/hostflood"
 expect PASS "startup banner lines (fresh install)"    200 "$T/banner"
 
 echo "lib-go2rtc-logs: $FAILS unexpected result(s)"
