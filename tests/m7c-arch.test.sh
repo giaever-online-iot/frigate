@@ -11,6 +11,7 @@ Y="${M7C_YAML:-snap/snapcraft.yaml}"; export Y
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 # --- T1 arch_triplet ---
+# shellcheck source=spike/bin/lib-wait.sh
 trip() { ( SNAP_ARCH="$1"; . "$LIBWAIT"; arch_triplet ); }
 t "T1: amd64 -> x86_64-linux-gnu"        test "$(trip amd64)" = "x86_64-linux-gnu"
 t "T1: arm64 -> aarch64-linux-gnu"       test "$(trip arm64)" = "aarch64-linux-gnu"
@@ -20,6 +21,7 @@ t "T1: failure names the value"          sh -c "( SNAP_ARCH=armhf; . '$LIBWAIT';
 t "T1: set -e wrapper aborts on armhf"   sh -c "! SNAP_ARCH=armhf sh -ec '. \"$LIBWAIT\"; _T=\$(arch_triplet); echo reached' | grep -q reached"
 
 # --- T1 shm_max_frames ---
+# shellcheck source=spike/bin/lib-wait.sh
 smf() { mkdir -p "$TMP/c"; rm -f "$TMP/c/shm-max-frames"; [ "$1" = "<absent>" ] || printf '%b' "$1" > "$TMP/c/shm-max-frames"
         ( SNAP_COMMON="$TMP/c"; . "$LIBWAIT"; shm_max_frames ); }
 for row in "<absent>|50" "10|10" "10\n|10" " 7 |7" "1|1" "200|200" "0|50" "201|50" "999|50" "-5|50" "abc|50" "|50" "1e2|50"; do
@@ -36,6 +38,7 @@ render() { local root; root=$(mkroot "$2")
   ( if [ "$1" = unset ]; then unset SNAP_ARCH; else SNAP_ARCH="$1"; fi
     DETECTOR_SYSFS_ROOT="$root"; FAKE_DET="$3"
     snapctl() { [ "$1 $2" = "get detector" ] && [ "$FAKE_DET" != unset ] && printf '%s' "$FAKE_DET"; return 0; }
+# shellcheck source=spike/bin/lib-wait.sh
     . "$LIBWAIT"; s=$(detector_sed 2>"$TMP/err")
     sed -e "$s" spike/config/frigate-config.yml | awk '/^detectors:/{getline; gsub(/[ :]/,""); print; exit}' ); }
 WARN='frigate-run: WARN detector=ov is not available on arm64 (no OpenVINO GPU plugin); rendering the cpu detector'
@@ -85,6 +88,7 @@ EOF
 t "T2: _arch_has_ov is a one-line definition" test "$(grep -c '^_arch_has_ov() { \[ "\${SNAP_ARCH:-amd64}" = amd64 \]; }$' "$LIBWAIT")" = 1
 
 # --- T2 config_uses_openvino ---
+# shellcheck source=spike/bin/lib-wait.sh
 cuo() { printf '%b' "$1" > "$TMP/cfg.yml"; ( . "$LIBWAIT"; config_uses_openvino "$TMP/cfg.yml" ); }
 t "T2: openvino block detected"          cuo 'detectors:\n  ov:\n    type: openvino\n    device: GPU\n'
 t "T2: openvino with comment detected"   cuo 'detectors:\n  ov:\n    type: openvino  # gpu\n'
