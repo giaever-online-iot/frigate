@@ -168,6 +168,7 @@ seed_event() {  # seed_event: POST one manual event on testclip; prints its even
   echo "$id"
 }
 # seeded_in_db [db]: every seeded id has an `event` row with end_time set; fails when nothing was seeded
+# shellcheck disable=SC2317 # invoked only as an argument of check (indirect); shellcheck cannot see it
 seeded_in_db() {
   [ -n "$SEED_IDS" ] || return 1
   local id; for id in $SEED_IDS; do
@@ -176,6 +177,7 @@ seeded_in_db() {
 }
 seeded_sql_list() { local id out=""; for id in $SEED_IDS; do out="$out${out:+,}'$id'"; done; echo "${out:-''}"; }
 # seeded_in_api: GET /events (testclip, no limit) lists every seeded id
+# shellcheck disable=SC2317 # invoked only as an argument of check (indirect); shellcheck cannot see it
 seeded_in_api() {
   [ -n "$SEED_IDS" ] || return 1
   # shellcheck disable=SC2086 # the ids are word-split on purpose (validated against SEED_ID_RE)
@@ -196,6 +198,7 @@ except Exception as e:  # one line, so the FINDING shows the error, not a traceb
     print(f"error: {type(e).__name__}: {e}")
 EOF
 }
+# shellcheck disable=SC2317 # invoked only as an argument of check (indirect); shellcheck cannot see it
 integrity_ok() { [ "$(integrity_of "$@")" = ok ]; }
 # wal_finding <label>: before a revert, record whether frigate.db's -wal/-shm sidecars exist and their size
 # (frigate-run's restore moves frigate.db but not its -wal/-shm; follow-up, docs/m9-findings.md).
@@ -208,13 +211,14 @@ wal_finding() {
 }
 # webp_served <file under clips/>: nginx's internal loopback port (:5000, no login: frigate api/auth.py
 # trusts the internal port; listen.conf.in) serves it from location /clips/ as image/webp (nginx.conf.in).
+# shellcheck disable=SC2317 # invoked only as an argument of check (indirect); shellcheck cannot see it
 webp_served() {
   local rel=${1#"$COMMON/media/frigate/clips/"}
   [ "$rel" != "$1" ] || return 1
   curl -sI --max-time 10 "http://127.0.0.1:5000/clips/$rel" | grep -iE '^content-type: image/webp' >/dev/null
 }
 
-# EXIT/INT/TERM traps: put phase F's held backups back and restore the VM's refresh.retain.
+# EXIT trap: put phase F's held backups back and restore the VM's refresh.retain.
 HOLD=""; RETAIN_OLD=""; RETAIN_SET=""
 restore_hold() {  # move phase F's held backups back; clears HOLD only once nothing is left to move
   [ -n "$HOLD" ] || return 0
@@ -224,12 +228,13 @@ restore_hold() {  # move phase F's held backups back; clears HOLD only once noth
   fi
   HOLD=""
 }
-# Runs once (CLEANED guard): on a normal exit and, explicitly, on INT/TERM (`timeout` ends a run with SIGTERM;
-# bash 5.2 also runs the EXIT trap on an untrapped SIGTERM, but the explicit traps do not depend on that and
-# give the 130/143 exit codes). The INT/TERM handlers exit, which fires the EXIT trap again; the guard makes
-# that second call a no-op. Nothing runs on SIGKILL: after a kill -9, restore refresh.retain by hand.
+# EXIT trap only, run once (CLEANED guard against a double restore). An untrapped TERM or INT (`timeout` ends a
+# run with SIGTERM) still runs the EXIT trap, immediately at the signal (bash 5.2, measured). Do NOT add
+# explicit INT/TERM traps: bash defers a trapped signal's handler until the current foreground child exits
+# (up to the 600 s sleep here), and a SIGKILL in that window would skip the cleanup. SIGKILL runs nothing:
+# after a kill -9, restore refresh.retain and the held backups by hand.
 CLEANED=0
-# shellcheck disable=SC2317 # invoked by the EXIT/INT/TERM traps (indirect)
+# shellcheck disable=SC2317 # invoked by the EXIT trap (indirect)
 cleanup() {
   [ "$CLEANED" -eq 0 ] || return 0
   CLEANED=1
@@ -239,8 +244,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
 
 # The purge would destroy the VM's livecam secret and its config.yml, which the gate (tests/spike-smoke.sh)
 # treats as the operator's config. Park both in the gate's own recovery stashes. They are restored ONLY by
