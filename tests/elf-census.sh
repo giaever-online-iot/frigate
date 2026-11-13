@@ -24,8 +24,10 @@ else echo "elf-census: no such file or dir: $1" >&2; exit 2; fi
 if [ $? -ne 0 ] || [ -s "$T/err" ]; then echo "elf-census: find failed under $root:" >&2; cat "$T/err" >&2; exit 2; fi
 bad=0
 while IFS= read -r -d '' p; do
+  [ -r "$root/$p" ] || { echo "elf-census: cannot read (unreadable): $p" >&2; exit 2; }
   d=$(file -b -- "$root/$p" 2>/dev/null) && [ -n "$d" ] || { echo "elf-census: cannot inspect (unreadable?): $p" >&2; exit 2; }
   case $d in
+    *"no read permission"*|*"cannot open"*) echo "elf-census: cannot read: $p" >&2; exit 2 ;;
     "ELF"*) case $d in *"$want"*) ;; *) printf '%s\n' "$p"; bad=1 ;; esac ;;
   esac
 done < <(LC_ALL=C sort -z "$T/list")
