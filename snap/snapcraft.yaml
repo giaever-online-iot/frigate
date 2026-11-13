@@ -296,29 +296,47 @@ parts:
     plugin: nil
     build-packages: [wget, xz-utils, bzip2]
     override-build: |
-      # 8.0 tree DROPPED (M8 A2): upstream v0.17.2 amd64 ships exactly 7.0 (default) + 5.0
-      # (docker/main/install_deps.sh amd64 block; Dockerfile INCLUDED_FFMPEG_VERSIONS="7.0:5.0")
-      # — upstream-parity; the 8.0 tree was OUR M1 addition, −409MB uncompressed.
+      # upstream v0.18.2 amd64 ships 8.0 (default) + 7.0 + 5.0 (install_deps.sh:48-61, Dockerfile:268-269); Frigate hardcodes /usr/lib/ffmpeg/8.0 in record/export.py + util/classification.py (M9 D4)
       # Build temps live in $CRAFT_PART_BUILD (M1 review fix).
-      # --- 5.0 tree (tag-exact, v0.17.2 install_deps.sh) ---
-      wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linux64-gpl-5.1.tar.xz"
-      echo "377abec133f9d9e8014dee1b91c9684ac8bb0b5b7d80100a57116ff837c4c0d4  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -
-      mkdir -p "$CRAFT_PART_BUILD/f5" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" -C "$CRAFT_PART_BUILD/f5" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
-      install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffmpeg"
-      install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffprobe"
-      # --- 7.0 tree (tag-exact default; tarball is bzip2 despite .xz name — use tar -xf for auto-detect) ---
-      wget -O "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linux64-gpl-7.0.tar.xz"
-      echo "e13860eb90409c8218319c928067834ce450128e86f24cfed5cfe91ce6e31037  $CRAFT_PART_BUILD/ffmpeg-7.tar.xz" | sha256sum -c -
-      mkdir -p "$CRAFT_PART_BUILD/f7" && tar -xf "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" -C "$CRAFT_PART_BUILD/f7" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
-      install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffmpeg"
-      install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffprobe"
+      # Per-arch (M9 D17): fail loud off amd64 — W-7 adds arm64.
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64)
+          # --- 5.0 tree (tag-exact, v0.18.2 install_deps.sh) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linux64-gpl-5.1.tar.xz"
+          echo "377abec133f9d9e8014dee1b91c9684ac8bb0b5b7d80100a57116ff837c4c0d4  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f5" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" -C "$CRAFT_PART_BUILD/f5" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffprobe"
+          # --- 7.0 tree (tag-exact; tarball is bzip2 despite .xz name — use tar -xf for auto-detect) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linux64-gpl-7.0.tar.xz"
+          echo "e13860eb90409c8218319c928067834ce450128e86f24cfed5cfe91ce6e31037  $CRAFT_PART_BUILD/ffmpeg-7.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f7" && tar -xf "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" -C "$CRAFT_PART_BUILD/f7" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffprobe"
+          # --- 8.0 tree (tag-exact default; real xz, verified) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linux64-gpl-8.1.tar.xz"
+          echo "9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9  $CRAFT_PART_BUILD/ffmpeg-8.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f8" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" -C "$CRAFT_PART_BUILD/f8" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
+          ;;
+        *)
+          echo "ffmpeg: unsupported arch $CRAFT_ARCH_BUILD_FOR (W-7 adds arm64)" >&2; exit 1 ;;
+      esac
   go2rtc:
     plugin: nil
     build-packages: [wget]
     override-build: |
-      wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.13/go2rtc_linux_amd64"
-      echo "dce491325c28890ad0b85e83090753dc111b903ef83f43b834798f9114520dba  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
-      install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+      # Per-arch (M9 D17): fail loud off amd64 — W-7 adds arm64.
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64)
+          wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_amd64"
+          echo "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
+          install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+          ;;
+        *)
+          echo "go2rtc: unsupported arch $CRAFT_ARCH_BUILD_FOR (W-7 adds arm64)" >&2; exit 1 ;;
+      esac
   go2rtc-config:
     plugin: dump
     source: spike/config

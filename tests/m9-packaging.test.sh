@@ -48,4 +48,22 @@ t "S1: DEFERRED header names \$TAG"        grep -q "VERBATIM from $TAG docker/ma
 AXW=$(grep -oE 'https://[^ ]*axengine-[0-9.]+-py3-none-any\.whl' "$UPM/Dockerfile" | head -1)
 t "S1: Dockerfile-only axengine wheel is deferred with rationale (D6)" bash -c "[ -n '$AXW' ] && grep -qF '# $AXW' spike/wheels-src/DEFERRED-frigate-ai.txt && grep -q 'axcl' spike/wheels-src/DEFERRED-frigate-ai.txt"
 
+# --- S1 ffmpeg/go2rtc ---
+# scoped to the top-level `parts:` block: `apps:` also has a `go2rtc:` key
+part() { awk -v p="  $1:" '/^parts:/{inp=1;next} /^[a-z]/{inp=0} inp&&$0==p{f=1;print;next} f&&/^  [a-z0-9-]+:$/{exit} f' snap/snapcraft.yaml; }
+export -f part
+UPD="$(upstream_dir)/docker/main"
+# shellcheck disable=SC2013 # URLs contain no whitespace; word-splitting is intended
+for u in $(sed -n '/TARGETARCH}" == "amd64"/,/^fi/p' "$UPD/install_deps.sh" | grep -oE 'https://github.com/NickM-27/[^"]+linux64[^"]+\.tar\.xz'); do
+  t "S1: ffmpeg part pins upstream amd64 asset ${u##*/}" bash -c "part ffmpeg | grep -qF '$u'"
+done
+t "S1: ffmpeg installs trees 5.0 7.0 8.0" bash -c "for v in 5.0 7.0 8.0; do part ffmpeg | grep -q \"usr/lib/ffmpeg/\$v/bin/ffprobe\" || exit 1; done"
+t "S1: ffmpeg 8.0 sha pinned"             bash -c "part ffmpeg | grep -q 9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9"
+G2R=$(grep -oE 'go2rtc/releases/download/v[0-9.]+' "$UPD/Dockerfile" | head -1)
+t "S1: go2rtc pin == upstream ($G2R)"     bash -c "part go2rtc | grep -qF '$G2R/go2rtc_linux_amd64'"
+t "S1: go2rtc sha pinned"                 bash -c "part go2rtc | grep -q 32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6"
+for p in ffmpeg go2rtc; do
+  t "S1: $p part is per-arch, fails loud off amd64" bash -c "part $p | grep -q 'case \"\$CRAFT_ARCH_BUILD_FOR\" in' && part $p | grep -q 'unsupported arch'"
+done
+
 [ "$FAILS" -eq 0 ]
