@@ -86,4 +86,11 @@ expect "db_restore returns 0"                  db_restore "$DB" "$D/backup.db" 7
 expect "no -wal/-shm created on either side"   none_exist "$DB-wal" "$DB-shm" "$DB.incompatible-789-wal" "$DB.incompatible-789-shm"
 expect "aside copy kept"                       test -s "$DB.incompatible-789"
 
+echo "# case 4: the helper's variables do not leak into the caller (frigate-run's loop uses _bk)"
+D="$SB/c4"; mkdir -p "$D"; DB="$D/frigate.db"
+mkbackup "$D/backup.db"; mkbackup "$DB"
+_bk="caller-value"; _db="caller-db"; _aside="caller-aside"; _sfx="caller-sfx"
+db_restore "$DB" "$D/backup.db" 1011
+expect "caller's _bk/_db/_aside/_sfx unchanged" test "$_bk|$_db|$_aside|$_sfx" = "caller-value|caller-db|caller-aside|caller-sfx"
+
 [ "$FAILS" -eq 0 ]

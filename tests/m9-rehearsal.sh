@@ -502,10 +502,12 @@ phase_e_retention_d21() {
   install_snap "$CAND" "E back to candidate" || return 1
 }
 
-phase_f_v017_on_migrated_db() {  # FINDING ONLY (D21 removes the dependency); research Addendum 6
+phase_f_v017_on_migrated_db() {  # 0.17.2 BEHAVIOUR is finding-only (D21); research Addendum 6
   echo "== F: 0.17.2 directly on a 0.18-migrated DB (finding) =="
-  # Everything up to the reinstall is FINDING-ONLY (spec 7a): a 0.17.2 that cannot serve on the migrated
-  # DB is the thing being probed, so it never turns the run red and never skips the reinstall below.
+  # The 0.17.2 behaviour on the migrated DB is FINDING-ONLY (spec 7a): a 0.17.2 that cannot serve on it
+  # is the thing being probed, so that never turns the run red and never skips the reinstall below.
+  # GATING in F (D24): the candidate's stop must have quiesced the DB, and integrity_check must be ok
+  # after the revert; plus everything from the reinstall on (see below).
   HOLD=$COMMON/db/m9-hold; mkdir -p "$HOLD"; mv "$BK"/frigate-pre-*.db "$HOLD"/ 2>/dev/null || true
   wal_finding "F"
   local f_up=0; revert_probe "$REV_A" "F revert, no backups" && f_up=1

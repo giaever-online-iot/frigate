@@ -10,6 +10,8 @@
 # Bounded: systemd arms ExecStopPost= with TimeoutStopSec (snapd default 30 s; this app sets no
 # stop-timeout), so timeout + kill grace stays below it. ALWAYS exits 0: a failed quiesce must never
 # fail a stop, refresh or revert. Logs exactly one line: sizes and a result, never DB content.
+# result=ok (WAL checkpointed, DELETE mode) | busy (another process still held the DB after sqlite's
+# 10 s busy timeout; the WAL stays) | busy=0,mode=<m> | timeout | error:<Class> | nodb.
 # Runs under the frigate app's existing AppArmor profile (no new plugs) and touches only frigate.db
 # and its -wal/-shm, with the snap's own python3.11 and its sqlite3.
 # The bound is enforced INSIDE python, not with coreutils `timeout -k`: snapd's AppArmor template has
@@ -39,9 +41,15 @@ w = threading.Timer(T, _soft); w.daemon = True; w.start()
 try:
     con = sqlite3.connect(sys.argv[1], timeout=10, isolation_level=None)
     busy = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
-    mode = con.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
-    con.close()
-    print("ok" if busy == 0 and mode == "delete" else "busy=%s,mode=%s" % (busy, mode))
+    if busy:
+        # another connection still holds the DB after the 10 s busy timeout: the WAL could not be
+        # fully checkpointed, so do NOT try the DELETE switch (it would only raise "locked")
+        con.close()
+        print("busy")
+    else:
+        mode = con.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        con.close()
+        print("ok" if mode == "delete" else "busy=0,mode=%s" % mode)
 except Exception as e:  # class name only: an exception message may quote DB content
     print("error:" + type(e).__name__)
 EOF

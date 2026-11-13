@@ -196,10 +196,14 @@ PYEOF
 # refresh, crash). The files cannot be inspected between the stop and the start (no window), so the
 # on-disk state AT the stop is attested by the quiesce line itself (wal_after= is measured by the
 # script after its close), plus the ordering, then the live DB is checked once frigate is back.
+# The API wait comes FIRST: after a kill -9 of MainPID systemd SIGTERMs the rest of the cgroup and waits
+# for it before it runs ExecStopPost, so the quiesce line can land well after the kill. Once the API
+# answers again, the stop, the post-stop and the next start have all happened.
 m9_wal_after_restart() {
+  m9_wait_api 180 || true
   check "m9: wal: quiesce ran on $1 (clean line since the mark)" m9_jre "$2" "$M9_QUIESCE_OK_RE"
   check "m9: wal: quiesce ran BEFORE the next frigate start ($1)" m9_quiesce_first "$2"
-  m9_wait_api 180 || true; assert_vec0_loaded "$2" "wal $1"
+  assert_vec0_loaded "$2" "wal $1"
   check "m9: wal: frigate re-enabled WAL after $1 (header 18/19 = 2,2; got $(m9_db_hdr))" test "$(m9_db_hdr)" = 2,2
   check "m9: wal: integrity_check ok after $1" m9_db_integrity_ok
 }
@@ -1205,14 +1209,22 @@ if [ "$NVR_SAFE" -eq 0 ]; then
 # What DELETE mode leaves (tests/frigate-db-quiesce.test.sh, host sqlite 3.45): -wal AND -shm are both
 # unlinked, so the stop step asserts both ABSENT (strict). Revert is covered by tests/m9-rehearsal.sh.
 # Config-mutating class: it stops/kills/reinstalls frigate, so it is gated out of --nvr-safe.
-# MUTATION (controller, in the VM; not run by the gate itself): repack the candidate without the hook,
-#   unsquashfs -d /tmp/mut frigate_*.snap
-#   sed -i '/post-stop-command: bin\/frigate-db-quiesce/d' /tmp/mut/meta/snap.yaml
-#   snap pack /tmp/mut /tmp && snap install --dangerous /tmp/frigate_*.snap
-# then run this gate. Expected (shown on a stub harness, fix report walfix-report.md): FAIL for every
-# "quiesce ran …" line (stop, restart, refresh, crash: no line, so no ordering either) and for the
-# snap-stop file checks (-wal/-shm present, header 2,2); integrity, the 2,2-after-start lines and
-# NRestarts still PASS (they hold with or without the hook). Reinstall the real candidate afterwards.
+# MUTATION (controller, in the VM; not run by the gate itself). The gate installs, purges, reinstalls
+# and refreshes whatever repo-root frigate*_*.snap it pins at start (SNAP_FILE, top of this file), so a
+# mutant installed by hand beforehand would just be replaced. The mutant must BE the pinned artifact:
+#   1. move the real candidate OUT of the run directory's root (the guard at the top aborts on two
+#      differing repo-root frigate*_*.snap files), e.g. mv frigate_0.18.2_amd64.snap /root/real.snap
+#   2. unsquashfs -d /root/mut /root/real.snap
+#      sed -i '/post-stop-command: bin\/frigate-db-quiesce/d' /root/mut/meta/snap.yaml
+#      snap pack /root/mut .        # -> ./frigate_0.18.2_amd64.snap, now the ONLY repo-root snap
+#      (spike/frigate*_*.snap are older and lose to it in the ls -t pin; check the ARTIFACT: line)
+#   3. run the gate.
+# Expected FAILs, only the ones that bite reliably: every "m9: wal: quiesce ran …" line (stop, restart,
+# refresh, crash; no line at all, so no ordering either) and "header 18/19 = 1,1 (DELETE) after snap
+# stop" (the header stays 2,2 without the hook). Not claimed: "-wal/-shm present" — a clean frigate
+# shutdown usually deletes the WAL by itself. Stub-harness run: fix report walfix-report.md.
+# Afterwards: remove ./frigate_0.18.2_amd64.snap (the mutant, by that explicit name) and move the
+# real candidate back.
 # Same plan D24 log format as tests/m9-rehearsal.sh (quiesce_ok_since), which covers revert (C/E/F)
 # and its own stop paths (phase G, systemctl kill -s KILL).
 echo "== m9: WAL quiesce on every stop path =="
