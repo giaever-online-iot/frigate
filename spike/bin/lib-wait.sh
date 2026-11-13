@@ -32,8 +32,9 @@ cfg_get() { v=$(snapctl get "$1" 2>/dev/null) || v=""; [ -n "$v" ] && printf '%s
 # DETECTOR_SYSFS_ROOT (test hook) prefixes /dev/dri and /sys. stdout stays a pure sed script.
 _arch_has_ov() { [ "${SNAP_ARCH:-amd64}" = amd64 ]; }
 
-# M7c (D10): 0 iff the config declares an openvino detector (uncommented `type: openvino`).
-config_uses_openvino() { [ -f "$1" ] && grep -Eq '^[[:space:]]+type:[[:space:]]*openvino[[:space:]]*(#.*)?$' "$1"; }
+# M7c (D10): 0 iff the config declares an openvino detector (uncommented `type: openvino`,
+# bare or in matching double/single quotes).
+config_uses_openvino() { [ -f "$1" ] && grep -Eq "^[[:space:]]+type:[[:space:]]*(openvino|\"openvino\"|'openvino')[[:space:]]*(#.*)?\$" "$1"; }
 
 # M7: emit the sed script that renders the ONE active detector block from frigate-config.yml
 # and deletes the other two. `detector` is snap-set (ov|coral|cpu); unset => auto-detect:
@@ -41,7 +42,8 @@ config_uses_openvino() { [ -f "$1" ] && grep -Eq '^[[:space:]]+type:[[:space:]]*
 # config.yml is render-once (operator-owned after first boot), so this fixes the detector at
 # first render. The chosen block keeps its contents (markers stripped); the other two marker
 # regions are range-deleted (same idiom as the LIVECAM block). Callers: frigate-run,
-# validate-config (identical logic via this shared helper). Unknown values fall back to ov.
+# validate-config (identical logic via this shared helper). Unknown values fall back to ov;
+# then, on non-amd64, ov renders cpu with the D10 WARN line on stderr.
 detector_sed() {
     _det=$(cfg_get detector "")
     if [ -z "$_det" ]; then

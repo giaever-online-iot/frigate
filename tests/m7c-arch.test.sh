@@ -88,6 +88,9 @@ t "T2: _arch_has_ov is a one-line definition" test "$(grep -c '^_arch_has_ov() {
 cuo() { printf '%b' "$1" > "$TMP/cfg.yml"; ( . "$LIBWAIT"; config_uses_openvino "$TMP/cfg.yml" ); }
 t "T2: openvino block detected"          cuo 'detectors:\n  ov:\n    type: openvino\n    device: GPU\n'
 t "T2: openvino with comment detected"   cuo 'detectors:\n  ov:\n    type: openvino  # gpu\n'
+t "T2: double-quoted openvino detected"  cuo 'detectors:\n  ov:\n    type: "openvino"\n'
+t "T2: single-quoted openvino detected"  cuo "detectors:\n  ov:\n    type: 'openvino'  # gpu\n"
+t "T2: commented-out quoted openvino ignored" sh -c "! ( printf 'detectors:\n  cpu:\n    type: cpu\n#    type: \"openvino\"\n' > '$TMP/c4.yml'; . '$LIBWAIT'; config_uses_openvino '$TMP/c4.yml' )"
 t "T2: cpu block not flagged"            sh -c "! ( printf 'detectors:\n  cpu:\n    type: cpu\n' > '$TMP/c2.yml'; . '$LIBWAIT'; config_uses_openvino '$TMP/c2.yml' )"
 t "T2: commented-out openvino ignored"   sh -c "! ( printf 'detectors:\n  cpu:\n    type: cpu\n#    type: openvino\n' > '$TMP/c3.yml'; . '$LIBWAIT'; config_uses_openvino '$TMP/c3.yml' )"
 t "T2: missing file is not flagged"      sh -c "! ( . '$LIBWAIT'; config_uses_openvino '$TMP/nope.yml' )"
@@ -128,7 +131,7 @@ t "T4: D5 guard rejects arm64 platform without a go2rtc arm64 row" sh -c "! d5_o
 
 # --- T7 harness ---
 t "T7: harness sources harness-arch.sh from the repo root"  grep -qxF '. tests/lib/harness-arch.sh' tests/spike-smoke.sh
-t "T7: harness rejects a bad SPIKE_TIME_SCALE up front" sh -c "SPIKE_TIME_SCALE=0 bash tests/spike-smoke.sh --nvr-safe 2>&1 | grep -q 'SPIKE_TIME_SCALE must be'"
+t "T7: harness rejects a bad SPIKE_TIME_SCALE up front" sh -c "SPIKE_TIME_SCALE=0 timeout 20 bash tests/spike-smoke.sh --nvr-safe 2>&1 | grep -q 'SPIKE_TIME_SCALE must be'"
 t "T7: artifact glob is per-arch"        sh -c "[ \$(grep -c 'artifact_glob \"\$HOST_ARCH\"' tests/spike-smoke.sh) -ge 2 ]"
 t "T7: size floor via helper"            grep -q 'size_floor_for_arch "\$HOST_ARCH"' tests/spike-smoke.sh
 t "T7: no size literal left in harness"  sh -c "! grep -qE '\[ .\\\$SNAP_SZ. -ge [0-9]{9}' tests/spike-smoke.sh"
@@ -159,5 +162,7 @@ t "T10: README no longer says planned"     sh -c "! grep -qiE 'arm64[*]* is plan
 t "T10: README D10 limit (corrected)"      grep -qF 'frigate.validate-config does not catch it: on arm64 the snap logs an ERROR line' README.md
 t "T10: README raw-usb disclosure"         grep -qF 'also gives the snap access to USB serial devices, such as a Z-Wave stick' README.md
 t "T10: README edge lag (D17)"             grep -qF 'is released by hand and can lag behind amd64' README.md
+t "T10: README auto-detect ov scoped to amd64" grep -qF 'On amd64, if an Intel or AMD GPU render node is present' README.md
+t "T10: README arm64 ov WARN line is lib-wait's verbatim" sh -c "w=\$(sed -n 's/^ *echo \"\\(frigate-run: WARN detector=ov[^\"]*\\)\" >&2\$/\\1/p' spike/bin/lib-wait.sh); [ -n \"\$w\" ] && grep -qF -- \"\$w\" README.md"
 
 [ "$FAILS" -eq 0 ]

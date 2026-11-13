@@ -182,5 +182,5 @@ jobs:
             }
 
       - name: Fail if build/upload incomplete
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         run: set -a; . .github/release-archs.env; set +a; .github/scripts/arch-gate.sh "$REQUIRED_ARCHS" "${{ steps.build.outputs.snaps }}" "${{ steps.release.outputs.missing }}"

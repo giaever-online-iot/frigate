@@ -12,7 +12,7 @@ case $2 in
   *) echo "elf-census: arch must be aarch64 or x86-64, got: $2" >&2; exit 2 ;;
 esac
 command -v file >/dev/null 2>&1 || { echo "elf-census: 'file' not installed" >&2; exit 2; }
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'chmod -R u+rwX "$T" 2>/dev/null; rm -rf "$T"' EXIT
 if [ -d "$1" ]; then root=$1
 elif [ -f "$1" ]; then
   command -v unsquashfs >/dev/null 2>&1 || { echo "elf-census: unsquashfs not installed" >&2; exit 2; }

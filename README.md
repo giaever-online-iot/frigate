@@ -44,8 +44,8 @@ sudo snap connect frigate:mount-observe
 ```
 
 - `raw-usb` + `hardware-observe` — only needed if you use a **Coral USB
-  Accelerator**. Skip these if you're using the default OpenVINO detector or
-  CPU fallback.
+  Accelerator**. Skip these if you're using the amd64 default OpenVINO
+  detector or CPU fallback.
 - `shm-private` and `mount-observe` — needed by the `frigate` daemon itself
   (private shared-memory frame buffers, and sizing them correctly). Connect
   these regardless of which detector you use.
@@ -267,11 +267,14 @@ sudo snap set frigate ports.https=9443
 sudo snap set frigate tls.cert-profile=ecdsa-p256
 ```
 
-When `detector` is left unset, the snap auto-detects at config render time:
-if an Intel or AMD GPU render node is present, it configures the OpenVINO
-(`ov`) detector; otherwise it falls back to `cpu`. Set `detector=coral`
-explicitly (and delete/regenerate `config.yml`) to use a Coral USB
-Accelerator instead — see the accelerator matrix below for the full setup
+When `detector` is left unset, the snap auto-detects at config render time.
+On amd64, if an Intel or AMD GPU render node is present, it configures the
+OpenVINO (`ov`) detector; otherwise it falls back to `cpu`. On arm64,
+auto-detect always renders `cpu`, and `snap set frigate detector=ov` also
+renders `cpu`, logging this line to the journal:
+`frigate-run: WARN detector=ov is not available on arm64 (no OpenVINO GPU plugin); rendering the cpu detector`.
+Set `detector=coral` explicitly (and delete/regenerate `config.yml`) to use a
+Coral USB Accelerator instead — see the accelerator matrix below for the full setup
 procedure.
 
 ## Upgrading to 0.18

@@ -215,9 +215,12 @@ v18_edgetpu() {
   printf 'dlopen.ok=%s\nlib_path=%s\nload_delegate.error=%s\n' "$ok" "$path" "$err" > "$OUT/v18.txt"
   [ "$ok" = true ] || why="$why dlopen.ok=${ok:-missing};"
   case "$path" in *aarch64-linux-gnu*) ;; *) why="$why lib_path '${path}' is not aarch64-linux-gnu;" ;; esac
+  # Positive match: with no stick, probe_coral.py records "ValueError: Failed to load delegate from .../libedgetpu.so.1".
+  # Any other non-empty error (a missing lib, ModuleNotFoundError, ...) is a FAIL that names it.
   if [ -z "$err" ]; then why="$why load_delegate error empty (a stick present, or the probe did not run);"
-  elif is_lib_missing_error "$err"; then why="$why library missing: $err;"; fi
-  if [ -z "$why" ]; then pass "V18 edgetpu: dlopen ok from $path; delegate error names no device, not a missing lib: $err"
+  elif is_lib_missing_error "$err"; then why="$why library missing: $err;"
+  else case "$err" in *"Failed to load delegate"*) ;; *) why="$why load_delegate error is not the no-device error: $err;" ;; esac; fi
+  if [ -z "$why" ]; then pass "V18 edgetpu: dlopen ok from $path; delegate error is the no-device one (Failed to load delegate): $err"
   else fail "V18 edgetpu:$why"; fi
 }
 
@@ -374,7 +377,7 @@ list_row() { awk '$1 == "Name" && $3 == "Rev" { h = 1; next } h && $1 == "frigat
 list_rev() { list_row | awk '{ print $3 }'; }
 rc_of() { sed -n 's/^rc=//p' | tail -n 1; }
 v17_lifecycle() {
-  local out hold_rc ref_rc rev0 rev1 revx revr notes why="" chrev
+  local out hold_rc ref_rc rev0 rev1 revx revr notes why="" chrev pre left f10 ns
   out=$(g 'snap refresh --hold frigate; echo rc=$?; snap list frigate' 2>&1); printf '%s\n' "$out" > "$OUT/v17-hold.txt"
   hold_rc=$(rc_of <<<"$out"); rev0=$(list_rev <<<"$out")
   notes=$(list_row <<<"$out" | awk '{ print $NF }')
@@ -398,14 +401,32 @@ v17_lifecycle() {
   if [ -z "$(rc_of <<<"$out")" ]; then info "V17 plain snap remove: unknown (the guest call failed)"; why="$why plain remove call failed;"
   elif grep -qx "$SHMDIR" <<<"$out"; then info "V17 plain snap remove LEFT $SHMDIR (deleted before the purge cycle)"; g "rm -rf $SHMDIR" >/dev/null 2>&1
   else info "V17 plain snap remove did not leave $SHMDIR"; fi
-  out=$(g "snap install frigate --channel=$CH && snap remove --purge frigate; echo rc=\$?; ls -d $SHMDIR" 2>&1)
+  # Purge cycle. A fresh install has none of V5's manual connections, and $SHMDIR only exists once the snap's
+  # mount namespace is built with shm-private connected. So: install, connect shm-private, build the namespace
+  # synchronously (not racing the daemon's first start), and record whether $SHMDIR exists BEFORE the purge.
+  out=$(g "snap install frigate --channel=$CH; echo rc=\$?" 2>&1); printf '%s\n' "$out" > "$OUT/v17-purge-install.txt"
+  [ "$(rc_of <<<"$out")" = 0 ] || why="$why purge-cycle install rc=$(rc_of <<<"$out");"
+  out=$(g 'snap connect frigate:shm-private; echo connect_rc=$?; snap run --shell frigate.frigate -c true; echo rc=$?' 2>&1)
+  printf '%s\n' "$out" > "$OUT/v17-purge-namespace.txt"
+  ns="connect_rc=$(sed -n 's/^connect_rc=//p' <<<"$out" | tail -n 1) snap-run_rc=$(rc_of <<<"$out")"
+  pre=$(g "if test -d $SHMDIR; then echo shmdir=present; else echo shmdir=absent; fi" 2>/dev/null | sed -n 's/^shmdir=//p' | tail -n 1)
+  printf 'shmdir_before_purge=%s\n' "${pre:-unknown}" > "$OUT/v17-purge-before.txt"
+  info "V17 $SHMDIR before remove --purge: ${pre:-unknown} (namespace build: $ns; battery/v17-purge-before.txt, v17-purge-namespace.txt)"
+  out=$(g "snap remove --purge frigate; echo rc=\$?; ls -d $SHMDIR" 2>&1)
   printf '%s\n' "$out" > "$OUT/v17-purge.txt"
-  [ "$(rc_of <<<"$out")" = 0 ] || why="$why install+purge rc=$(rc_of <<<"$out");"
+  [ "$(rc_of <<<"$out")" = 0 ] || why="$why remove --purge rc=$(rc_of <<<"$out");"
+  left=0; f10="F10 purge residue not exercised"
   if grep -qx "$SHMDIR" <<<"$out"; then
-    out=$(g "rm -rf $SHMDIR; ls -d $SHMDIR 2>/dev/null; echo end" 2>&1)
+    left=1; out=$(g "rm -rf $SHMDIR; ls -d $SHMDIR 2>/dev/null; echo end" 2>&1)
     grep -qx "$SHMDIR" <<<"$out" && why="$why $SHMDIR still present after the battery's rm;"
-  else why="$why $SHMDIR absent after remove --purge (F10 expected it to survive);"; fi
-  if [ -z "$why" ]; then pass "V17 lifecycle: hold rc=0; explicit refresh rc=0; revert -> Store r$revr (dangerous was $revx); $SHMDIR survived --purge (F10) and was deleted"
+  fi
+  case "$pre" in
+    present) if [ "$left" = 1 ]; then f10="$SHMDIR survived --purge (F10) and was deleted"
+             else why="$why $SHMDIR present before but absent after remove --purge (F10 expected it to survive);"; fi ;;
+    absent)  info "V17 F10 purge residue: not exercised ($SHMDIR absent before remove --purge; the namespace build did not create it; after the purge: $([ "$left" = 1 ] && echo present || echo absent))" ;;
+    *)       why="$why could not check $SHMDIR before remove --purge;" ;;
+  esac
+  if [ -z "$why" ]; then pass "V17 lifecycle: hold rc=0; explicit refresh rc=0; revert -> Store r$revr (dangerous was $revx); $f10"
   else fail "V17 lifecycle:$why"; fi
 }
 

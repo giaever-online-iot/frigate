@@ -12,7 +12,7 @@
 #   error (unreadable file/dir), naming the path; never silently drops a path.
 set -uo pipefail
 [ $# -ge 2 ] && [ $# -le 3 ] || { sed -n '2,12p' "$0" >&2; exit 2; }
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'chmod -R u+rwX "$T" 2>/dev/null; rm -rf "$T"' EXIT
 export LC_ALL=C
 
 prep() { # prep <input> <n> -> echoes root dir
