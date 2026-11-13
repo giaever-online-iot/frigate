@@ -27,6 +27,14 @@ wait_for_url() {
 # in the wrappers that source this file. The guard collapses that to the empty-default path.
 cfg_get() { v=$(snapctl get "$1" 2>/dev/null) || v=""; [ -n "$v" ] && printf '%s' "$v" || printf '%s' "$2"; }
 
+# M7c (D9, D10): the single arch guard. OpenVINO's GPU plugin ships only on amd64, so
+# arm64 never auto-selects ov and an explicit/unknown ov renders cpu with a stderr WARN.
+# DETECTOR_SYSFS_ROOT (test hook) prefixes /dev/dri and /sys. stdout stays a pure sed script.
+_arch_has_ov() { [ "${SNAP_ARCH:-amd64}" = amd64 ]; }
+
+# M7c (D10): 0 iff the config declares an openvino detector (uncommented `type: openvino`).
+config_uses_openvino() { [ -f "$1" ] && grep -Eq '^[[:space:]]+type:[[:space:]]*openvino[[:space:]]*(#.*)?$' "$1"; }
+
 # M7: emit the sed script that renders the ONE active detector block from frigate-config.yml
 # and deletes the other two. `detector` is snap-set (ov|coral|cpu); unset => auto-detect:
 # an Intel/AMD GPU render node present => ov (OpenVINO GPU), else cpu. RENDER-TIME ONLY —
@@ -46,13 +54,23 @@ detector_sed() {
         # guarded (vendor absent for non-PCI nodes; glob may stay literal) to keep the
         # set -e/-u wrappers safe. Default cpu; explicit `snap set detector=ov` still wins.
         _det=cpu
-        for _rnode in /dev/dri/renderD*; do
+        # M7c (D9): arm64 never auto-selects ov (no OpenVINO GPU plugin), so skip the probe.
+        for _rnode in "${DETECTOR_SYSFS_ROOT:-}"/dev/dri/renderD*; do
+            _arch_has_ov || break
             [ -e "$_rnode" ] || continue
-            _vendor=$(cat "/sys/class/drm/${_rnode##*/}/device/vendor" 2>/dev/null || true)
+            _vendor=$(cat "${DETECTOR_SYSFS_ROOT:-}/sys/class/drm/${_rnode##*/}/device/vendor" 2>/dev/null || true)
             case "$_vendor" in
                 0x8086|0x1002) _det=ov; break ;;
             esac
         done
+    fi
+    case "$_det" in
+        cpu|coral|ov) ;;
+        *) _det=ov ;;   # unknown values normalise to ov first
+    esac
+    if [ "$_det" = ov ] && ! _arch_has_ov; then
+        echo "frigate-run: WARN detector=ov is not available on arm64 (no OpenVINO GPU plugin); rendering the cpu detector" >&2
+        _det=cpu
     fi
     case "$_det" in
         cpu)

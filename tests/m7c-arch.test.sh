@@ -27,4 +27,69 @@ for row in "<absent>|50" "10|10" "10\n|10" " 7 |7" "1|1" "200|200" "0|50" "201|5
   t "T1: shm_max_frames '$in' -> $want" test "$(smf "$in")" = "$want"
 done
 
+
+# --- T2 detector (V4 matrix) ---
+mkroot() { local r="$TMP/root-$1"; rm -rf "$r"; mkdir -p "$r/dev/dri"
+  if [ "$1" != none ]; then : > "$r/dev/dri/renderD128"; mkdir -p "$r/sys/class/drm/renderD128/device"; echo "$1" > "$r/sys/class/drm/renderD128/device/vendor"; fi
+  echo "$r"; }
+render() { local root; root=$(mkroot "$2")
+  ( if [ "$1" = unset ]; then unset SNAP_ARCH; else SNAP_ARCH="$1"; fi
+    DETECTOR_SYSFS_ROOT="$root"; FAKE_DET="$3"
+    snapctl() { [ "$1 $2" = "get detector" ] && [ "$FAKE_DET" != unset ] && printf '%s' "$FAKE_DET"; return 0; }
+    . "$LIBWAIT"; s=$(detector_sed 2>"$TMP/err")
+    sed -e "$s" spike/config/frigate-config.yml | awk '/^detectors:/{getline; gsub(/[ :]/,""); print; exit}' ); }
+WARN='frigate-run: WARN detector=ov is not available on arm64 (no OpenVINO GPU plugin); rendering the cpu detector'
+while read -r a v d want w; do
+  [ -z "$a" ] && continue
+  t "T2: $a/$v/detector=$d -> $want" test "$(render "$a" "$v" "$d")" = "$want"
+  if [ "$w" = y ]; then t "T2: $a/$v/$d warns" grep -qxF "$WARN" "$TMP/err"
+  else t "T2: $a/$v/$d no warn" test ! -s "$TMP/err"; fi
+done <<'EOF'
+amd64 none   unset cpu   n
+amd64 0x8086 unset ov    n
+amd64 0x1002 unset ov    n
+amd64 0x1af4 unset cpu   n
+amd64 none   ov    ov    n
+amd64 0x8086 ov    ov    n
+amd64 0x1002 ov    ov    n
+amd64 0x1af4 ov    ov    n
+amd64 none   cpu   cpu   n
+amd64 0x8086 cpu   cpu   n
+amd64 0x1002 cpu   cpu   n
+amd64 0x1af4 cpu   cpu   n
+amd64 none   coral coral n
+amd64 0x8086 coral coral n
+amd64 0x1002 coral coral n
+amd64 0x1af4 coral coral n
+amd64 0x8086 bogus ov    n
+arm64 none   unset cpu   n
+arm64 0x8086 unset cpu   n
+arm64 0x1002 unset cpu   n
+arm64 0x1af4 unset cpu   n
+arm64 none   ov    cpu   y
+arm64 0x8086 ov    cpu   y
+arm64 0x1002 ov    cpu   y
+arm64 0x1af4 ov    cpu   y
+arm64 none   cpu   cpu   n
+arm64 0x8086 cpu   cpu   n
+arm64 0x1002 cpu   cpu   n
+arm64 0x1af4 cpu   cpu   n
+arm64 none   coral coral n
+arm64 0x8086 coral coral n
+arm64 0x1002 coral coral n
+arm64 0x1af4 coral coral n
+arm64 0x8086 bogus cpu   y
+unset 0x8086 unset ov    n
+unset none   unset cpu   n
+EOF
+t "T2: _arch_has_ov is a one-line definition" test "$(grep -c '^_arch_has_ov() { \[ "\${SNAP_ARCH:-amd64}" = amd64 \]; }$' "$LIBWAIT")" = 1
+
+# --- T2 config_uses_openvino ---
+cuo() { printf '%b' "$1" > "$TMP/cfg.yml"; ( . "$LIBWAIT"; config_uses_openvino "$TMP/cfg.yml" ); }
+t "T2: openvino block detected"          cuo 'detectors:\n  ov:\n    type: openvino\n    device: GPU\n'
+t "T2: openvino with comment detected"   cuo 'detectors:\n  ov:\n    type: openvino  # gpu\n'
+t "T2: cpu block not flagged"            sh -c "! ( printf 'detectors:\n  cpu:\n    type: cpu\n' > '$TMP/c2.yml'; . '$LIBWAIT'; config_uses_openvino '$TMP/c2.yml' )"
+t "T2: commented-out openvino ignored"   sh -c "! ( printf 'detectors:\n  cpu:\n    type: cpu\n#    type: openvino\n' > '$TMP/c3.yml'; . '$LIBWAIT'; config_uses_openvino '$TMP/c3.yml' )"
+t "T2: missing file is not flagged"      sh -c "! ( . '$LIBWAIT'; config_uses_openvino '$TMP/nope.yml' )"
+
 [ "$FAILS" -eq 0 ]
