@@ -1035,8 +1035,10 @@ if [ -n "$ADMIN_PW" ]; then
     curl -sk --max-time 10 -b /tmp/m5-gate-cookie.jar -o /dev/null https://127.0.0.1:8971/api/stats 2>/dev/null || true
     check "m9: no uninitialized go2rtc_stream_proxy warning after an authed request" sh -c \
       "! tail -n +$((M9_NGX_L0+1)) '$M9_NGX_LOG' 2>/dev/null | grep -q 'uninitialized \"go2rtc_stream_proxy\"'"
-    M9_LOGOUT=$(curl -sk --max-time 10 -b /tmp/m5-gate-cookie.jar -o /dev/null -w '%{http_code}' https://127.0.0.1:8971/api/logout 2>/dev/null)
-    check "m9: /api/logout location answers (HTTP $M9_LOGOUT, not 404)" sh -c "case '$M9_LOGOUT' in 200|302|303|307|401) exit 0;; *) exit 1;; esac"
+    # Must be UNAUTHENTICATED: an authed request is proxied via location /api/ to Frigate's own logout route and
+    # answers 303 even on 0.17.2 (red run); only the D9 location (auth_request off) lets an unauthed one through (else 401).
+    M9_LOGOUT=$(curl -sk --max-time 10 -o /dev/null -w '%{http_code}' https://127.0.0.1:8971/api/logout 2>/dev/null)
+    check "m9: /api/logout reachable without auth (nginx location, auth_request off; HTTP $M9_LOGOUT)" sh -c "case '$M9_LOGOUT' in 200|302|303|307) exit 0;; *) exit 1;; esac"
     # Discard derived credentials (JWT in cookie jar + response headers — not the password)
     rm -f /tmp/m5-gate-cookie.jar /tmp/m5-gate-headers.txt
 elif [ "$NVR_SAFE" -eq 1 ]; then
