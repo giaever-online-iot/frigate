@@ -11,7 +11,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
 # curl stub: body from $STUB_BODY (a file), status from $STUB_CODE. Honours -o FILE and -w FMT
-# (only %{http_code}); every other flag/arg is ignored. Mirrors real curl -s semantics closely
+# (only %{http_code}); -H values are recorded to $STUB_HDRS when set; every other flag/arg is ignored. Mirrors real curl -s semantics closely
 # enough for the predicate: body to -o target (or stdout), the -w text to stdout after it.
 cat >"$T/bin/curl" <<'STUB'
 #!/usr/bin/env bash

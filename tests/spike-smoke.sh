@@ -1552,7 +1552,8 @@ fi
 # frigate-run creates them (nginx/current -> real error.log; M8: frigate/current is the tee sink,
 # go2rtc/current a symlink to $SNAP_DATA/go2rtc-logs/current — both carry real daemon stdout).
 # Route is /logs/{service} with NO /api prefix on the internal :5001 (M3 route discipline);
-# allow_any_authenticated() needs a Remote-User header. A 500 here is the undefined.length crash.
+# 0.18: /logs/{service} is require_role(["admin"]) — needs BOTH Remote-User and Remote-Role headers.
+# A 500 here is the undefined.length crash.
 # 0.18: /logs/{service} is require_role(["admin"]) (R§5.4)
 BRIDGE_LOGS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Remote-User: admin' -H 'Remote-Role: admin' --max-time 5 http://127.0.0.1:5001/logs/nginx 2>/dev/null)
 check "logs: /logs/nginx returns 200 (UI /logs page no longer crashes)" test "$BRIDGE_LOGS" = "200"
@@ -1561,7 +1562,7 @@ echo "  logs finding: GET :5001/logs/nginx http=$BRIDGE_LOGS (was 500 pre-fix; s
 # M8 Task 7: /logs full tee-parity. frigate-run and go2rtc-run now tee each daemon's stdout+stderr
 # into /dev/shm/logs/{frigate,go2rtc}/current (go2rtc via a $SNAP_DATA symlink — no shm-private plug)
 # using bash process substitution, so the previously-empty frigate/go2rtc tabs carry real output.
-# Same curl shape as the nginx check (Remote-User on :5001); bodies piped to grep -q ONLY — never
+# Same curl shape as the nginx check (Remote-User + Remote-Role on :5001); bodies piped to grep -q ONLY — never
 # persisted to $EVIDENCE (daemon stdout can echo camera/producer URLs with credentials).
 # M8 Task 6 capability guard (version-skew, mirrors the other hardware-aware guards): these
 # tee-content checks assert real daemon stdout landed in the /logs sinks — which requires the
