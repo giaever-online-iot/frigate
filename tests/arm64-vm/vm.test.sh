@@ -19,4 +19,5 @@ grep -q -- '-accel tcg,thread=multi' "$D/cmd";            check "MTTCG" 0 $?
 grep -q -- '-cpu max' "$D/cmd";                           check "never -cpu max" 1 $?
 grep -q 'org.qemu.guest_agent.0' "$D/cmd";                check "guest agent channel" 0 $?
 grep -qE 'hostfwd|-nic user.*22' "$D/cmd";                check "no port forward" 1 $?
+grep -qE '^IMG_SERIAL="[0-9]{8}(\.[0-9]+)?"$' ./vm.sh;    check "IMG_SERIAL pinned to a dated serial" 0 $?
 exit "$fail"

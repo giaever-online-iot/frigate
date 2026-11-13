@@ -4,7 +4,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 [ -n "${M7C_VM_DIR:-}" ] || { echo "vm.sh: set M7C_VM_DIR to a scratch dir outside the repo" >&2; exit 2; }
 RUN="$M7C_VM_DIR"; PID="$RUN/qemu.pid"; QGA="$RUN/qga.sock"
-IMG_SERIAL="<pinned at T11 Step 5>"
+IMG_SERIAL="20261016"
 IMG_BASE="https://cloud-images.ubuntu.com/resolute/$IMG_SERIAL"; IMG=resolute-server-cloudimg-arm64.img
 . "$REPO/tests/lib/harness-arch.sh"
 alive() { [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; }
