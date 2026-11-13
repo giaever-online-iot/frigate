@@ -48,7 +48,9 @@ mark() { date '+%Y-%m-%d %H:%M:%S'; }
 H=(-H 'Remote-User: admin' -H 'Remote-Role: admin')
 api()  { curl -sf --max-time 15 "${H[@]}" "http://127.0.0.1:5001$1"; }
 apix() { local body=${3:-'{}'}; curl -sf --max-time 30 "${H[@]}" -H 'Content-Type: application/json' -X "$1" -d "$body" "http://127.0.0.1:5001$2"; }
-wait_api() { local t=0; until api /version >/dev/null 2>&1; do sleep 3; t=$((t+3)); [ "$t" -ge "${1:-300}" ] && return 1; done; }
+# Explicit `return 0` after the loop: an until/while loop's status is its LAST BODY command's status,
+# here the false `[ t -ge bound ] && return 1`, so without it a success after >= 1 retry returned 1.
+wait_api() { local t=0; until api /version >/dev/null 2>&1; do sleep 3; t=$((t+3)); [ "$t" -ge "${1:-300}" ] && return 1; done; return 0; }
 py() { "/snap/$S/current/usr/bin/python3.11" "$@"; }
 sql() {  # sql <query> [db]: rows as a|b|c, NULL as empty
   py - "${2:-$DB}" "$1" <<'EOF'
