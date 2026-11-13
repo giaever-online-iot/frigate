@@ -152,4 +152,12 @@ t "T9: arm64 rows never name amd64 assets"            bash -c "! { arow ffmpeg; 
 t "T9: amd64 rows untouched (W-14 amd64 shas present)" bash -c "part \$Y ffmpeg | grep -q 9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9 && part \$Y go2rtc | grep -q 32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6"
 t "T9: no go2rtc 1.9.15 pin"                          sh -c "! grep -q 'v1.9.15' $Y"
 
+# --- T10 platforms + docs ---
+t "T10: platforms has amd64 and arm64"     test "$(yq '.platforms | keys | join(",")' < "$Y")" = "amd64,arm64"
+t "T10: README arm64 section"              grep -qx '## arm64 (experimental)' README.md
+t "T10: README no longer says planned"     sh -c "! grep -qiE 'arm64[*]* is planned' README.md"
+t "T10: README D10 limit (corrected)"      grep -qF 'frigate.validate-config does not catch it: on arm64 the snap logs an ERROR line' README.md
+t "T10: README raw-usb disclosure"         grep -qF 'also gives the snap access to USB serial devices, such as a Z-Wave stick' README.md
+t "T10: README edge lag (D17)"             grep -qF 'is released by hand and can lag behind amd64' README.md
+
 [ "$FAILS" -eq 0 ]

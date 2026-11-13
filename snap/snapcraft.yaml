@@ -10,6 +10,9 @@ description: |
   alternative detector, or plain CPU inference as a no-accelerator
   fallback.
 
+  On arm64 the snap is experimental: it runs with the CPU detector or a
+  Coral USB Accelerator, and OpenVINO is not available there.
+
   Under the hood the snap runs four cooperating services — go2rtc (camera
   stream restreaming), frigate (the NVR core and detection engine), nginx
   (the HTTPS web UI and API proxy), and certsync (keeps nginx in sync with
@@ -77,6 +80,7 @@ plugs:
 
 platforms:
   amd64:
+  arm64:
 
 apps:
   go2rtc:

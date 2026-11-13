@@ -399,12 +399,24 @@ For the full accelerator support matrix (CPU, Intel/AMD GPU, Coral USB,
 Coral PCIe/M.2, NVIDIA), Coral USB setup steps, and the CPU fallback
 procedure, see [`docs/accelerator-support.md`](docs/accelerator-support.md).
 
-Two things worth calling out here:
+One thing worth calling out here:
 
 - **Intel NPU is not yet supported** as a detector — tracked for a future
   release.
-- **arm64 is planned** but not available yet; this snap currently ships for
-  `amd64` only.
+
+## arm64 (experimental)
+
+The snap also builds for `arm64`, as an experimental platform.
+
+On arm64 the snap supports the CPU detector and the Coral USB Accelerator; OpenVINO is not available on arm64.
+
+Video is decoded in software on arm64; Raspberry Pi hardware decode is not supported yet.
+
+A config.yml that already carries an openvino detector block (for example one copied from an amd64 install) is not rewritten, and frigate.validate-config does not catch it: on arm64 the snap logs an ERROR line naming the problem when Frigate starts. Set the detector to cpu or coral, or delete config.yml to re-render it.
+
+Connecting raw-usb (needed for the Coral) also gives the snap access to USB serial devices, such as a Z-Wave stick.
+
+The arm64 revision on latest/edge is released by hand and can lag behind amd64.
 
 ## Known upstream issues
 
