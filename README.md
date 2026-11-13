@@ -359,6 +359,7 @@ read this before you refresh a working install.
     0.17's `record.sync_recordings: true`, which deletes recording files
     that have no database entry (it gives up if more than half of the files
     would go).
+- **Reverting safely.** On every stop (including the stop a `snap revert` or refresh performs) the 0.18 snap checkpoints its database and leaves `frigate.db` without `-wal`/`-shm` files, so the older revision's restore cannot be corrupted by a stale write-ahead log. That stop hook cannot run on power loss during the revert, or if it times out. To revert deliberately, run `sudo snap stop frigate.frigate` first, check that `journalctl -u snap.frigate.frigate.service -n 20` shows `frigate-db-quiesce: … result=ok` (or that `/var/snap/frigate/common/db/frigate.db-wal` does not exist), then `sudo snap revert frigate`.
 
 ## Diagnostics
 
