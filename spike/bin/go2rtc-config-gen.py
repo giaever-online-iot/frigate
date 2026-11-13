@@ -49,9 +49,13 @@ DIVERGENCES from create_config.py (deliberate, documented):
     context carries no FRIGATE_* vars (secrets are embedded directly in config.yml under
     root 0600), and str.format() would additionally corrupt literal `{output}` in the
     baseline exec streams.
-  * restricted-source (exec/echo/expr) filtering is NOT applied — the baseline itself
-    ships exec streams, config.yml is operator-owned (root 0600, not a remote surface),
-    and go2rtc runs strict-confined.
+  * restricted-source (exec/echo/expr) filtering is NOT applied YET — pending M9 T11 /
+    W-16 (spec D13). Upstream filters these sources in the operator's streams unless
+    GO2RTC_ALLOW_ARBITRARY_EXEC is set. Since 0.18 an admin can save every config
+    section, go2rtc streams included, from the web UI, so config.yml is a remote surface
+    too; 0.18.2's own API rejects NEW exec/echo/expr sources on those saves, which leaves
+    hand-edited config.yml unfiltered. The baseline's test/testclip exec streams are
+    packaging, not operator input, and stay exempt once the filter lands.
   * birdseye restream stream generation is NOT wired — it needs frigate module imports
     in the go2rtc context; out of scope for the config bridge.
   * A config.yml that fails to parse falls back to BASELINE-ONLY (go2rtc still starts,

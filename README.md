@@ -282,9 +282,10 @@ read this before you refresh a working install.
 - **The first boot under 0.18 rewrites `config.yml`.** Frigate's own
   migrator brings the file to `version: 0.18-0` and keeps the previous copy
   as `backup_config.yaml` next to it. The snap itself still never rewrites
-  your config. Edits made under 0.18 are **lost on `snap revert`**: a revert
-  goes back to the 0.17 `config.yml`, which 0.17 can read, and not to your
-  newer file.
+  your config. The rewrite may also re-flow the file's formatting, not only
+  change `version`. Edits made under 0.18 are **lost on `snap revert`**: a
+  revert goes back to the 0.17 `config.yml`, which 0.17 can read, and not to
+  your newer file.
 - **ffmpeg 8 is now the default.** The snap ships ffmpeg 5.0, 7.0 and 8.0
   and Frigate uses 8.0 unless you say otherwise. go2rtc streams that use
   `#hardware` transcoding need one of these workarounds in `config.yml`:
@@ -295,22 +296,32 @@ read this before you refresh a working install.
       global: "-vaapi_device /dev/dri/renderD128"
   ```
 
-  or keep go2rtc on the 7.0 tree:
+  or switch to the 7.0 tree:
 
   ```yaml
   ffmpeg:
     path: "7.0"
   ```
 
-  An explicit `go2rtc.ffmpeg.bin` always wins over `ffmpeg.path`.
+  `ffmpeg.path` is Frigate's own setting, so it moves Frigate's camera
+  pipelines (detect and record) to 7.0 too, not only go2rtc. Export
+  thumbnails still use the 8.0 tree, whose path Frigate hardcodes. An explicit
+  `go2rtc.ffmpeg.bin` always wins over `ffmpeg.path` for go2rtc.
 - **`exec:`, `echo:` and `expr:` go2rtc streams.** Upstream 0.18 drops these
   stream sources unless `GO2RTC_ALLOW_ARBITRARY_EXEC` is set, because the web
-  UI can now edit the go2rtc section. This snap does **not** filter them yet;
-  the filter is planned but not part of this revision. Do not rely on it, and
-  avoid `exec:` sources you did not write yourself.
-- **Intel GPU stats need kernel 6.5 or newer.** With VAAPI or QSV camera
-  hwaccel, Frigate 0.18 reads `/proc/*/fdinfo` on every stats poll to find
-  GPU usage. To turn that scan off, set this in `config.yml`:
+  UI can now edit the go2rtc section. Frigate 0.18.2's own API already rejects
+  *new* sources of these types when a config or stream is saved from the UI,
+  so the gap that remains is a hand-edited `config.yml`. This snap does **not**
+  filter them there yet; the filter is planned but not part of this revision.
+  Do not rely on it, and avoid `exec:` sources you did not write yourself.
+- **Intel GPU stats need a recent kernel.** Upstream's requirement is Linux
+  5.19 or newer with the `i915` driver (6.5 or newer on 12th-gen and newer
+  Intel GPUs), or any kernel with the `xe` driver, on a Broadwell (5th-gen) or
+  newer GPU. With VAAPI or QSV camera hwaccel, Frigate 0.18 reads
+  `/proc/*/fdinfo` on every stats poll to find GPU usage. Under this snap's
+  strict confinement that scan is **unproven**: it has not run on Intel
+  hardware yet, so whether it works or only produces AppArmor denials is not
+  known. To turn the scan off, set this in `config.yml`:
 
   ```yaml
   telemetry:
@@ -325,11 +336,29 @@ read this before you refresh a working install.
 
   ```
   sudo rm /var/snap/frigate/current/config/config.yml \
-          /var/snap/frigate/current/config/.runtime_state.json
+          /var/snap/frigate/current/config/.runtime_state.json \
+          /var/snap/frigate/current/config/.runtime_state.json.lock
   sudo snap restart frigate
   ```
 - **`networking.listen.*` is ignored.** Ports come from the snap options
   (`ports.https`, see above), not from Frigate's config.
+- **Reverting to 0.17.** The database part of this list is spec-derived
+  (D11/D12); the revert rehearsal is pending and will confirm or correct it.
+  - `sudo snap revert frigate` works only while the 0.17 revision is still
+    on the system. Check with `snap list --all frigate`. snapd keeps 2
+    revisions by default on classic systems (3 on Ubuntu Core; the
+    `refresh.retain` system option), so on classic the next refresh after
+    the move to 0.18 removes the 0.17 revision.
+  - On the first 0.17 start after the revert, the snap restores the database
+    from the backup taken before the refresh. Events, review items and
+    exports created under 0.18 disappear from the UI.
+  - The 0.18 database is kept, not deleted, as
+    `/var/snap/frigate/common/db/frigate.db.incompatible-<timestamp>`.
+  - Recording files written under 0.18 stay on disk with no database rows,
+    so 0.17's retention never deletes them. Remove them by hand, or set
+    0.17's `record.sync_recordings: true`, which deletes recording files
+    that have no database entry (it gives up if more than half of the files
+    would go).
 
 ## Diagnostics
 
