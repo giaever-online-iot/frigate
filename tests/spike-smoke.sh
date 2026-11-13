@@ -108,8 +108,34 @@ m9_wait_api() { local t=0; until curl -sf --max-time 3 http://127.0.0.1:5001/ver
   sleep 3; t=$((t+3)); [ "$t" -ge "${1:-120}" ] && return 1; done; return 0; }
 # 0.18.2 loads vec0 unconditionally and SWALLOWS a load failure (db/sqlitevecq.py:35-45, logger.error):
 # Frigate keeps running, so only this log line reveals it. Call after EVERY frigate (re)start.
+# Absence alone would pass on an empty or unreadable journal, so the same --since window must also hold
+# the positive control frigate-run prints unconditionally on every start, before it execs Frigate
+# (spike/bin/frigate-run:102; also a39bfb0 :99, so the 0.17.2 baseline prints it too).
+M9_START_CONTROL='frigate-run: go2rtc gate waited_ms='
+# m9_jhas <since> <fixed string>: the grep DRAINS its input (no -q): under this script's pipefail a
+# grep -q exits on the first match, journalctl dies of SIGPIPE on a large window, and a present line
+# would read as absent.
+m9_jhas() { journalctl -u "snap.$SNAP_NAME.frigate.service" --since "$1" 2>/dev/null | grep -F -- "$2" >/dev/null; }
 assert_vec0_loaded() {
-  check "m9: vec0 loaded ($2)" sh -c "! journalctl -u snap.$SNAP_NAME.frigate.service --since \"$1\" 2>/dev/null | grep -qF 'Unable to load the sqlite-vec extension'"
+  if ! m9_jhas "$1" "$M9_START_CONTROL"; then
+    fail_ "m9: vec0 loaded ($2): journal empty/unreadable (no '$M9_START_CONTROL' since $1)"; return
+  fi
+  if m9_jhas "$1" 'Unable to load the sqlite-vec extension'; then fail_ "m9: vec0 loaded ($2)"
+  else pass_ "m9: vec0 loaded ($2)"; fi
+}
+# m9_cfg_true '<python expr on cfg>': exit 0 iff the expression holds for $M9_CFG, 1 iff it does not,
+# 2 if the file cannot be read/parsed or the expression raises (contents never printed).
+m9_cfg_true() {
+  "$M9_PY" - "$M9_CFG" "$1" 2>/dev/null <<'PYEOF'
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f) or {}
+    ok = bool(eval(sys.argv[2], {"cfg": cfg}))
+except Exception:
+    sys.exit(2)
+sys.exit(0 if ok else 1)
+PYEOF
 }
 # m9_cfg_edit '<python statement on cfg>': trap-guarded backup (M9_CFG_BAK) + one yaml edit, 0600, never printed.
 m9_cfg_edit() {
@@ -1683,12 +1709,16 @@ check "m9: LIBAVFORMAT_VERSION_MAJOR=${M9_LAVF:-?} in the frigate env (D23)" sh 
   "[ -n '$M9_FPID' ] && [ -n '$M9_LAVF' ] && tr '\\0' '\\n' < /proc/$M9_FPID/environ | grep -qx 'LIBAVFORMAT_VERSION_MAJOR=$M9_LAVF'"
 check "m9: nginx -t on the rendered conf" snap run --shell $SNAP_NAME.nginx -c \
   '"$SNAP/usr/local/nginx/sbin/nginx" -t -p "$SNAP_DATA/nginx" -c "$SNAP_DATA/nginx/conf/nginx.conf"'
-M9_WEBP=$(ls -1 /var/snap/$SNAP_NAME/common/media/frigate/clips/*.webp 2>/dev/null | head -1)
+# Frigate's own export thumbnails land in clips/export/<id>.webp (record/export.py:585 @ v0.18.2), event
+# snapshots in clips/*.webp; either proves the /clips/ location's mime map. URL = path relative to clips/.
+M9_CLIPS=/var/snap/$SNAP_NAME/common/media/frigate/clips
+M9_WEBP=$(ls -1 "$M9_CLIPS"/*.webp "$M9_CLIPS"/export/*.webp 2>/dev/null | head -1)
 if [ -n "$M9_WEBP" ]; then
+  M9_WEBP_REL=${M9_WEBP#"$M9_CLIPS"/}
   check "m9: .webp served as image/webp (nginx mime)" sh -c \
-    "curl -sI --max-time 5 'http://127.0.0.1:5000/clips/$(basename "$M9_WEBP")' | grep -qi '^content-type: image/webp'"
+    "curl -sI --max-time 5 'http://127.0.0.1:5000/clips/$M9_WEBP_REL' | grep -i '^content-type: image/webp' >/dev/null"
 else
-  echo "SKIP (no data): m9 .webp mime — no clips/*.webp yet (snapshots need a tracked object)"
+  echo "SKIP (no data): m9 .webp mime — no clips/*.webp or clips/export/*.webp yet (snapshots need a tracked object, thumbnails an export)"
 fi
 
 # D22: ffmpeg.path reaches go2rtc's ffmpeg.bin (config mutation -> gated out of --nvr-safe).
@@ -1708,7 +1738,13 @@ fi
 
 # D16: 0.18 GPU stats scan /proc/*/fdinfo — only with a VAAPI/QSV camera (stats/util.py:279-286). Measure, don't gate.
 if [ "$NVR_SAFE" -eq 0 ] && render_node_present && [ -f "$M9_CFG" ]; then
-  if m9_cfg_edit 'cfg["cameras"]["testclip"].setdefault("ffmpeg", {})["hwaccel_args"] = "preset-vaapi"'; then
+  # an operator config without the testclip camera would turn the edit's KeyError into a FAIL
+  m9_cfg_true '"testclip" in (cfg.get("cameras") or {})'; M9_TC=$?
+  if [ "$M9_TC" -eq 1 ]; then
+    echo "SKIP (no data): m9 fdinfo scan — no testclip camera in this config"
+  elif [ "$M9_TC" -ne 0 ]; then
+    fail_ "m9: fdinfo scan — config.yml unreadable (testclip check rc=$M9_TC)"
+  elif m9_cfg_edit 'cfg["cameras"]["testclip"].setdefault("ffmpeg", {})["hwaccel_args"] = "preset-vaapi"'; then
     M9_M=$(m9_mark); snap restart $SNAP_NAME.frigate 2>/dev/null || true
     m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "fdinfo window"
     sleep 120

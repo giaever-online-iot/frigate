@@ -100,4 +100,36 @@ done
 t "S2: /api/logout location present"            grep -q 'location /api/logout' $N/nginx.conf.in
 t "S2: webp/png/jpeg mime types"                bash -c "grep -q 'image/webp webp;' $N/nginx.conf.in && grep -q 'image/png png;' $N/nginx.conf.in && grep -q 'image/jpeg jpg jpeg;' $N/nginx.conf.in"
 
+# --- S2 ffmpeg drift: every touchpoint follows frigate-run's exports (derived once, asserted positively) ---
+FR=spike/bin/frigate-run
+DEF=$(sed -n 's/^export DEFAULT_FFMPEG_VERSION="\([^"]*\)"$/\1/p' "$FR")
+INC=$(sed -n 's/^export INCLUDED_FFMPEG_VERSIONS="\([^"]*\)"$/\1/p' "$FR")
+t "drift: frigate-run exports DEFAULT ($DEF) and INCLUDED ($INC), DEFAULT listed first" \
+  bash -c "[ -n '$DEF' ] && [ -n '$INC' ] && [ '${INC%%:*}' = '$DEF' ]"
+for s in test testclip; do
+  t "drift: go2rtc.yaml.in $s stream execs ffmpeg/$DEF/bin" \
+    grep -qF "  $s: exec:__SNAP__/usr/lib/ffmpeg/$DEF/bin/ffmpeg " spike/config/go2rtc.yaml.in
+done
+t "drift: vaapi-probe execs ffmpeg/$DEF/bin" grep -qF "exec \"\$SNAP/usr/lib/ffmpeg/$DEF/bin/ffmpeg\"" spike/bin/vaapi-probe
+# the bridge's constants, read with ast (no import: the module needs yaml and runs at import time)
+bridge_const() { python3 -c 'import ast, sys
+for n in ast.parse(open(sys.argv[1]).read()).body:
+    if isinstance(n, ast.Assign) and any(getattr(x, "id", "") == sys.argv[2] for x in n.targets):
+        v = ast.literal_eval(n.value); print(":".join(v) if isinstance(v, tuple) else v); break' spike/bin/go2rtc-config-gen.py "$1"; }
+t "drift: bridge DEFAULT_FFMPEG_VERSION == $DEF" test "$(bridge_const DEFAULT_FFMPEG_VERSION)" = "$DEF"
+t "drift: bridge INCLUDED_FFMPEG_VERSIONS == $INC" test "$(bridge_const INCLUDED_FFMPEG_VERSIONS)" = "$INC"
+t "drift: validate-config DEFAULT == frigate-run's" \
+  test "$(sed -n 's/^export DEFAULT_FFMPEG_VERSION="\([^"]*\)"$/\1/p' spike/bin/validate-config)" = "$DEF"
+t "drift: validate-config INCLUDED == frigate-run's" \
+  test "$(sed -n 's/^export INCLUDED_FFMPEG_VERSIONS="\([^"]*\)"$/\1/p' spike/bin/validate-config)" = "$INC"
+t "drift: ffprobe app runs the $DEF tree" grep -q "command: usr/lib/ffmpeg/$DEF/bin/ffprobe\$" snap/snapcraft.yaml
+# installs_ffprobe <v>: an `install -D -m 0755 … "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/<v>/bin/ffprobe"` line
+installs_ffprobe() {
+  part ffmpeg | grep -E '^ *install -D -m 0755 ' | grep -F "\"\$CRAFT_PART_INSTALL/usr/lib/ffmpeg/$1/bin/ffprobe\"" >/dev/null
+}
+IFS=: read -r -a INC_A <<< "$INC"
+for v in "${INC_A[@]}"; do
+  t "drift: ffmpeg part installs usr/lib/ffmpeg/$v/bin/ffprobe" installs_ffprobe "$v"
+done
+
 [ "$FAILS" -eq 0 ]

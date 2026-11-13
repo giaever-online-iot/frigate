@@ -150,7 +150,71 @@ wait_export() {  # wait_export <id> <secs>: 0 once the export row exists and is 
 }
 testclip_capturing() { api /stats | py -c 'import json,sys; sys.exit(0 if (json.load(sys.stdin)["cameras"]["testclip"]["ffmpeg_pid"] or 0) > 0 else 1)'; }
 
-# EXIT trap: put phase F's held backups back and restore the VM's refresh.retain.
+# Seeded events (spec §5 item 2, orchestrator ruling V1): the looping test clip never triggers a detection
+# in the VM (cpu inference_speed 10.0 never-ran sentinel, testclip detection_fps 0.0), so the events are
+# made by Frigate's own manual-event API, POST /events/{camera}/{label}/create (admin; v0.17.2
+# api/event.py:1738, v0.18.2 :1751). Body fields valid at both tags (EventsCreateBody: v0.17.2
+# api/defs/request/events_body.py:38-43, v0.18.2 :34-40); source_type is fixed to "api" server-side. With a
+# duration the row is inserted with end_time = start + duration (track/object_processing.py create_manual_event:
+# v0.17.2 :524, v0.18.2 :544; events/maintainer.py handle_external_detection inserts it as is).
+SEED_IDS=""
+SEED_BODY='{"duration": 30, "include_recording": true}'
+SEED_ID_RE='^[0-9]+\.[0-9]+-[a-z0-9]{6}$'   # f"{now}-{rand_id}": api/event.py v0.17.2 :1770-1771, v0.18.2 :1784-1785
+seed_event() {  # seed_event: POST one manual event on testclip; prints its event_id, or fails
+  local resp id
+  resp=$(apix POST /events/testclip/person/create "$SEED_BODY") || return 1
+  id=$(printf '%s' "$resp" | py -c 'import json,sys; d=json.load(sys.stdin); print((d.get("event_id") or "") if d.get("success") else "")' 2>/dev/null) || return 1
+  printf '%s' "$id" | grep -xE "$SEED_ID_RE" >/dev/null || return 1
+  echo "$id"
+}
+# seeded_in_db [db]: every seeded id has an `event` row with end_time set; fails when nothing was seeded
+seeded_in_db() {
+  [ -n "$SEED_IDS" ] || return 1
+  local id; for id in $SEED_IDS; do
+    [ "$(sql "SELECT COUNT(*) FROM event WHERE id='$id' AND end_time IS NOT NULL" "${1:-$DB}")" = 1 ] || return 1
+  done
+}
+seeded_sql_list() { local id out=""; for id in $SEED_IDS; do out="$out${out:+,}'$id'"; done; echo "${out:-''}"; }
+# seeded_in_api: GET /events (testclip, no limit) lists every seeded id
+seeded_in_api() {
+  [ -n "$SEED_IDS" ] || return 1
+  # shellcheck disable=SC2086 # the ids are word-split on purpose (validated against SEED_ID_RE)
+  api "/events?cameras=testclip&limit=100000" | py -c 'import json, sys
+have = {e["id"] for e in json.load(sys.stdin)}
+want = set(sys.argv[1:])
+sys.exit(0 if want and want <= have else 1)' $SEED_IDS
+}
+# integrity_of [db]: PRAGMA integrity_check output (or the error); integrity_ok: exactly the single row "ok".
+# mode=rw: a missing DB is an error, not a fresh empty file that would check "ok".
+integrity_of() {
+  py - "${1:-$DB}" <<'EOF' 2>&1
+import sqlite3, sys, urllib.parse
+try:
+    con = sqlite3.connect("file:" + urllib.parse.quote(sys.argv[1]) + "?mode=rw", uri=True)
+    print("\n".join(str(r[0]) for r in con.execute("PRAGMA integrity_check")))
+except Exception as e:  # one line, so the FINDING shows the error, not a traceback header
+    print(f"error: {type(e).__name__}: {e}")
+EOF
+}
+integrity_ok() { [ "$(integrity_of "$@")" = ok ]; }
+# wal_finding <label>: before a revert, record whether frigate.db's -wal/-shm sidecars exist and their size
+# (frigate-run's restore moves frigate.db but not its -wal/-shm; follow-up, docs/m9-findings.md).
+wal_finding() {
+  local f out=""
+  for f in "$DB-wal" "$DB-shm"; do
+    if [ -e "$f" ]; then out="$out ${f##*/}=$(stat -c %s "$f") B;"; else out="$out ${f##*/}=absent;"; fi
+  done
+  finding "$1: before the revert:$out"
+}
+# webp_served <file under clips/>: nginx's internal loopback port (:5000, no login: frigate api/auth.py
+# trusts the internal port; listen.conf.in) serves it from location /clips/ as image/webp (nginx.conf.in).
+webp_served() {
+  local rel=${1#"$COMMON/media/frigate/clips/"}
+  [ "$rel" != "$1" ] || return 1
+  curl -sI --max-time 10 "http://127.0.0.1:5000/clips/$rel" | grep -iE '^content-type: image/webp' >/dev/null
+}
+
+# EXIT/INT/TERM traps: put phase F's held backups back and restore the VM's refresh.retain.
 HOLD=""; RETAIN_OLD=""; RETAIN_SET=""
 restore_hold() {  # move phase F's held backups back; clears HOLD only once nothing is left to move
   [ -n "$HOLD" ] || return 0
@@ -160,14 +224,23 @@ restore_hold() {  # move phase F's held backups back; clears HOLD only once noth
   fi
   HOLD=""
 }
-# shellcheck disable=SC2317 # invoked by the EXIT trap (indirect)
+# Runs once (CLEANED guard): on a normal exit and, explicitly, on INT/TERM (`timeout` ends a run with SIGTERM;
+# bash 5.2 also runs the EXIT trap on an untrapped SIGTERM, but the explicit traps do not depend on that and
+# give the 130/143 exit codes). The INT/TERM handlers exit, which fires the EXIT trap again; the guard makes
+# that second call a no-op. Nothing runs on SIGKILL: after a kill -9, restore refresh.retain by hand.
+CLEANED=0
+# shellcheck disable=SC2317 # invoked by the EXIT/INT/TERM traps (indirect)
 cleanup() {
+  [ "$CLEANED" -eq 0 ] || return 0
+  CLEANED=1
   restore_hold || echo "WARNING: phase F backups still held in $HOLD; move them back to $BK"
   if [ -n "$RETAIN_SET" ]; then
     if [ -n "$RETAIN_OLD" ]; then snap set system refresh.retain="$RETAIN_OLD"; else snap unset system refresh.retain; fi
   fi
 }
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 # The purge would destroy the VM's livecam secret and its config.yml, which the gate (tests/spike-smoke.sh)
 # treats as the operator's config. Park both in the gate's own recovery stashes. They are restored ONLY by
@@ -226,13 +299,23 @@ with open(p, "w") as f:  # existing file: open("w") keeps its 0600 mode
 EOF
   snap restart "$S.frigate" >/dev/null; wait_api 300 || { fail_ "A: API after config edit"; return 1; }
   check "A: 0.17.2 up with semantic_search (vec0 0.1.3 loaded at connect)" version_is 0.17.2
-  sleep 600                                  # 10 min: recordings + events on the test clip
+  # Seed >= 3 events through the manual-event API (ruling V1: no detection in the VM). Capture must be up
+  # first: create_manual_event saves a snapshot of the camera's current frame.
+  local t=0; while [ "$t" -lt 300 ]; do testclip_capturing && break; sleep 10; t=$((t+10)); done
+  local i id; for i in 1 2 3; do
+    if id=$(seed_event); then SEED_IDS="$SEED_IDS${SEED_IDS:+ }$id"; else fail_ "A: manual event $i created via POST /events/testclip/person/create"; fi
+    sleep 2
+  done
+  tr ' ' '\n' <<< "$SEED_IDS" > "$EV/A.event_ids"   # ids only (timestamps + random suffix), no contents
+  check "A: 3 manual events created (ids returned)" test "$(wc -w <<< "$SEED_IDS")" -eq 3
+  sleep 600                                  # 10 min: recordings on the test clip; the seeded events end (duration 30)
   local now resp; now=$(date +%s)
   resp=$(apix POST "/export/testclip/start/$((now-300))/end/$((now-240))") || resp=""
   A_EXPORT_ID=$(printf '%s' "$resp" | py -c 'import json,sys; print(json.load(sys.stdin).get("export_id") or "")' 2>/dev/null) || A_EXPORT_ID=""
   check "A: export started on 0.17.2" test -n "$A_EXPORT_ID"
   check "A: export finished on 0.17.2" wait_export "$A_EXPORT_ID" 300
-  check "A: events seeded" test "$(sql "SELECT COUNT(*) FROM event WHERE camera='testclip'")" -gt 0
+  check "A: events seeded (every returned id is an event row with end_time set)" seeded_in_db
+  finding "A: event rows on testclip = $(sql "SELECT COUNT(*) FROM event WHERE camera='testclip'") (seeded ids: $(wc -w <<< "$SEED_IDS"))"
   check "A: recordings seeded" test "$(sql "SELECT COUNT(*) FROM recordings WHERE camera='testclip'")" -gt 0
   check "A: vec_thumbnails written by vec0 0.1.3" test "$(sql "SELECT COUNT(*) FROM sqlite_master WHERE name='vec_thumbnails'")" = 1
   finding "A: vec_thumbnails_info present on 0.17.2 = $(sql "SELECT COUNT(*) FROM sqlite_master WHERE name='vec_thumbnails_info'") (0 = legacy pre-0.1.6 layout)"
@@ -270,9 +353,9 @@ phase_b_refresh_to_candidate() {
   check "B: backup_config.yaml == pre-refresh config" test "$(sha_of "$CFGDIR/backup_config.yaml")" = "$(cat "$EV/A.cfgsha")"
   check "B: backup_config.yaml is 0600" test "$(stat -c %a "$CFGDIR/backup_config.yaml")" = 600
   check "B: validate-config exits 0" snap run "$S.validate-config"
-  check "B: events not lost (DB)" test "$(sql 'SELECT COUNT(*) FROM event')" -ge "$(count_of A event)"
+  check "B: seeded events not lost (DB, by id)" seeded_in_db
   check "B: exports not lost (DB)" test "$(sql 'SELECT COUNT(*) FROM export')" -ge "$(count_of A export)"
-  check "B: API lists the pre-existing events" test "$(api "/events?limit=100000&before=$A_T1" | jlen)" -ge "$(count_of A event)"
+  check "B: API lists the seeded events (by id)" seeded_in_api
   check "B: API lists the pre-existing recordings" test "$(api "/testclip/recordings?after=$A_T0&before=$A_T1" | jlen)" -ge "$(count_of A recordings_live)"
   check "B: API lists the pre-existing export" test -n "$(export_row "$A_EXPORT_ID")"
   # item 8: cleanup's first pass runs ~60 s after start (record/cleanup.py run(): wait(60), counter 0)
@@ -325,24 +408,30 @@ phase_b_export_thumbnail() {  # item 6: the REAL 8.0 thumbnail branch (record/ex
   [ -n "$id" ] && thumb=$(wait_export "$id" 300)
   check "B: export thumbnail (.webp via /usr/lib/ffmpeg/8.0) exists and is non-empty" test -s "$thumb"
   check "B: export thumbnail is a WebP file" test "$(head -c 12 "$thumb" 2>/dev/null | tail -c 4)" = WEBP
+  # item 9: nginx serves Frigate's own thumbnail (clips/export/<id>.webp, record/export.py:585) as image/webp
+  check "B: nginx serves the export thumbnail as image/webp (:5000 /clips/export/)" webp_served "$thumb"
 }
 
 phase_c_revert() {
   echo "== C: revert to the 0.17.2 baseline =="
   local h0; h0=$(hook_runs)
+  wal_finding "C"
   revert_to "$REV_A" "C revert" || return 1
-  check "C: running 0.17.2" version_is 0.17.2
+  check "C: running 0.17.2 (serves the API)" version_is 0.17.2
   check "C: frigate-run detected the downgrade" jhas "$REVERT_MARK" 'frigate-run: DOWNGRADE detected'
   check "C: restored the 0.17.2 backup" jhas "$REVERT_MARK" "frigate-run: restored $BK/frigate-pre-0.17.2-r$REV_A.db"
   check "C: restored DB carries no 0.18 migration" test "$(sql "SELECT COUNT(*) FROM migratehistory WHERE name GLOB '03[345]_*'")" = 0
+  check "C: restored DB integrity_check = ok" integrity_ok
+  finding "C: integrity_check after the revert: $(integrity_of | head -3 | tr '\n' ' ')"
   check "C: config.yml is the pre-refresh file (snapd per-revision data)" test "$(sha_of "$CFG")" = "$(cat "$EV/A.cfgsha")"
   check "C: config.yml is the 0.17-0 file" yaml_true 'str(cfg.get("version")) == "0.17-0"'
   local t=0; while [ "$t" -lt 600 ]; do testclip_capturing && break; sleep 15; t=$((t+15)); done
   check "C: 0.17.2 captures testclip after revert" testclip_capturing
   local n0; n0=$(sql "SELECT COUNT(*) FROM recordings WHERE camera='testclip'"); sleep 120
   check "C: 0.17.2 writes new recordings after revert" test "$(sql "SELECT COUNT(*) FROM recordings WHERE camera='testclip'")" -gt "$n0"
-  t=0; while [ "$t" -lt 600 ] && [ "$(sql "SELECT COUNT(*) FROM event WHERE camera='testclip' AND start_time > $REVERT_T")" = 0 ]; do sleep 15; t=$((t+15)); done
-  check "C: 0.17.2 detects on testclip after revert (new event)" test "$(sql "SELECT COUNT(*) FROM event WHERE camera='testclip' AND start_time > $REVERT_T")" -gt 0
+  check "C: 0.17.2 lists the seeded events after revert (by id)" seeded_in_api
+  # detection is NOT provable in the VM (ruling V1): recorded, never gating
+  finding "C: detection events since the revert (not provable in the VM): $(sql "SELECT COUNT(*) FROM event WHERE camera='testclip' AND start_time > $REVERT_T AND id NOT IN ($(seeded_sql_list))")"
   finding "C: hook.log 'backed up' lines across the revert: $h0 -> $(hook_runs) (unchanged = snapd ran no pre-refresh on revert)"
 }
 
@@ -356,6 +445,8 @@ phase_d_rerefresh() {
   check "D: backup_config.yaml == pre-refresh config" test "$(sha_of "$CFGDIR/backup_config.yaml")" = "$(cat "$EV/A.cfgsha")"
   check "D: migrations 033-035 present" test "$(sql "SELECT COUNT(*) FROM migratehistory WHERE name IN ('033_create_export_case_table','034_add_export_case_to_exports','035_add_motion_heatmap')")" = 3
   check "D: exportcase table" test "$(sql "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='exportcase'")" = 1
+  check "D: seeded events not lost (DB, by id)" seeded_in_db
+  check "D: API lists the seeded events (by id)" seeded_in_api
 }
 
 phase_e_retention_d21() {
@@ -364,8 +455,11 @@ phase_e_retention_d21() {
   install_snap "$CAND" "E refresh 2" || return 1
   check "E: a 0.17.2 backup survives two 0.18 refreshes" test -s "$BK/frigate-pre-0.17.2-r$REV_A.db"
   check "E: at most 3 backups" test "$(find "$BK" -maxdepth 1 -name 'frigate-pre-*.db' | wc -l)" -le 3
+  wal_finding "E"
   revert_to "$REV_A" "E revert to the baseline" || return 1
   check "E: revert across the boundary restored the 0.17.2 backup" jhas "$REVERT_MARK" "frigate-run: restored $BK/frigate-pre-0.17.2-r$REV_A.db"
+  check "E: restored DB integrity_check = ok" integrity_ok
+  finding "E: integrity_check after the revert: $(integrity_of | head -3 | tr '\n' ' ')"
   check "E: running 0.17.2" version_is 0.17.2
   install_snap "$CAND" "E back to candidate" || return 1
 }
@@ -375,7 +469,10 @@ phase_f_v017_on_migrated_db() {  # FINDING ONLY (D21 removes the dependency); re
   # Everything up to the reinstall is FINDING-ONLY (spec 7a): a 0.17.2 that cannot serve on the migrated
   # DB is the thing being probed, so it never turns the run red and never skips the reinstall below.
   HOLD=$COMMON/db/m9-hold; mkdir -p "$HOLD"; mv "$BK"/frigate-pre-*.db "$HOLD"/ 2>/dev/null || true
-  if revert_probe "$REV_A" "F revert, no backups"; then
+  wal_finding "F"
+  local f_up=0; revert_probe "$REV_A" "F revert, no backups" && f_up=1
+  finding "F: integrity_check after the revert (no restore): $(integrity_of | head -3 | tr '\n' ' ')"
+  if [ "$f_up" -eq 1 ]; then
     local n0; n0=$(sql "SELECT COUNT(*) FROM recordings" 2>/dev/null); sleep 300
     if api /events >/dev/null && [ "$(sql 'SELECT COUNT(*) FROM recordings' 2>/dev/null)" -gt "${n0:-0}" ]; then
       finding "F: 0.17.2 ran on the 0.18-migrated DB: /events OK, new recordings written"

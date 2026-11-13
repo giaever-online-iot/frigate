@@ -8,3 +8,6 @@
 *creds*.txt
 # snapcraft export-login output (observed untracked in a PUBLIC repo tree, M8 T10)
 *.login
+
+# python -m unittest discover -s tests creates it
+tests/__pycache__/
