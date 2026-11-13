@@ -214,7 +214,7 @@ parts:
     #   - distutils-precedence.pth .................. removes the shim activation (stdlib distutils stays)
     prime:
       - -usr/lib/python3.11/test
-      - -usr/lib/python3.11/config-3.11-x86_64-linux-gnu/libpython3.11.a
+      - -usr/lib/python3.11/config-3.11-*/libpython3.11.a
       - -usr/include
       - -usr/share/man                     # python3.11.1 man page (import-neutral)
       - -usr/lib/python3.11/site-packages/pip
@@ -266,9 +266,21 @@ parts:
     build-packages: [wget]
     stage-packages: [libusb-1.0-0]
     override-build: |
-      wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
-      echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
-      dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+      # Per-arch (M7c D5): fail loud off amd64/arm64.
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64)
+          wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
+          echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
+          dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+          ;;
+        arm64)
+          wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_arm64.deb"
+          echo "eab8aa4576b4dbf738135d8094f32270b24117f77147d25cbe0f49d0144d85f2  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
+          dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+          ;;
+        *)
+          echo "libedgetpu: unsupported arch $CRAFT_ARCH_BUILD_FOR" >&2; exit 1 ;;
+      esac
     # M8 Task 6: drop this part's stage-package docs (libusb-1.0-0 + libedgetpu1-max = 8,052 B) —
     # never needed at runtime. (doc/man are cross-part; excluded per owning part.)
     prime:
@@ -278,8 +290,19 @@ parts:
     stage-packages:
       - vainfo
       - ocl-icd-libopencl1   # ICD loader: provides libOpenCL.so.1 for OpenVINO GPU plugin
-      - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
-      - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
+      - on amd64:
+          - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
+          - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
+    # M7c D7: on arm64 the Intel stack is absent, but the snap layout bind-mounts need their source
+    # dirs to exist; stage empty .keep markers there.
+    override-build: |
+      craftctl default
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        arm64)
+          install -D -m 0644 /dev/null "$CRAFT_PART_INSTALL/etc/OpenCL/vendors/.keep"
+          install -D -m 0644 /dev/null "$CRAFT_PART_INSTALL/usr/lib/x86_64-linux-gnu/intel-opencl/.keep"
+          ;;
+      esac
     # M8 Task 6: drop this part's stage-package docs (Intel OpenCL stack + vainfo = 63,458 B) and
     # man pages (vainfo.1 + libOpenCL.7). None needed at runtime.
     prime:

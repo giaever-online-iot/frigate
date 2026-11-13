@@ -102,4 +102,28 @@ t "T3: stale ~50% RAM shm note gone"        sh -c "! grep -q 'default sizing (~5
 
 t "T3: no bytecode in shipped dirs (spike/bin, spike/probes)" sh -c "[ -z \"\$(find spike/bin spike/probes -name '__pycache__' -o -name '*.pyc')\" ]"
 
+# --- T4 snapcraft arch-neutral parts ---
+onamd_pkgs()  { yq '.parts.va-tools.stage-packages[] | select(tag == "!!map") | .["on amd64"][]' < "$Y"; }
+plain_pkgs()  { yq '.parts.va-tools.stage-packages[] | select(tag == "!!str")' < "$Y"; }
+export -f onamd_pkgs plain_pkgs
+t "T4: python prime excludes libpython .a by glob" bash -c "part \$Y python311 | grep -qF -- '- -usr/lib/python3.11/config-3.11-*/libpython3.11.a'"
+t "T4: no x86-pathed libpython exclude left"      sh -c "! grep -q 'config-3.11-x86_64-linux-gnu' $Y"
+for pk in intel-opencl-icd libigdgmm12; do
+  t "T4: $pk only under on amd64" bash -c "onamd_pkgs | grep -qx $pk && ! plain_pkgs | grep -qx $pk"
+done
+t "T4: arm64 stages OpenCL bind source"           bash -c "part \$Y va-tools | grep -qF 'etc/OpenCL/vendors/.keep'"
+t "T4: arm64 stages intel-opencl bind source"     bash -c "part \$Y va-tools | grep -qF 'usr/lib/x86_64-linux-gnu/intel-opencl/.keep'"
+t "T4: libedgetpu is per-arch, fails loud"        bash -c "part \$Y libedgetpu | grep -qF 'case \"\$CRAFT_ARCH_BUILD_FOR\" in' && part \$Y libedgetpu | grep -q 'libedgetpu: unsupported arch'"
+t "T4: libedgetpu amd64 sha kept"                 bash -c "part \$Y libedgetpu | grep -q 63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b"
+t "T4: libedgetpu arm64 asset + sha"              bash -c "part \$Y libedgetpu | grep -q 'bookworm_arm64.deb' && part \$Y libedgetpu | grep -q eab8aa4576b4dbf738135d8094f32270b24117f77147d25cbe0f49d0144d85f2"
+d5_ok() { [ "$(yq '.platforms | has("arm64")' < "$1")" = true ] || return 0
+  for p in ffmpeg go2rtc libedgetpu; do part "$1" "$p" | awk '/arm64\)/{f=1} f&&/[0-9a-f]{64}/{ok=1} f&&/;;/{f=0} END{exit !ok}' || return 1; done; }
+export -f d5_ok
+t "T4: D5 invariant holds on the real yaml"       d5_ok "$Y"
+# Built-in mutation: force platforms arm64 and strip go2rtc's arm64 row in a copy -> the guard must reject it.
+yq '.platforms.arm64 = null' < "$Y" > "$TMP/mut.yaml"
+awk '/^parts:/{inp=1} inp&&/^  go2rtc:$/{g=1;print;next} g&&/^  [a-z0-9-]+:$/{g=0} g&&/arm64\)/{skip=1} skip{ if (/;;/) skip=0; next } {print}' "$TMP/mut.yaml" > "$TMP/mut2.yaml"
+t "T4: mutation copy really has arm64 platform"   test "$(yq '.platforms | has("arm64")' < "$TMP/mut2.yaml")" = true
+t "T4: D5 guard rejects arm64 platform without a go2rtc arm64 row" sh -c "! d5_ok '$TMP/mut2.yaml'"
+
 [ "$FAILS" -eq 0 ]
