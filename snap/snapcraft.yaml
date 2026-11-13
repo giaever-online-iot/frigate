@@ -334,6 +334,8 @@ parts:
   # M4 Task 1: upstream's exact nginx recipe (docker/main/build_nginx.sh @ v0.17.2) as a part.
   # nginx 1.27.4 + kaltura vod 1.31 (2 upstream patches, committed under patches/nginx/) +
   # secure-token 1.5 + set-misc v0.33 + ngx_devel_kit v0.3.3; upstream configure flags verbatim.
+  # vod 1.31 and secure-token 1.5 are fetched from tree-identical forks since the kaltura repos
+  # went 404 (W-19; provenance in the comments above each download).
   # THIRD-PARTY build patches (nginx-vod-module, not Frigate source) — outside the
   # docs/patches.md Frigate register scope; provenance documented in the patch headers.
   # No ccache (one-shot part build). html/ + conf/*.default removed per upstream.
@@ -372,11 +374,28 @@ parts:
       wget -nv -O nginx.tar.gz "https://nginx.org/download/nginx-1.27.4.tar.gz"
       echo "294816f879b300e621fa4edd5353dd1ec00badb056399eceb30de7db64b753b2  nginx.tar.gz" | sha256sum -c -
       mkdir -p nginx && tar -zxf nginx.tar.gz -C nginx --strip-components=1
-      wget -nv -O vod.tar.gz "https://github.com/kaltura/nginx-vod-module/archive/refs/tags/1.31.tar.gz"
-      echo "ace04201cf2d2b1a3e5e732a22b92225b8ce61a494df9cc7f79d97efface8952  vod.tar.gz" | sha256sum -c -
+      # W-19: kaltura/nginx-vod-module returns 404 on GitHub since ~Nov 2026 (repo removed). Original
+      # pin: tag 1.31 (sha256 ace04201cf2d2b1a3e5e732a22b92225b8ce61a494df9cc7f79d97efface8952).
+      # Software Heritage, origin kaltura/nginx-vod-module: refs/tags/1.31 -> release
+      # 4bce0c8afabc0a65e30ec8ff596956de5cecfcc8 -> revision 6c305a78b7ab6e4312279bea5c45741bb54a713b
+      # -> directory f2ba251df1ddf2b62bce55bea68e79e5974a032d. Fetched from the same revision in the
+      # dio-az/nginx-vod-module fork (AGPL-3.0, as the original; the fork upstream Frigate dev uses):
+      # its git tree hash equals that SWH directory, i.e. byte-identical files to kaltura 1.31. Only
+      # the archive's top dir name differs (stripped below). Still upstream parity: build_nginx.sh
+      # @ v0.17.2 and v0.18.2 both pin kaltura vod 1.31 and secure-token 1.5.
+      wget -nv -O vod.tar.gz "https://github.com/dio-az/nginx-vod-module/archive/6c305a78b7ab6e4312279bea5c45741bb54a713b.tar.gz"
+      echo "a57069a31fa6cb0b045746f53d0fcd48f1bb409727d4cfbe2197cd8bfaca06a2  vod.tar.gz" | sha256sum -c -
       mkdir -p nginx-vod-module && tar -zxf vod.tar.gz -C nginx-vod-module --strip-components=1
-      wget -nv -O secure-token.tar.gz "https://github.com/kaltura/nginx-secure-token-module/archive/refs/tags/1.5.tar.gz"
-      echo "9809b7797e049429627a2c9e78c78e4b27bf4a2d0c7274a126cb6bb16ddd4215  secure-token.tar.gz" | sha256sum -c -
+      # W-19: kaltura/nginx-secure-token-module returns 404 on GitHub since ~Nov 2026 (repo removed).
+      # Original pin: tag 1.5 (sha256 9809b7797e049429627a2c9e78c78e4b27bf4a2d0c7274a126cb6bb16ddd4215).
+      # Software Heritage, origin kaltura/nginx-secure-token-module: refs/tags/1.5 -> release
+      # 18aca97ebfe9b50218cf7db636b25893f9abcfba -> revision 18b97a82878e09fef24fe4f6a446eed01dbe28d7
+      # -> directory c8206fdc990124b82aa69410d02a1e410e514854. Fetched from the same revision in the
+      # webtor-io/nginx-secure-token-module mirror (AGPL-3.0, as the original; unchanged history):
+      # its git tree hash equals that SWH directory, i.e. byte-identical files to kaltura 1.5. Only
+      # the archive's top dir name differs (stripped below).
+      wget -nv -O secure-token.tar.gz "https://github.com/webtor-io/nginx-secure-token-module/archive/18b97a82878e09fef24fe4f6a446eed01dbe28d7.tar.gz"
+      echo "c3691a5af6f1dfdc0ca5ff87c1947e65108762f89792d7288a07d386dc702cec  secure-token.tar.gz" | sha256sum -c -
       mkdir -p nginx-secure-token-module && tar -zxf secure-token.tar.gz -C nginx-secure-token-module --strip-components=1
       wget -nv -O ngx-devel-kit.tar.gz "https://github.com/vision5/ngx_devel_kit/archive/refs/tags/v0.3.3.tar.gz"
       echo "faa2fcd5168b10764d35081356511d5f84db5c526a1aa4b6add2db94b6853b2b  ngx-devel-kit.tar.gz" | sha256sum -c -
