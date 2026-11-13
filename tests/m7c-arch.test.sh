@@ -92,4 +92,12 @@ t "T2: cpu block not flagged"            sh -c "! ( printf 'detectors:\n  cpu:\n
 t "T2: commented-out openvino ignored"   sh -c "! ( printf 'detectors:\n  cpu:\n    type: cpu\n#    type: openvino\n' > '$TMP/c3.yml'; . '$LIBWAIT'; config_uses_openvino '$TMP/c3.yml' )"
 t "T2: missing file is not flagged"      sh -c "! ( . '$LIBWAIT'; config_uses_openvino '$TMP/nope.yml' )"
 
+# --- T3 wiring ---
+t "T3: x86_64-linux-gnu literal only in the two triplet helpers" sh -c "[ -z \"\$(grep -rln --exclude-dir=__pycache__ 'x86_64-linux-gnu' spike/bin spike/probes | grep -vxE 'spike/bin/lib-wait.sh|spike/probes/probe_common.py')\" ]"
+t "T3: imports-probe sources lib-wait.sh"   grep -q '^\. "\$SNAP/bin/lib-wait.sh"' spike/bin/imports-probe
+t "T3: wrappers resolve the triplet alone"  sh -c "grep -q '^_TRIPLET=\$(arch_triplet)\$' spike/bin/imports-probe && grep -q '^_TRIPLET=\$(arch_triplet)\$' spike/bin/validate-config"
+t "T3: frigate-run sets SHM_MAX_FRAMES"     sh -c "grep -qx 'SHM_MAX_FRAMES=\$(shm_max_frames)' spike/bin/frigate-run && grep -qx 'export SHM_MAX_FRAMES' spike/bin/frigate-run"
+t "T3: frigate-run logs the D10 ERROR line" grep -qF 'frigate-run: ERROR config.yml uses the openvino detector, which cannot run on arm64; set it to cpu or coral (or delete config.yml to re-render)' spike/bin/frigate-run
+t "T3: stale ~50% RAM shm note gone"        sh -c "! grep -q 'default sizing (~50% RAM)' $Y"
+
 [ "$FAILS" -eq 0 ]

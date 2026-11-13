@@ -68,8 +68,9 @@ plugs:
   # Task 5 finding: glibc sem_open(O_CREAT) mknods a RANDOM /dev/shm/sem.XXXXXX tempfile,
   # so the sem.snap.<name>.* AppArmor rule can never match (python multiprocessing SemLock
   # -> PermissionError). private:true gives the snap its own /dev/shm tmpfs — the canonical fix.
-  # SIZING NOTE: the private /dev/shm tmpfs uses the system default sizing (~50% RAM);
-  # flag for M3 frame-buffer capacity planning (see task-5-report.md Fix round 1).
+  # SIZING NOTE (F8): private:true bind-mounts the host's /dev/shm/snap.frigate/ directory, so
+  # its size is the host's /dev/shm tmpfs, not a per-snap allocation. Frigate caps its frame
+  # buffers explicitly via SHM_MAX_FRAMES (D13a).
   shm-private:
     interface: shared-memory
     private: true
