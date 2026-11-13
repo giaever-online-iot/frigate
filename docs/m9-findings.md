@@ -4,7 +4,7 @@
 
 M9 moves the snap from Frigate 0.17.2 to 0.18.2 with one carried Frigate patch (`0001-env-driven-paths`, context-only rebase), upstream-parity pins (ffmpeg trees 5.0/7.0/8.0 with 8.0 default, go2rtc v1.9.14, python-multipart 0.0.26, openvino 2025.4, sqlite-vec 0.1.9, degirum removed), the nginx mirror updates, a new gate section and an upgrade/revert/re-refresh rehearsal script.
 
-**Status in one paragraph.** Everything below that is marked evidence was produced on a **local candidate** (`snapcraft pack`, not the Launchpad artifact) in the `m8-gate` LXD VM. The final local candidate is **pack-5** (1,106,505,728 B, sha256 `bf6d736783447f176bcbf22b5f14f1cd921df1a606e5beee289ed2f54a8805e9`). It passes the final gate (run 6): **184 PASS / 0 FAIL / 21 SKIP, 610 denials / 0 unexpected**. The upgrade, revert, re-refresh, real-thumbnail, backup-retention and retention-deletion rehearsal (#2) ran on it: **86 PASS / 1 FAIL**, the one FAIL being the semantic-search reindex, ruled a non-gating finding that reproduced in 3 of 3 runs (an upstream defect candidate for Joachim). Phases C, D, E, F and G (revert, re-refresh, D21 retention, no-backup finding, D24 WAL quiesce) are all green. Rehearsal #1 had been red (a stale WAL replayed onto the restored backup); that was fixed in M9 (D24) and is proven in the VM below. **Detection is not proven in the VM** (a known M3 calibration effect; first real proof is on the hub). The Launchpad build, the final gate on its artifact and the size-floor retune have **not happened** (they need credentials that builders do not hold). The OpenVINO GPU path, VAAPI decode, Coral and the fdinfo denial rate are **not proven** by anything here (see "Not proven by the gate VM").
+**Status in one paragraph.** Everything below that is marked evidence was produced on a **local candidate** (`snapcraft pack`, not the Launchpad artifact) in the `m8-gate` LXD VM. The final local candidate is **pack-5** (1,106,505,728 B, sha256 `bf6d736783447f176bcbf22b5f14f1cd921df1a606e5beee289ed2f54a8805e9`). It passes the final gate (run 6): **184 PASS / 0 FAIL / 21 SKIP, 610 denials / 0 unexpected**. The upgrade, revert, re-refresh, real-thumbnail, backup-retention and retention-deletion rehearsal (#2) ran on it: **86 PASS / 1 FAIL**, the one FAIL being the semantic-search reindex, ruled a non-gating finding that reproduced in 3 of 3 runs (an upstream defect candidate for the maintainer). Phases C, D, E, F and G (revert, re-refresh, D21 retention, no-backup finding, D24 WAL quiesce) are all green. Rehearsal #1 had been red (a stale WAL replayed onto the restored backup); that was fixed in M9 (D24) and is proven in the VM below. **Detection is not proven in the VM** (a known M3 calibration effect; first real proof is on the hub). The Launchpad build, the final gate on its artifact and the size-floor retune have **not happened** (they need credentials that builders do not hold). The OpenVINO GPU path, VAAPI decode, Coral and the fdinfo denial rate are **not proven** by anything here (see "Not proven by the gate VM").
 
 **Evidence classes** (as in M8).
 
@@ -43,7 +43,7 @@ Spec §5 items 1–11 (+7a, 7b), `docs/superpowers/specs/2026-11-13-frigate-0.18
 | 10 | W-16 and W-11 acceptance re-run after the go2rtc bump, if landed | **NOT APPLICABLE (not landed)** | Neither is merged; nothing was run. T11 (S5 exec filter) is skipped for the same reason (see Follow-ups) |
 | 11 | Size reported against 990,572,544 B (expected about +112 MB); floor retuned | **PARTIAL** (local candidate, not the Launchpad artifact) | Local candidate pack-5 1,106,505,728 B, +115,933,184 B vs rev 4's 990,572,544 B (see Builds). The floor retune from the Launchpad artifact is **PENDING** |
 
-**Tally (2026-11-13, after rehearsal #2 and gate run 6):** MET 7 (2, 3 with the ruling, 4, 7a, 7b, 8, 9); PARTIAL 4 (1 and 11: local candidate only; 6: scratch-build mutation not run; 7: reindex finding); NOT PROVEN 1 (5); NOT APPLICABLE 1 (10); PENDING 0 beyond the Launchpad artifact, the final gate on it and the size-floor retune. The spec's exit criterion (items 1–11 PASS on the Launchpad artifact, plus Joachim's go for `latest/edge`) is **not met yet**.
+**Tally (2026-11-13, after rehearsal #2 and gate run 6):** MET 7 (2, 3 with the ruling, 4, 7a, 7b, 8, 9); PARTIAL 4 (1 and 11: local candidate only; 6: scratch-build mutation not run; 7: reindex finding); NOT PROVEN 1 (5); NOT APPLICABLE 1 (10); PENDING 0 beyond the Launchpad artifact, the final gate on it and the size-floor retune. The spec's exit criterion (items 1–11 PASS on the Launchpad artifact, plus the maintainer's go for `latest/edge`) is **not met yet**.
 
 ---
 
@@ -94,7 +94,7 @@ The gate VM (`m8-gate`) has no GPU render node and no Coral. In plain words, the
    - VM side: `tests/spike-smoke.sh` block "m9: WAL quiesce on every stop path" (`snap stop`, `snap restart`, a reinstall-refresh, and `kill -9` of `MainPID`), and `tests/m9-rehearsal.sh` C/E/F quiesce checks plus phase G.
 4. **Mutations** (hermetic, `[REPORT: walfix-report.md]`). The shipped Store rev 4/5 restore shape (sidecars not moved) makes the restore test FAIL with the restored DB reading **`ok live:70` against the backup's `ok backup:50`**: `integrity_check` passes, the content is the live DB's. That is why the test asserts content. Dropping `journal_mode=DELETE` FAILs on the header bytes only; SQLite removes the WAL on a clean last close anyway. Removing both bounds FAILs `bounded` (10 s). `exit "$rc"` FAILs both `exit 0` checks. Removing the `post-stop-command` line FAILs the static check, and on a stub harness it FAILs every `quiesce ran` check of the gate block.
 
-**Labelled finding: the SHIPPED Store revisions carry the same latent bug.** Store rev 4 and rev 5 (0.17.2; `frigate-run` restore at `a39bfb0` `:136-145`, with no `post-stop-command`) move only `frigate.db` on a downgrade restore and leave a quiesce-free stop. Any downgrade *across a WAL* under those revisions can replay a stale WAL onto the restored backup: a revert from a later revision to rev 4/5, or a forged or real newer `.last-writer`, while a non-empty `-wal` exists. That is the same mechanism as above (whole-branch review, Important 4). The 0.18 snap's stop hook protects the move *off* 0.18. It cannot fix code already in the Store. Nothing here republishes rev 4/5. Whether to rebuild 0.17.2 with D24 is Joachim's decision.
+**Labelled finding: the SHIPPED Store revisions carry the same latent bug.** Store rev 4 and rev 5 (0.17.2; `frigate-run` restore at `a39bfb0` `:136-145`, with no `post-stop-command`) move only `frigate.db` on a downgrade restore and leave a quiesce-free stop. Any downgrade *across a WAL* under those revisions can replay a stale WAL onto the restored backup: a revert from a later revision to rev 4/5, or a forged or real newer `.last-writer`, while a non-empty `-wal` exists. That is the same mechanism as above (whole-branch review, Important 4). The 0.18 snap's stop hook protects the move *off* 0.18. It cannot fix code already in the Store. Nothing here republishes rev 4/5. Whether to rebuild 0.17.2 with D24 is the maintainer's decision.
 
 **Scope check (other WAL databases).** At v0.18.2 every Frigate database handle (`app.py:192` migrations, `app.py:260` main, `record/record.py:29`, `record/cleanup.py:60`, `embeddings/maintainer.py:127`) opens `config.database.path`, which the snap's template sets to `__SNAP_COMMON__/db/frigate.db` (`spike/config/frigate-config.yml:21`). The vec0 tables live inside that same file. The only other `.db` file is upstream's pre-migration `backup.db` (`app.py:199-203`, `shutil.copyfile`). It is never opened in WAL mode, and the snap's backup/restore path does not swap it. So `frigate.db` is the only file in scope. (Upstream also truncates an oversized WAL at runtime, `record/cleanup.py:57-62`; that is not a stop-time guarantee.)
 
@@ -117,7 +117,7 @@ The `-wal` FINDING lines of the rehearsal are taken while the candidate still ru
 
 ## Semantic-search reindex after upgrade (spec §5 item 7)
 
-**Status: FINDING, reproduced in 3 of 3 runs. Not gating** (orchestrator ruling, 04:27). **Upstream defect candidate, for Joachim to decide on; no Frigate patch was made.** Rehearsal exit is non-zero for this check alone (`FAIL: B: reindex logged no sqlite/vec error`), because the script counts it as a FAIL.
+**Status: FINDING, reproduced in 3 of 3 runs. Not gating** (orchestrator ruling, 04:27). **Upstream defect candidate, for the maintainer to decide on; no Frigate patch was made.** Rehearsal exit is non-zero for this check alone (`FAIL: B: reindex logged no sqlite/vec error`), because the script counts it as a FAIL.
 
 | Run | Evidence | Status |
 |---|---|---|
@@ -166,7 +166,7 @@ Mutants (not deliverables): MUT033 (candidate minus migration `033_create_export
 
 The first pack failed because `github.com/kaltura/nginx-vod-module` and `github.com/kaltura/nginx-secure-token-module` return **404** (`gh api` on both: HTTP 404). Upstream Frigate v0.17.2 and v0.18.2 `docker/main/build_nginx.sh` pin the same two kaltura tags (vod 1.31, secure-token 1.5), so upstream's own image build is affected too `[REPORT: w19-report.md]`.
 
-Fix: branch `fix/nginx-module-sources` @ **`95c7233`** (full `95c72330daf5d941473ead27caf872c7ff6cc245`, off `main` `a39bfb0`, pushed by the orchestrator as PR #7; opening or merging it is Joachim's), **cherry-picked onto M9 as `ecf63dd`**. Content stays kaltura 1.31 and 1.5, file for file. Both replacements are pinned by sha256 and proven tree-identical against Software Heritage (SWH), which archived the original repos:
+Fix: branch `fix/nginx-module-sources` @ **`95c7233`** (full `95c72330daf5d941473ead27caf872c7ff6cc245`, off `main` `a39bfb0`, pushed by the orchestrator as PR #7; opening or merging it is the maintainer's), **cherry-picked onto M9 as `ecf63dd`**. Content stays kaltura 1.31 and 1.5, file for file. Both replacements are pinned by sha256 and proven tree-identical against Software Heritage (SWH), which archived the original repos:
 
 | Module | SWH proof chain | Replacement (fork, license) | sha256 of the archive | Git tree |
 |---|---|---|---|---|
@@ -229,13 +229,13 @@ The controller also avoids `rm` inside `bash -c` in the VM (the safety check blo
 9. **D7, OpenVINO IR:** the CPU-only load of the old IR on openvino 2025.4 is proven (see "Not proven by the gate VM"). Still open: measure upstream's newly converted IR (`build_ov_model.py`, openvino ≥ 2026.2) against our MO-converted IR (inference speed, GPU plugin behaviour) on hardware with a GPU, as D7 promises. Also decide what `detector=ov` should render for GPU-less hosts, since it renders `device: GPU`.
 10. **Test-clip detection:** ~~time-boxed follow-up~~ **done, finding only**: the M3 calibration effect (`docs/m3-findings.md:64`; v0.18.2 `improved_motion.py:192-199`), see item 5. Open: first real detection proof on the hub.
 11. **`frigate-run` restore and the WAL:** ~~follow-up~~ **fixed in M9 (D24), proven in the VM** (gate run 5, MUT-POSTSTOP, rehearsal #2; see "Revert DB integrity"). Open: the shipped Store rev 4/5 carry the same latent bug (labelled finding there).
-12. **Semantic-search reindex failure after upgrade:** upstream defect candidate, reproduced 3 of 3 runs; for Joachim to decide on (see that section).
+12. **Semantic-search reindex failure after upgrade:** upstream defect candidate, reproduced 3 of 3 runs; for the maintainer to decide on (see that section).
 
 ---
 
 ## Hand-off: Launchpad build and final gate (PENDING, for the orchestrator)
 
-Builders never run this: it needs Joachim's Launchpad login and uploads the tree to Launchpad (public build logs). No push, credentials or Store upload were used.
+Builders never run this: it needs the maintainer's Launchpad login and uploads the tree to Launchpad (public build logs). No push, credentials or Store upload were used.
 
 0. **D2 re-check, before the final gate:** look for a newer 0.18.x release. A newer one means re-running S1's patch check and the gate on it.
 
@@ -270,7 +270,7 @@ Builders never run this: it needs Joachim's Launchpad login and uploads the tree
    On the earlier local candidate pack-2 (`b05bdf1d…`) this block printed `squashfs OK`, `version OK`, five `has` lines, `0001 patch applied` and `version.py stamp OK` `[VERIFIED: 2026-11-13, final-review fix wave]`.
 4. Then, in the gate VM against the Launchpad artifact, both under the suite lock: the harness, then `tests/m9-rehearsal.sh`. Expected: 0 FAIL, denials 0 unexpected, rehearsal exit 0.
    D24 adds one artifact check: `unsquashfs -cat "$F" meta/snap.yaml | grep -q 'post-stop-command: bin/frigate-db-quiesce' && echo "D24 hook OK" || echo "D24 hook MISSING"`. The harness's "m9: WAL quiesce on every stop path" block and rehearsal phase G must pass, and C/E/F must each show the candidate's `frigate-db-quiesce: … result=ok`. Mutation (controller, VM, once): the candidate repacked without the `post-stop-command` line must FAIL the harness block's `quiesce ran` checks (procedure in the block's comment).
-   - **Labelled finding (D24): the shipped Store revisions rev 4/5 (0.17.2) carry the same latent WAL bug** for any downgrade across a WAL (sidecars not moved, no stop hook; review Important 4). See "Revert DB integrity". The 0.18 hook protects only the move off 0.18. A 0.17.2 rebuild with D24 is Joachim's call.
+   - **Labelled finding (D24): the shipped Store revisions rev 4/5 (0.17.2) carry the same latent WAL bug** for any downgrade across a WAL (sidecars not moved, no stop hook; review Important 4). See "Revert DB integrity". The 0.18 hook protects only the move off 0.18. A 0.17.2 rebuild with D24 is the maintainer's call.
 5. Size floor in `tests/spike-smoke.sh`: `floor_to_MiB(0.85 × size)` of the Launchpad artifact, arithmetic in the comment (M8 style), then `bash tests/m9-packaging.test.sh`.
 
 ### PENDING sections (to be filled in; no values exist yet)
