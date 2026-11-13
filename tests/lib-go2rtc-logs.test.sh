@@ -20,7 +20,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -w) w="$2"; shift 2 ;;
-    -H|--max-time) shift 2 ;;
+    -H) echo "$2" >>"${STUB_HDRS:-/dev/null}"; shift 2 ;;
+    --max-time) shift 2 ;;
     *) shift ;;
   esac
 done
@@ -97,6 +98,14 @@ expect FAIL "HTTP 200 + plain text, not JSON lines"   200 "$T/plaintext"
 expect PASS "flooded WRN [rtsp] (banner rotated out)" 200 "$T/flooded"
 expect PASS "host-sized flood, 70k lines (pipefail+SIGPIPE)" 200 "$T/hostflood"
 expect PASS "startup banner lines (fresh install)"    200 "$T/banner"
+
+# 0.18: /logs/{service} is require_role(["admin"]) — the probe must send BOTH identity headers.
+export STUB_HDRS="$T/hdrs"; : >"$STUB_HDRS"
+expect PASS "startup banner lines (headers recorded)" 200 "$T/banner"
+if grep -qx 'Remote-User: admin' "$STUB_HDRS" && grep -qx 'Remote-Role: admin' "$STUB_HDRS"; then
+  echo "ok   - sends Remote-User and Remote-Role admin (0.18 /logs is require_role admin)"
+else echo "FAIL - /logs probe lacks Remote-Role: admin"; FAILS=$((FAILS+1)); fi
+unset STUB_HDRS
 
 echo "lib-go2rtc-logs: $FAILS unexpected result(s)"
 [ "$FAILS" -eq 0 ]

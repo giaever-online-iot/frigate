@@ -1553,7 +1553,8 @@ fi
 # go2rtc/current a symlink to $SNAP_DATA/go2rtc-logs/current — both carry real daemon stdout).
 # Route is /logs/{service} with NO /api prefix on the internal :5001 (M3 route discipline);
 # allow_any_authenticated() needs a Remote-User header. A 500 here is the undefined.length crash.
-BRIDGE_LOGS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/nginx 2>/dev/null)
+# 0.18: /logs/{service} is require_role(["admin"]) (R§5.4)
+BRIDGE_LOGS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Remote-User: admin' -H 'Remote-Role: admin' --max-time 5 http://127.0.0.1:5001/logs/nginx 2>/dev/null)
 check "logs: /logs/nginx returns 200 (UI /logs page no longer crashes)" test "$BRIDGE_LOGS" = "200"
 echo "  logs finding: GET :5001/logs/nginx http=$BRIDGE_LOGS (was 500 pre-fix; s6-log paths satisfied)"
 
@@ -1569,8 +1570,9 @@ echo "  logs finding: GET :5001/logs/nginx http=$BRIDGE_LOGS (was 500 pre-fix; s
 # line (host-readable): has tee → assert as written; predates tee → SKIP (refresh pending). The full
 # gate always runs the fresh artifact (tee present → asserts); only a not-yet-refreshed host SKIPs.
 if grep -q 'tee -a /dev/shm/logs/frigate/current' "/snap/$SNAP_NAME/current/bin/frigate-run" 2>/dev/null; then
+  # 0.18: /logs/{service} is require_role(["admin"]) (R§5.4)
   check "m8: /logs frigate tab has real content (process-sub tee wrote daemon stdout)" sh -c \
-    "curl -s -H 'Remote-User: admin' --max-time 5 http://127.0.0.1:5001/logs/frigate 2>/dev/null | grep -q 'frigate'"
+    "curl -s -H 'Remote-User: admin' -H 'Remote-Role: admin' --max-time 5 http://127.0.0.1:5001/logs/frigate 2>/dev/null | grep -q 'frigate'"
   # W-3 (M8 F1): assert HTTP 200 + JSON lines in go2rtc's line SHAPE (time + level + module), not
   # startup words — a long-running host's bounded log is all "WRN [rtsp]" with the banner rotated
   # out. Predicate + its mutation-tested fixtures: tests/lib-go2rtc-logs{,.test}.sh.

@@ -15,7 +15,8 @@ GO2RTC_LINE_RE='(^|[[:space:]])[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)? (TRC|DBG|IN
 go2rtc_logs_has_content() {
   local url="${1:-http://127.0.0.1:5001/logs/go2rtc}" body code rc=1
   body=$(mktemp) || return 1
-  code=$(curl -s -o "$body" -w '%{http_code}' -H 'Remote-User: admin' --max-time 5 "$url" 2>/dev/null)
+  # 0.18: /logs/{service} is require_role(["admin"]) (R§5.4)
+  code=$(curl -s -o "$body" -w '%{http_code}' -H 'Remote-User: admin' -H 'Remote-Role: admin' --max-time 5 "$url" 2>/dev/null)
   # grep -c, not grep -q: callers run under `set -o pipefail`, and on a host-sized body (M8 F1:
   # 67k lines / 9 MB) an early-exiting grep -q SIGPIPEs jq (141) and fails a matching pipeline.
   if [ "$code" = "200" ] &&
