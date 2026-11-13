@@ -178,7 +178,9 @@ http {
             include __SNAP_DATA__/nginx/conf/auth_request.conf;
             types {
                 video/mp4 mp4;
-                image/jpeg jpg;
+                image/jpeg jpg jpeg;
+                image/png png;
+                image/webp webp;
             }
 
             expires 7d;
@@ -228,6 +230,8 @@ http {
 
         # frigate lovelace card uses this path
         location /live/mse/api/ws {
+            # tells /auth to apply the go2rtc stream checks
+            set $go2rtc_stream_proxy 1;
             include __SNAP_DATA__/nginx/conf/auth_request.conf;
             limit_except GET {
                 deny  all;
@@ -237,6 +241,8 @@ http {
         }
 
         location /live/webrtc/api/ws {
+            # tells /auth to apply the go2rtc stream checks
+            set $go2rtc_stream_proxy 1;
             include __SNAP_DATA__/nginx/conf/auth_request.conf;
             limit_except GET {
                 deny  all;
@@ -257,6 +263,8 @@ http {
 
         # integration uses this to add webrtc candidate
         location /api/go2rtc/webrtc {
+            # tells /auth to apply the go2rtc stream checks
+            set $go2rtc_stream_proxy 1;
             include __SNAP_DATA__/nginx/conf/auth_request.conf;
             limit_except POST {
                 deny  all;
@@ -296,6 +304,13 @@ http {
             }
 
             location /api/login {
+                auth_request off;
+                rewrite ^/api(/.*)$ $1 break;
+                proxy_pass http://frigate_api;
+                include __SNAP_DATA__/nginx/conf/proxy.conf;
+            }
+
+            location /api/logout {
                 auth_request off;
                 rewrite ^/api(/.*)$ $1 break;
                 proxy_pass http://frigate_api;

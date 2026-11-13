@@ -86,4 +86,18 @@ t "S2: fallback_is_snap_version_pre_refresh" grep -qx 'VERSION="${VERSION:-$SNAP
 t "S2: fallback_is_snap_version_frigate_run" grep -qx 'CUR_VERSION="${CUR_VERSION:-$SNAP_VERSION}"' spike/bin/frigate-run
 t "S2: no literal version fallback left"     bash -c "! grep -nE ':-[0-9]+\.[0-9]+\.[0-9]+\}' snap/hooks/pre-refresh spike/bin/frigate-run"
 
+# --- S2 nginx ---
+N=spike/config/nginx
+t "S2: auth X-Original-URL is path-only"        grep -q 'proxy_set_header X-Original-URL \$request_uri;' $N/auth_location.conf
+t "S2: proxy X-Original-URL is path-only"       grep -q 'proxy_set_header X-Original-URL \$request_uri;' $N/proxy.conf
+t "S2: no scheme/host X-Original-URL left"      bash -c "! grep -rq 'X-Original-URL \$scheme' $N"
+t "S2: auth passes X-Go2rtc-Stream-Proxy"       grep -q 'proxy_set_header X-Go2rtc-Stream-Proxy \$go2rtc_stream_proxy;' $N/auth_location.conf
+t "S2: auth silences uninitialized var (#24682)" grep -q 'uninitialized_variable_warn off;' $N/auth_location.conf
+t "S2: 3 go2rtc stream locations set the flag"  bash -c "[ \$(grep -c 'set \$go2rtc_stream_proxy 1;' $N/nginx.conf.in) -eq 3 ]"
+for loc in '/live/mse/api/ws' '/live/webrtc/api/ws' '/api/go2rtc/webrtc'; do
+  t "S2: flag set inside location $loc" bash -c "awk '/location ${loc//\//\\/} /{f=1} f&&/set \\\$go2rtc_stream_proxy 1;/{ok=1} f&&/^ *}/{exit} END{exit !ok}' $N/nginx.conf.in"
+done
+t "S2: /api/logout location present"            grep -q 'location /api/logout' $N/nginx.conf.in
+t "S2: webp/png/jpeg mime types"                bash -c "grep -q 'image/webp webp;' $N/nginx.conf.in && grep -q 'image/png png;' $N/nginx.conf.in && grep -q 'image/jpeg jpg jpeg;' $N/nginx.conf.in"
+
 [ "$FAILS" -eq 0 ]
