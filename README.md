@@ -343,7 +343,9 @@ read this before you refresh a working install.
 - **`networking.listen.*` is ignored.** Ports come from the snap options
   (`ports.https`, see above), not from Frigate's config.
 - **Reverting to 0.17.** The database part of this list is spec-derived
-  (D11/D12); the revert rehearsal is pending and will confirm or correct it.
+  (D11/D12). The revert rehearsal (#2, phase C) confirmed it on the local
+  candidate: green, integrity check ok, 0.17.2 restored its backup and served
+  its data (see `docs/m9-findings.md`).
   - `sudo snap revert frigate` works only while the 0.17 revision is still
     on the system. Check with `snap list --all frigate`. snapd keeps 2
     revisions by default on classic systems (3 on Ubuntu Core; the
