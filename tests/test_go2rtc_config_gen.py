@@ -9,6 +9,7 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("g2r", REPO / "spike/bin/go2rtc-config-gen.py")
 g2r = importlib.util.module_from_spec(_spec)
+sys.dont_write_bytecode = True  # spike/bin is dumped verbatim into the snap by the wrappers part; no .pyc there
 _spec.loader.exec_module(g2r)
 BASELINE = (REPO / "spike/config/go2rtc.yaml.in").read_text()
 SNAP = "/snap/frigate/x1"
