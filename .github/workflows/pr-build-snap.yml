@@ -145,6 +145,7 @@ jobs:
               printf '❌ No architectures were published for this PR.\n'
             fi
             if [ "${#missing[@]}" -gt 0 ]; then printf '\n⚠️ Failed/missing arch(es): %s\n' "${missing[*]}"; fi
+            case " ${uploaded[*]:-} " in *" arm64 "*) printf '\n> arm64: **experimental, untested**. Do not install it on production hardware.\n' ;; esac
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -181,7 +182,5 @@ jobs:
             }
 
       - name: Fail if build/upload incomplete
-        if: ${{ steps.build.outputs.snaps == '0' || steps.release.outputs.missing != '' }}
-        run: |
-          echo "::error::Incomplete: snaps=${{ steps.build.outputs.snaps }} missing=[${{ steps.release.outputs.missing }}]"
-          exit 1
+        if: ${{ always() }}
+        run: set -a; . .github/release-archs.env; set +a; .github/scripts/arch-gate.sh "$REQUIRED_ARCHS" "${{ steps.build.outputs.snaps }}" "${{ steps.release.outputs.missing }}"
