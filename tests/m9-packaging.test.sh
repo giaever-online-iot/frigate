@@ -7,11 +7,11 @@ FAILS=0
 t() { local n="$1"; shift; if "$@" >/dev/null 2>&1; then echo "ok   - $n"; else echo "FAIL - $n"; FAILS=$((FAILS+1)); fi; }
 TAG="v$(sed -n "s/^version: '\(.*\)'$/\1/p" snap/snapcraft.yaml)"
 _UP=""
-# shellcheck disable=SC2329,SC2317  # used by sections appended in later tasks
+# Temp dir + trap live at top level so the clone survives $(upstream_dir) subshells.
+if [ -z "${M9_UPSTREAM_DIR:-}" ]; then _UP=$(mktemp -d); trap 'rm -rf "$_UP"' EXIT; fi
 upstream_dir() {
   if [ -n "${M9_UPSTREAM_DIR:-}" ]; then echo "$M9_UPSTREAM_DIR"; return; fi
-  if [ -z "$_UP" ]; then _UP=$(mktemp -d); trap 'rm -rf "$_UP"' EXIT
-    git clone -q --depth 1 --branch "$TAG" https://github.com/blakeblackshear/frigate.git "$_UP/f"; fi
+  [ -d "$_UP/f/.git" ] || git clone -q --depth 1 --branch "$TAG" https://github.com/blakeblackshear/frigate.git "$_UP/f"
   echo "$_UP/f"
 }
 
