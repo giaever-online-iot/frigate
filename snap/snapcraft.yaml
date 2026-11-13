@@ -352,6 +352,26 @@ parts:
           install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
           install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
           ;;
+        arm64)
+          # --- 5.0 tree (tag-exact, v0.18.2 install_deps.sh) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linuxarm64-gpl-5.1.tar.xz"
+          echo "57ee475407bad49910ba9b946428396e30cf075ea28a7912fbe1aa2578085af0  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f5" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" -C "$CRAFT_PART_BUILD/f5" --strip-components=1 arm64/bin/ffmpeg arm64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffprobe"
+          # --- 7.0 tree (tag-exact; tarball is bzip2 despite .xz name — use tar -xf for auto-detect) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linuxarm64-gpl-7.0.tar.xz"
+          echo "16c8b04e9d0ea9c769ad964c4c453fcf05121a1947237329d2e9d8a5e43e2a3c  $CRAFT_PART_BUILD/ffmpeg-7.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f7" && tar -xf "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" -C "$CRAFT_PART_BUILD/f7" --strip-components=1 arm64/bin/ffmpeg arm64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffprobe"
+          # --- 8.0 tree (tag-exact default; real xz, verified) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linuxarm64-gpl-8.1.tar.xz"
+          echo "cd91948468d0f11ce795a2cdaa0c69911bd1db313b49bb19c22512beb88cde69  $CRAFT_PART_BUILD/ffmpeg-8.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f8" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" -C "$CRAFT_PART_BUILD/f8" --strip-components=1 arm64/bin/ffmpeg arm64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
+          ;;
         *)
           echo "ffmpeg: unsupported arch $CRAFT_ARCH_BUILD_FOR (W-7 adds arm64)" >&2; exit 1 ;;
       esac
@@ -364,6 +384,11 @@ parts:
         amd64)
           wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_amd64"
           echo "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
+          install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+          ;;
+        arm64)
+          wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_arm64"
+          echo "359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
           install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
           ;;
         *)

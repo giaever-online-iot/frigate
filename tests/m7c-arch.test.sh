@@ -133,4 +133,23 @@ t "T7: artifact glob is per-arch"        sh -c "[ \$(grep -c 'artifact_glob \"\$
 t "T7: size floor via helper"            grep -q 'size_floor_for_arch "\$HOST_ARCH"' tests/spike-smoke.sh
 t "T7: no size literal left in harness"  sh -c "! grep -qE '\[ .\\\$SNAP_SZ. -ge [0-9]{9}' tests/spike-smoke.sh"
 
+# --- T9 arm64 pins (V3: spec Appendix A, verbatim) ---
+NB=https://github.com/NickM-27/FFmpeg-Builds/releases/download
+arow() { part "$Y" "$1" | awk '/^ +arm64\)/{f=1} f{print} f&&/;;/{exit}'; }
+export -f arow
+for pin in \
+  "ffmpeg|$NB/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linuxarm64-gpl-5.1.tar.xz|57ee475407bad49910ba9b946428396e30cf075ea28a7912fbe1aa2578085af0" \
+  "ffmpeg|$NB/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linuxarm64-gpl-7.0.tar.xz|16c8b04e9d0ea9c769ad964c4c453fcf05121a1947237329d2e9d8a5e43e2a3c" \
+  "ffmpeg|$NB/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linuxarm64-gpl-8.1.tar.xz|cd91948468d0f11ce795a2cdaa0c69911bd1db313b49bb19c22512beb88cde69" \
+  "go2rtc|https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_arm64|359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50" \
+  "libedgetpu|https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_arm64.deb|eab8aa4576b4dbf738135d8094f32270b24117f77147d25cbe0f49d0144d85f2"; do
+  IFS='|' read -r p u s <<<"$pin"
+  t "T9: $p arm64 row pins ${u##*/}" bash -c "arow $p | grep -qF '$u' && arow $p | grep -q '$s'"
+done
+t "T9: ffmpeg arm64 row extracts arm64/bin members x3" bash -c "[ \$(arow ffmpeg | grep -c 'arm64/bin/ffmpeg arm64/bin/ffprobe') -eq 3 ]"
+t "T9: ffmpeg arm64 7.0 uses tar -xf (bzip2)"         bash -c "arow ffmpeg | grep -F 'ffmpeg-7.tar.xz' | grep -q 'tar -xf '"
+t "T9: arm64 rows never name amd64 assets"            bash -c "! { arow ffmpeg; arow go2rtc; arow libedgetpu; } | grep -qE 'linux64-gpl|_amd64|amd64/bin'"
+t "T9: amd64 rows untouched (W-14 amd64 shas present)" bash -c "part \$Y ffmpeg | grep -q 9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9 && part \$Y go2rtc | grep -q 32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6"
+t "T9: no go2rtc 1.9.15 pin"                          sh -c "! grep -q 'v1.9.15' $Y"
+
 [ "$FAILS" -eq 0 ]
