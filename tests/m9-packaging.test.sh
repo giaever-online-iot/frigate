@@ -22,4 +22,17 @@ t "S1: version.py stamp uses 0.18.2"      grep -q 'VERSION = \\"0.18.2-' snap/sn
 t "S1: template config version 0.18-0"    grep -qx 'version: "0.18-0"' spike/config/frigate-config.yml
 t "S1: web-ui deviation comment names e2e:build (D8)" grep -q 'e2e:build exists' snap/snapcraft.yaml
 
+# --- S1 patch ---
+P=spike/patches/0001-env-driven-paths.patch
+t "S1: 0001 applies to \$TAG"             git -C "$(upstream_dir)" apply --check "$PWD/$P"
+PLUS_WANT=$(mktemp); cat >"$PLUS_WANT" <<'EOF'
++BASE_DIR = os.environ.get("FRIGATE_BASE_DIR", "/media/frigate")
++BIRDSEYE_PIPE = f"{CACHE_DIR}/birdseye"
++CACHE_DIR = os.environ.get("FRIGATE_CACHE_DIR", "/tmp/cache")
++CONFIG_DIR = os.environ.get("FRIGATE_CONFIG_DIR", "/config")
+EOF
+plus_lines_match() { grep -E '^\+[A-Z_]+ = ' "$P" | sort | diff -q - "$PLUS_WANT"; }
+t "S1: 0001 makes exactly the 3 substitutions (4 + lines)" plus_lines_match
+t "S1: patches.md records the 0.18.2 rebase" grep -q 'rebased for v0.18.2' docs/patches.md
+
 [ "$FAILS" -eq 0 ]

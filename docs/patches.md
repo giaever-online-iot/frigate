@@ -2,7 +2,7 @@
 
 | Patch | Introduced | Purpose | Rebase notes |
 |---|---|---|---|
-| `spike/patches/0001-env-driven-paths.patch` | M2 (v0.17.2) | Make `frigate/const.py` base paths env-overridable (`FRIGATE_CONFIG_DIR`/`FRIGATE_BASE_DIR`/`FRIGATE_CACHE_DIR`; defaults unchanged ⇒ upstream no-op). Required because snapd layouts cannot target `/config` (root-level) or `/media/*` (denied allow-list entry) — see docs/m2-findings.md. | Re-diff against each new tag; constants may move/rename. Upstreaming candidate: yes — a small, defaults-preserving env override is upstreamable; consider a PR after M3 proves it in production shape. |
+| `spike/patches/0001-env-driven-paths.patch` | M2 (v0.17.2) | Make `frigate/const.py` base paths env-overridable (`FRIGATE_CONFIG_DIR`/`FRIGATE_BASE_DIR`/`FRIGATE_CACHE_DIR`; defaults unchanged ⇒ upstream no-op). Required because snapd layouts cannot target `/config` (root-level) or `/media/*` (denied allow-list entry) — see docs/m2-findings.md. | Re-diff against each new tag; constants may move/rename. Upstreaming candidate: yes — a small, defaults-preserving env override is upstreamable; consider a PR after M3 proves it in production shape. 2026-11-13: rebased for v0.18.2 — context-only (upstream deleted FRIGATE_LOCALHOST); the 3 substitutions are unchanged (W-14 R§4.1). |
 The shm-prefix patch once planned for M3 was never needed: resolved in M2 via the shared-memory (private: true) interface — see docs/m2-findings.md strategic finding (b).
 
 ## Rejected patch: motion calibration exit (M3, removed by user ruling 2026-07-05)
