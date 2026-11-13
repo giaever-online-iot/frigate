@@ -21,7 +21,10 @@ def _recv(f):
     line = f.readline()
     if not line:
         raise ConnectionError("guest agent closed the socket")
-    return json.loads(line)
+    resp = json.loads(line)
+    if not isinstance(resp, dict):
+        raise ValueError("unexpected guest agent reply: %r" % (resp,))
+    return resp
 
 
 def _call(f, execute, arguments=None):
@@ -32,10 +35,11 @@ def _call(f, execute, arguments=None):
     return resp["return"]
 
 
-def _sync(f, sync_id):
+def _sync(f, sync_id, tick=lambda: None):
     """guest-sync: discard stale replies until the one carrying our id."""
     _send(f, "guest-sync", {"id": sync_id})
     while True:
+        tick()  # re-arm the socket timeout from the overall deadline; raises TimeoutError when spent
         resp = _recv(f)
         if "error" in resp:
             raise RuntimeError("guest agent error: %s" % (resp["error"],))
@@ -67,9 +71,8 @@ def run(sock_path, cmd, timeout_s):
                 raise TimeoutError("guest command exceeded %ss" % timeout_s)
 
         sync_id = random.randint(1, 2**31 - 1)
-        s.settimeout(remaining())
         try:
-            _sync(f, sync_id)
+            _sync(f, sync_id, lambda: s.settimeout(remaining()))
         except socket.timeout:
             raise TimeoutError("guest command exceeded %ss" % timeout_s)
         pid = call("guest-exec", {"path": "/bin/sh", "arg": ["-c", cmd],

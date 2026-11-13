@@ -5,6 +5,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.dont_write_bytecode = True
@@ -12,7 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import qga  # noqa: E402
 
 
-def fake_agent(path, exitcode, out, polls_before_exit=2, stale=None):
+def fake_agent(path, exitcode, out, polls_before_exit=2, stale=None, flood=False):
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(1)
@@ -25,6 +26,13 @@ def fake_agent(path, exitcode, out, polls_before_exit=2, stale=None):
             req = json.loads(line)
             ex = req["execute"]
             if ex == "guest-sync":
+                if flood:
+                    try:
+                        while True:
+                            f.write(b'{"return": {"pid": 99}}\n')
+                            f.flush()
+                    except OSError:
+                        return
                 if stale is not None:
                     f.write((json.dumps(stale) + "\n").encode())
                 resp = {"return": req["arguments"]["id"]}
@@ -61,6 +69,20 @@ class QgaRun(unittest.TestCase):
         p = os.path.join(tempfile.mkdtemp(), "qga.sock")
         fake_agent(p, 0, b"ok\n", stale={"return": {"pid": 99}})
         self.assertEqual(qga.run(p, "true", 10), (0, b"ok\n", b""))
+
+    def test_sync_flood_honours_deadline(self):
+        p = os.path.join(tempfile.mkdtemp(), "qga.sock")
+        fake_agent(p, 0, b"", flood=True)
+        t0 = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            qga.run(p, "true", 1)
+        self.assertLess(time.monotonic() - t0, 5)
+
+    def test_non_object_reply_is_clean_error(self):
+        p = os.path.join(tempfile.mkdtemp(), "qga.sock")
+        fake_agent(p, 0, b"", stale=[1])
+        with self.assertRaises(ValueError):
+            qga.run(p, "true", 5)
 
     def test_timeout(self):
         p = os.path.join(tempfile.mkdtemp(), "qga.sock")
