@@ -35,4 +35,17 @@ plus_lines_match() { grep -E '^\+[A-Z_]+ = ' "$P" | sort | diff -q - "$PLUS_WANT
 t "S1: 0001 makes exactly the 3 substitutions (4 + lines)" plus_lines_match
 t "S1: patches.md records the 0.18.2 rebase" grep -q 'rebased for v0.18.2' docs/patches.md
 
+# --- S1 wheels ---
+norm() { grep -hvE '^\s*(#|$)' "$@" | sed -E 's/\s+//g' | sort; }
+UPM="$(upstream_dir)/docker/main"
+VEC=$(sed -n 's/^SQLITE_VEC_VERSION="\(.*\)"/\1/p' "$UPM/build_sqlite_vec.sh")
+wheels_match() {
+  [ "$(diff <(norm spike/wheels-src/requirements-core.txt spike/wheels-src/DEFERRED-frigate-ai.txt) \
+            <(norm "$UPM/requirements-wheels.txt") | grep '^[<>]')" = "< sqlite-vec==$VEC" ]
+}
+t "S1: snap wheel set == upstream wheels + sqlite-vec==\$VEC only" wheels_match
+t "S1: DEFERRED header names \$TAG"        grep -q "VERBATIM from $TAG docker/main/requirements-wheels.txt" spike/wheels-src/DEFERRED-frigate-ai.txt
+AXW=$(grep -oE 'https://[^ ]*axengine-[0-9.]+-py3-none-any\.whl' "$UPM/Dockerfile" | head -1)
+t "S1: Dockerfile-only axengine wheel is deferred with rationale (D6)" bash -c "[ -n '$AXW' ] && grep -qF '# $AXW' spike/wheels-src/DEFERRED-frigate-ai.txt && grep -q 'axcl' spike/wheels-src/DEFERRED-frigate-ai.txt"
+
 [ "$FAILS" -eq 0 ]

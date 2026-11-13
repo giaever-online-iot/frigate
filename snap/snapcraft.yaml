@@ -239,7 +239,7 @@ parts:
         \) -exec rm -rf {} +
       fi
       # R4 (M8): Frigate loads the sqlite-vec extension from the HARDCODED path /usr/local/lib/vec0
-      # (frigate/db/sqlitevecq.py:11,26 — it does NOT import the pip package). The sqlite-vec==0.1.3
+      # (frigate/db/sqlitevecq.py:11,26 — it does NOT import the pip package). The sqlite-vec==0.1.9
       # wheel bundles the identical v0.1.3 vec0.so that upstream builds from source
       # (docker/main/build_sqlite_vec.sh, SQLITE_VEC_VERSION=0.1.3). Copy it where Frigate expects it;
       # the /usr/local/lib -> $SNAP/usr/local/lib layout makes that absolute path resolve under strict
