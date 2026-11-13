@@ -75,3 +75,30 @@ detector_sed() {
                 '/# DETECTOR-OV-END/d' ;;
     esac
 }
+
+# M7c (D8): map the snap build arch ($SNAP_ARCH: amd64|arm64) to its GNU multiarch triplet.
+# Any other arch fails loud (rc 1, names the value) rather than guessing a library path.
+arch_triplet() {
+    case "${SNAP_ARCH:-}" in
+        amd64) printf '%s\n' x86_64-linux-gnu ;;
+        arm64) printf '%s\n' aarch64-linux-gnu ;;
+        *) echo "lib-wait: unsupported SNAP_ARCH '${SNAP_ARCH:-}'" >&2; return 1 ;;
+    esac
+}
+
+# M7c (D13a): SHM_MAX_FRAMES, default 50. Harness-only override: $SNAP_COMMON/shm-max-frames
+# accepted when, after stripping all whitespace, it is 1..200 digits; anything else -> 50.
+# The 4+ char pattern rejects overlong input before the numeric test, so it cannot overflow.
+shm_max_frames() {
+    _smf_f="${SNAP_COMMON:-}/shm-max-frames"
+    _smf_v=""
+    [ -r "$_smf_f" ] && _smf_v=$(tr -d '[:space:]' < "$_smf_f") || _smf_v=""
+    case "$_smf_v" in
+        ''|*[!0-9]*|????*) printf '%s\n' 50; return 0 ;;
+    esac
+    if [ "$_smf_v" -ge 1 ] && [ "$_smf_v" -le 200 ]; then
+        printf '%s\n' "$_smf_v"
+    else
+        printf '%s\n' 50
+    fi
+}
