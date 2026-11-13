@@ -30,6 +30,7 @@ fi
 FROM="$1"; TO="$2"; ARCHES="$3"
 REVS=$(snapcraft revisions "$SNAP_NAME")
 IFS=',' read -ra LIST <<<"$ARCHES"
+DONE=0
 for a in "${LIST[@]}"; do
   r=$("$SR" revisions-in "$FROM" "$a" <<<"$REVS" | head -1)
   if [ -z "$r" ]; then
@@ -38,4 +39,9 @@ for a in "${LIST[@]}"; do
   fi
   echo ">> releasing $a revision $r: $FROM -> $TO"
   snapcraft release "$SNAP_NAME" "$r" "$TO"  # must fail the job
+  DONE=$((DONE + 1))
 done
+if [ "$DONE" -eq 0 ]; then  # zero-release guard
+  echo "::error::no current revision for $ARCHES in $FROM: nothing released"
+  exit 1
+fi

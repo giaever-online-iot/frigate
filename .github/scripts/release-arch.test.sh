@@ -16,7 +16,7 @@ esac
 EOS
 chmod +x "$STUB/snapcraft"
 run() { : > "$STUB/log"
-  PATH="$STUB:$PATH" STUB_LOG="$STUB/log" STUB_FIXTURE="$HERE/fixtures/snapcraft-revisions.txt" SNAP_NAME=frigate \
+  PATH="$STUB:$PATH" STUB_LOG="$STUB/log" STUB_FIXTURE="$HERE/fixtures/${FIXTURE:-snapcraft-revisions.txt}" SNAP_NAME=frigate \
     "$RA" "$@" > "$STUB/out" 2>&1; }
 releases() { grep '^release ' "$STUB/log" | tr '\n' ';'; }
 
@@ -43,5 +43,15 @@ run --revision 6 latest/beta amd64;             check "revision amd64 allowed: e
 check "revision amd64 released"                 "release frigate 6 latest/beta;" "$(releases)"
 run --revision 99 latest/beta amd64;            rc=$?
 check "unknown revision: exit 1, no release"    "1:" "$([ "$rc" -ne 0 ] && echo 1 || echo 0):$(releases)"
+# Zero-release: nothing released must FAIL, not skip silently.
+ERR='::error::no current revision for'
+FIXTURE=snapcraft-revisions-arm64only.txt run latest/edge/PR9 latest/edge amd64; rc=$?
+check "zero-release arm64-only PR: exit 1, no release" "1:" "$([ "$rc" -ne 0 ] && echo 1 || echo 0):$(releases)"
+check "zero-release arm64-only PR: error line" 1 "$(grep -c "^$ERR amd64 in latest/edge/PR9: nothing released\$" "$STUB/out")"
+FIXTURE=snapcraft-revisions-empty.txt run latest/edge/PR9 latest/edge amd64; rc=$?
+check "zero-release empty list: exit 1, no release" "1:" "$([ "$rc" -ne 0 ] && echo 1 || echo 0):$(releases)"
+run latest/edge latest/beta arm64; rc=$?
+check "zero-release beta arm64: exit 1, no release" "1:" "$([ "$rc" -ne 0 ] && echo 1 || echo 0):$(releases)"
+check "zero-release beta arm64: error line" 1 "$(grep -c "^$ERR arm64 in latest/edge: nothing released\$" "$STUB/out")"
 [ "$fail" -eq 0 ] && echo "All release-arch tests passed." || echo "Some release-arch tests FAILED."
 exit "$fail"
