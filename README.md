@@ -126,7 +126,9 @@ start, so a camera change needs both services cycled — the whole-snap
 restart covers it.
 
 Snap refreshes never touch an existing `config.yml`; a new snap revision's
-template updates only apply to a config that doesn't exist yet. If you want
+template updates only apply to a config that doesn't exist yet. (The one
+exception is Frigate itself: 0.18 migrates the file on its first boot — see
+"Upgrading to 0.18" below.) If you want
 to discard your edits and start over from the shipped defaults, delete the
 file and restart:
 
@@ -272,6 +274,63 @@ explicitly (and delete/regenerate `config.yml`) to use a Coral USB
 Accelerator instead — see the accelerator matrix below for the full setup
 procedure.
 
+## Upgrading to 0.18
+
+Revision 0.18 of the snap ships Frigate 0.18.2. The migration is one-way, so
+read this before you refresh a working install.
+
+- **The first boot under 0.18 rewrites `config.yml`.** Frigate's own
+  migrator brings the file to `version: 0.18-0` and keeps the previous copy
+  as `backup_config.yaml` next to it. The snap itself still never rewrites
+  your config. Edits made under 0.18 are **lost on `snap revert`**: a revert
+  goes back to the 0.17 `config.yml`, which 0.17 can read, and not to your
+  newer file.
+- **ffmpeg 8 is now the default.** The snap ships ffmpeg 5.0, 7.0 and 8.0
+  and Frigate uses 8.0 unless you say otherwise. go2rtc streams that use
+  `#hardware` transcoding need one of these workarounds in `config.yml`:
+
+  ```yaml
+  go2rtc:
+    ffmpeg:
+      global: "-vaapi_device /dev/dri/renderD128"
+  ```
+
+  or keep go2rtc on the 7.0 tree:
+
+  ```yaml
+  ffmpeg:
+    path: "7.0"
+  ```
+
+  An explicit `go2rtc.ffmpeg.bin` always wins over `ffmpeg.path`.
+- **`exec:`, `echo:` and `expr:` go2rtc streams.** Upstream 0.18 drops these
+  stream sources unless `GO2RTC_ALLOW_ARBITRARY_EXEC` is set, because the web
+  UI can now edit the go2rtc section. This snap does **not** filter them yet;
+  the filter is planned but not part of this revision. Do not rely on it, and
+  avoid `exec:` sources you did not write yourself.
+- **Intel GPU stats need kernel 6.5 or newer.** With VAAPI or QSV camera
+  hwaccel, Frigate 0.18 reads `/proc/*/fdinfo` on every stats poll to find
+  GPU usage. To turn that scan off, set this in `config.yml`:
+
+  ```yaml
+  telemetry:
+    stats:
+      intel_gpu_stats: false
+  ```
+- **Toggles persist in `.runtime_state.json`.** Settings you change in the UI
+  or over MQTT are stored in
+  `/var/snap/frigate/current/config/.runtime_state.json`. A full reset to the
+  shipped defaults means deleting that file **and** `config.yml`, then
+  restarting:
+
+  ```
+  sudo rm /var/snap/frigate/current/config/config.yml \
+          /var/snap/frigate/current/config/.runtime_state.json
+  sudo snap restart frigate
+  ```
+- **`networking.listen.*` is ignored.** Ports come from the snap options
+  (`ports.https`, see above), not from Frigate's config.
+
 ## Diagnostics
 
 The snap ships a few one-shot commands for checking hardware access
@@ -314,6 +373,32 @@ Two things worth calling out here:
   release.
 - **arm64 is planned** but not available yet; this snap currently ships for
   `amd64` only.
+
+## Known upstream issues
+
+- **`/config` shows go2rtc credentials to logged-in users.** At Frigate
+  v0.18.2 the `/config` endpoint redacts `user:pass` in go2rtc stream URLs,
+  but not the username and password of the `go2rtc.rtsp`, `go2rtc.api` and
+  `go2rtc.mqtt` sections. Any logged-in user can read them. Upstream fixed
+  this on its development branch only, so v0.18.2 is affected (checked: the
+  fix, `_redact_go2rtc_credentials`, is absent from the v0.18.2 tag). This
+  snap carries no Frigate behaviour patches and does not fix it. Do not reuse
+  those credentials anywhere else, and give accounts only to people you would
+  trust with them.
+- **Advisories that are still open in Frigate 0.18.2** (no patched version
+  listed upstream):
+  - GHSA-w3c4: server-side request forgery through web push, because the
+    check at registration time does not match what is resolved or redirected
+    at send time.
+  - GHSA-4xp7: a go2rtc RTSP panic on a negative `Content-Length`. The
+    affected code is identical in the go2rtc version the snap shipped before
+    (1.9.13), so the upgrade adds no exposure here. It needs an attacker-
+    controlled RTSP source URL.
+  - GHSA-74x4: camera access-control bypass through the nginx static
+    locations (recordings of cameras a user may not see). It lists all
+    versions as affected. This snap mirrors upstream's nginx layout.
+
+  How much these matter on a single-admin install has not been assessed.
 
 ## Getting help
 
