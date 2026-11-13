@@ -25,9 +25,9 @@ cd "$(dirname "$0")/.." || exit 2
 snap_file_is() {
   local v=${2//./\\.}
   if command -v unsquashfs >/dev/null 2>&1; then
-    unsquashfs -cat "$1" meta/snap.yaml 2>/dev/null | grep -qxE "version: '?${v}'?"
+    unsquashfs -cat "$1" meta/snap.yaml 2>/dev/null | grep -xE "version: '?${v}'?" >/dev/null
   else
-    snap info "$1" 2>/dev/null | grep -qE "^version:[[:space:]]+${v}([[:space:]]|\$)"
+    snap info "$1" 2>/dev/null | grep -E "^version:[[:space:]]+${v}([[:space:]]|\$)" >/dev/null
   fi
 }
 snap_file_is "$BASE017" 0.17.2 || { echo "baseline .snap is not version 0.17.2"; exit 2; }
@@ -60,8 +60,11 @@ con.commit()
 EOF
 }
 jcount() { journalctl -u "snap.$S.frigate.service" --since "$1" 2>/dev/null; }
-jhas() { jcount "$1" | grep -qF -- "$2"; }
-jhas_re() { jcount "$1" | grep -qiE -- "$2"; }
+# Every grep in a pipeline here DRAINS its input (no -q): under pipefail, grep -q exits on the first
+# match, the writer dies of SIGPIPE (141) on output larger than a pipe buffer, and a present line would
+# read as absent.
+jhas() { jcount "$1" | grep -F -- "$2" >/dev/null; }
+jhas_re() { jcount "$1" | grep -iE -- "$2" >/dev/null; }
 # jabsent <since> <control> <label> <ERE>: PASS iff <ERE> is absent from the frigate journal since <since>,
 # but only once the fixed line <control> is present in the same window. Absence in an empty or unreadable
 # journal would otherwise pass vacuously.
@@ -76,7 +79,7 @@ START_CONTROL='frigate-run: go2rtc gate waited_ms='
 # 0.18.2 swallows a vec0 load failure (db/sqlitevecq.py:38-42, logger.error). 0.17.2 has no such line:
 # it raises at connect (db/sqlitevecq.py:24-27), so a 0.17.2 start that reaches the API loaded vec0.
 assert_vec0_loaded() { jabsent "$1" "$START_CONTROL" "vec0 loaded ($2)" 'Unable to load the sqlite-vec extension'; }
-version_is() { api /version | grep -q "^${1//./\\.}-"; }
+version_is() { api /version | grep "^${1//./\\.}-" >/dev/null; }
 install_snap() {  # install_snap <file> <label>: install or refresh (a refresh runs pre-refresh), connect, wait, vec0
   local m; m=$(mark)
   snap install --dangerous "$1" >/dev/null || { fail_ "snap install ($2)"; return 1; }
@@ -87,7 +90,7 @@ install_snap() {  # install_snap <file> <label>: install or refresh (a refresh r
   if version_is 0.18.2; then assert_vec0_loaded "$m" "$2"; fi
 }
 REVERT_MARK=""; REVERT_T=0
-rev_present() { snap list --all "$S" 2>/dev/null | awk -v s="$S" '$1==s{print $3}' | grep -qxF -- "$1"; }
+rev_present() { snap list --all "$S" 2>/dev/null | awk -v s="$S" '$1==s{print $3}' | grep -xF -- "$1" >/dev/null; }
 revert_to() {  # revert_to <revision> <label>
   local m; m=$(mark)
   rev_present "$1" || { fail_ "revision $1 still installed ($2)"; return 1; }
