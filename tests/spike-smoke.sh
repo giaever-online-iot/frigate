@@ -9,6 +9,7 @@ SNAP_NAME=frigate
 # before those guards run. The descriptive --nvr-safe comment block stays at its original site below.
 NVR_SAFE=0
 [ "${1:-}" = "--nvr-safe" ] && NVR_SAFE=1
+. "$(dirname "$0")/lib/harness-arch.sh"
 # M7 Task 4: project root is now the snapcraft project (snap/snapcraft.yaml at root);
 # `snapcraft pack` at root produces ./frigate_*.snap. Root-first, but tolerate old
 # spike/frigate_*.snap artifacts and Task 1's remote-built spike/frigate-remote_amd64.snap
@@ -20,7 +21,8 @@ NVR_SAFE=0
 # frigate*_*.snap artifacts mean a stale .snap was left behind — fail loudly so nothing picks the wrong
 # one. spike/frigate*_*.snap (frigate_0.0.1-spike, frigate-remote — M7 evidence) is the documented
 # FALLBACK only when the repo root has none; it is NOT part of the ambiguity set.
-ROOT_SNAPS=$(ls -1 frigate*_*.snap 2>/dev/null)
+# shellcheck disable=SC2046 # the glob must expand unquoted
+ROOT_SNAPS=$(ls -1 $(artifact_glob "$HOST_ARCH") 2>/dev/null)
 # M8 final review (Task 6c): nvr-safe SKIPs this guard (gated on NVR_SAFE) — a read-only production
 # run must not fail on stray checkout .snap files it never installs.
 if [ "$NVR_SAFE" -eq 0 ] && [ "$(printf '%s\n' "$ROOT_SNAPS" | grep -c .)" -gt 1 ]; then
@@ -30,7 +32,8 @@ if [ "$NVR_SAFE" -eq 0 ] && [ "$(printf '%s\n' "$ROOT_SNAPS" | grep -c .)" -gt 1
     exit 1
   fi
 fi
-SNAP_FILE=$(ls -t frigate*_*.snap spike/frigate*_*.snap 2>/dev/null | head -1)
+# shellcheck disable=SC2046 # the glob must expand unquoted
+SNAP_FILE=$(ls -t $(artifact_glob "$HOST_ARCH") spike/$(artifact_glob "$HOST_ARCH") 2>/dev/null | head -1)
 SNAP_FILE_SHA=""
 if [ -n "$SNAP_FILE" ]; then
   SNAP_FILE_SHA=$(sha256sum "$SNAP_FILE" 2>/dev/null | awk '{print $1}')
@@ -243,8 +246,13 @@ if [ "$NVR_SAFE" -eq 1 ]; then
   echo "SKIP (nvr-safe): snap size floor — production outcome must not depend on checkout .snap files"
 elif [ -n "$SNAP_FILE" ]; then
   SNAP_SZ=$(stat -c %s "$SNAP_FILE" 2>/dev/null || echo 0)
-  check "m8: snap size floor (>=802 MiB, prime not gutted)" sh -c "[ '$SNAP_SZ' -ge 840957952 ]"
-  echo "  m8 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (floor 840957952 = 802 MiB; contaminated was 989880320, clean 989868032)"
+  FLOOR=$(size_floor_for_arch "$HOST_ARCH")
+  if [ -z "$FLOOR" ]; then
+    echo "SKIP: snap size floor — no floor recorded for $HOST_ARCH yet (M7c T14)"
+  else
+    check "m8: snap size floor (>=$((FLOOR / 1048576)) MiB, prime not gutted)" sh -c "[ '$SNAP_SZ' -ge '$FLOOR' ]"
+  fi
+  echo "  m8 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (arch $HOST_ARCH floor ${FLOOR:-none}; amd64 contaminated was 989880320, clean 989868032)"
 fi
 
 # M8 final review: app-census assertion — THE check that would have caught the stale-file

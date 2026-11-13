@@ -126,4 +126,10 @@ awk '/^parts:/{inp=1} inp&&/^  go2rtc:$/{g=1;print;next} g&&/^  [a-z0-9-]+:$/{g=
 t "T4: mutation copy really has arm64 platform"   test "$(yq '.platforms | has("arm64")' < "$TMP/mut2.yaml")" = true
 t "T4: D5 guard rejects arm64 platform without a go2rtc arm64 row" sh -c "! d5_ok '$TMP/mut2.yaml'"
 
+# --- T7 harness ---
+t "T7: harness sources harness-arch.sh"  grep -qF '. "$(dirname "$0")/lib/harness-arch.sh"' tests/spike-smoke.sh
+t "T7: artifact glob is per-arch"        sh -c "[ \$(grep -c 'artifact_glob \"\$HOST_ARCH\"' tests/spike-smoke.sh) -ge 2 ]"
+t "T7: size floor via helper"            grep -q 'size_floor_for_arch "\$HOST_ARCH"' tests/spike-smoke.sh
+t "T7: no size literal left in harness"  sh -c "! grep -qE '\[ .\\\$SNAP_SZ. -ge [0-9]{9}' tests/spike-smoke.sh"
+
 [ "$FAILS" -eq 0 ]
