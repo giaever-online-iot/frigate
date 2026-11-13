@@ -9,19 +9,38 @@ import sys
 import time
 
 
-def _call(f, execute, arguments=None):
+def _send(f, execute, arguments=None):
     req = {"execute": execute}
     if arguments is not None:
         req["arguments"] = arguments
     f.write((json.dumps(req) + "\n").encode())
     f.flush()
+
+
+def _recv(f):
     line = f.readline()
     if not line:
         raise ConnectionError("guest agent closed the socket")
-    resp = json.loads(line)
+    return json.loads(line)
+
+
+def _call(f, execute, arguments=None):
+    _send(f, execute, arguments)
+    resp = _recv(f)
     if "error" in resp:
         raise RuntimeError("guest agent error: %s" % (resp["error"],))
     return resp["return"]
+
+
+def _sync(f, sync_id):
+    """guest-sync: discard stale replies until the one carrying our id."""
+    _send(f, "guest-sync", {"id": sync_id})
+    while True:
+        resp = _recv(f)
+        if "error" in resp:
+            raise RuntimeError("guest agent error: %s" % (resp["error"],))
+        if resp.get("return") == sync_id:
+            return
 
 
 def run(sock_path, cmd, timeout_s):
@@ -48,8 +67,11 @@ def run(sock_path, cmd, timeout_s):
                 raise TimeoutError("guest command exceeded %ss" % timeout_s)
 
         sync_id = random.randint(1, 2**31 - 1)
-        if call("guest-sync", {"id": sync_id}) != sync_id:
-            raise RuntimeError("guest-sync id mismatch")
+        s.settimeout(remaining())
+        try:
+            _sync(f, sync_id)
+        except socket.timeout:
+            raise TimeoutError("guest command exceeded %ss" % timeout_s)
         pid = call("guest-exec", {"path": "/bin/sh", "arg": ["-c", cmd],
                                   "capture-output": True})["pid"]
         while True:
@@ -60,6 +82,10 @@ def run(sock_path, cmd, timeout_s):
                 return st.get("exitcode", 255), out, err
             time.sleep(min(0.5, remaining()))
     finally:
+        try:
+            f.close()
+        except (NameError, OSError):
+            pass
         s.close()
 
 
@@ -82,6 +108,6 @@ if __name__ == "__main__":
     sys.dont_write_bytecode = True
     try:
         sys.exit(main(sys.argv[1:]))
-    except (TimeoutError, OSError, RuntimeError) as e:
+    except (TimeoutError, OSError, RuntimeError, ValueError) as e:
         print("qga: %s" % e, file=sys.stderr)
         sys.exit(255)

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import qga  # noqa: E402
 
 
-def fake_agent(path, exitcode, out, polls_before_exit=2):
+def fake_agent(path, exitcode, out, polls_before_exit=2, stale=None):
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(1)
@@ -25,6 +25,8 @@ def fake_agent(path, exitcode, out, polls_before_exit=2):
             req = json.loads(line)
             ex = req["execute"]
             if ex == "guest-sync":
+                if stale is not None:
+                    f.write((json.dumps(stale) + "\n").encode())
                 resp = {"return": req["arguments"]["id"]}
             elif ex == "guest-exec":
                 assert req["arguments"]["path"] == "/bin/sh"
@@ -54,6 +56,11 @@ class QgaRun(unittest.TestCase):
         p = os.path.join(tempfile.mkdtemp(), "qga.sock")
         fake_agent(p, 3, b"hello\n")
         self.assertEqual(qga.run(p, "echo hello; exit 3", 10), (3, b"hello\n", b""))
+
+    def test_stale_reply_before_sync_is_discarded(self):
+        p = os.path.join(tempfile.mkdtemp(), "qga.sock")
+        fake_agent(p, 0, b"ok\n", stale={"return": {"pid": 99}})
+        self.assertEqual(qga.run(p, "true", 10), (0, b"ok\n", b""))
 
     def test_timeout(self):
         p = os.path.join(tempfile.mkdtemp(), "qga.sock")
