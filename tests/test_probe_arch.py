@@ -3,6 +3,7 @@ import sys
 import unittest
 from unittest import mock
 
+sys.dont_write_bytecode = True  # spike/probes is dumped verbatim into the snap by the probes part; no .pyc there
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "spike", "probes"))
 import probe_common  # noqa: E402
 

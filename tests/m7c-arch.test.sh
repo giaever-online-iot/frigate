@@ -100,4 +100,6 @@ t "T3: frigate-run sets SHM_MAX_FRAMES"     sh -c "grep -qx 'SHM_MAX_FRAMES=\$(s
 t "T3: frigate-run logs the D10 ERROR line" grep -qF 'frigate-run: ERROR config.yml uses the openvino detector, which cannot run on arm64; set it to cpu or coral (or delete config.yml to re-render)' spike/bin/frigate-run
 t "T3: stale ~50% RAM shm note gone"        sh -c "! grep -q 'default sizing (~50% RAM)' $Y"
 
+t "T3: no bytecode in shipped dirs (spike/bin, spike/probes)" sh -c "[ -z \"\$(find spike/bin spike/probes -name '__pycache__' -o -name '*.pyc')\" ]"
+
 [ "$FAILS" -eq 0 ]
