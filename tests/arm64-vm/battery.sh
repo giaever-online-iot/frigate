@@ -47,10 +47,14 @@ poll() {
     "$@" && return 0
     i=$((i + 1))
     { [ "$i" -le "$n" ] && [ "$(date +%s)" -lt "$end" ]; } || return 1
-    command sleep "$iv"
+    isleep "$iv"
   done
 }
-wait_s() { command sleep "$(scaled "$1")"; }               # a scaled fixed wait (scaled once, never twice)
+# isleep N: an interruptible sleep. Bash defers a trap until a FOREGROUND child exits, so a TERM during a
+# `scaled 1800` sleep would wait hours; `wait` on a background sleep returns at once and the trap runs.
+SLEEP_PID=""
+isleep() { command sleep "$1" & SLEEP_PID=$!; wait "$SLEEP_PID"; SLEEP_PID=""; }
+wait_s() { isleep "$(scaled "$1")"; }                     # a scaled fixed wait (scaled once, never twice)
 
 # --- configs: rendered on the host into the shared out dir, installed in the guest (0600) -----------
 render() { sed "s|__SNAP_COMMON__|/var/snap/frigate/common|g" "$1" > "$2"; }
@@ -76,11 +80,13 @@ SHM_ARMED=0; QUOTA_ARMED=0; CLEANED=0
 cleanup() {
   [ "$CLEANED" = 1 ] && return 0; CLEANED=1
   local st
-  st=$(g "rm -f $SMF; if test -e $SMF; then echo shm-max-frames=present; else echo shm-max-frames=absent; fi; \
+  [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2>/dev/null
+  # Bounded calls (gw): a dead guest must not hold each cleanup call for the default 3600 s qga timeout.
+  st=$(gw "rm -f $SMF; if test -e $SMF; then echo shm-max-frames=present; else echo shm-max-frames=absent; fi; \
 snap remove-quota $QG >/dev/null 2>&1; if snap quota $QG >/dev/null 2>&1; then echo quota=present; else echo quota=absent; fi" 2>&1)
   echo "battery.sh: cleanup: $(printf '%s' "$st" | one_line)" >&2
   if [ "$SHM_ARMED" = 1 ]; then
-    g 'snap restart frigate.frigate' >/dev/null 2>&1 || true
+    gw 'snap restart frigate.frigate' >/dev/null 2>&1 || true
     grep -q '^shm-max-frames=absent$' <<<"$st" || fail "V9 cleanup: $SMF removal not confirmed ($(printf '%s' "$st" | one_line))"
   fi
   if [ "$QUOTA_ARMED" = 1 ]; then
@@ -88,7 +94,35 @@ snap remove-quota $QG >/dev/null 2>&1; if snap quota $QG >/dev/null 2>&1; then e
   fi
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Pre-run cleanup: a previous run killed mid-V9 or mid-V11 can leave shm-max-frames or the quota group behind.
+pre_run_cleanup() {
+  local st
+  st=$(gw "if test -e $SMF; then echo shm-max-frames=leftover; rm -f $SMF; fi; \
+if snap quota $QG >/dev/null 2>&1; then echo quota=leftover; snap remove-quota $QG >/dev/null 2>&1; \
+if snap quota $QG >/dev/null 2>&1; then echo quota=still-present; fi; fi; echo pre-run=done" 2>&1)
+  printf '%s\n' "$st" > "$OUT/pre-run-cleanup.txt"
+  grep -q '^shm-max-frames=leftover$' <<<"$st" && info "V9 pre-run: removed a leftover $SMF from an earlier run"
+  grep -q '^quota=leftover$' <<<"$st" && info "V11 pre-run: removed a leftover quota group $QG from an earlier run"
+  grep -q '^quota=still-present$' <<<"$st" && info "V11 pre-run: quota group $QG is STILL present after remove-quota"
+  grep -q '^pre-run=done$' <<<"$st" || echo "battery.sh: pre-run cleanup not confirmed: $(printf '%s' "$st" | one_line)" >&2
+  return 0
+}
+
+# I1: stale frame segments. Frigate may not unlink its shm frames on stop (F10: they survive a purge), and the
+# template's testclip camera (1280x720) runs before the fixture. Before each counted (re)start: stop frigate,
+# record + count + delete only the *_frame* segments, start it, and say how many were stale.
+shm_reset() {   # shm_reset POINT
+  local n
+  g 'snap stop frigate.frigate' > "$OUT/v9-reset-$1.txt" 2>&1
+  g "ls -l $SHMDIR" > "$OUT/v9-shm-before-$1.txt" 2>&1
+  n=$(g "ls $SHMDIR 2>/dev/null | grep -c '_frame'" 2>/dev/null | tail -n 1)
+  g "rm -f $SHMDIR/*_frame*" >> "$OUT/v9-reset-$1.txt" 2>&1
+  g 'snap start frigate.frigate' >> "$OUT/v9-reset-$1.txt" 2>&1
+  info "V9 stale frame segments before $1: ${n:-unknown}"
+}
 
 # ======================================================================================================
 # 1. v5_install
@@ -146,12 +180,16 @@ v5_layout() {
 # 3. v6_runtime
 v6_runtime() {
   local imp bad n line why=""
-  imp=$(g "snap run frigate.imports-probe > $GOUT/v6-imports-probe.txt 2>&1; R=$R; jq -c .imports \"\$R/imports.json\"" 2>/dev/null)
+  # Fresh results only: delete what this probe writes (incl. edgetpu-dlopen.json, read by V18) before running it.
+  g "rm -f $R/imports.json $R/edgetpu-dlopen.json" > "$OUT/v6-clear.txt" 2>&1 || why="$why could not clear stale probe results;"
+  g 'snap run frigate.imports-probe' > "$OUT/v6-imports-probe.txt" 2>&1 || why="$why imports-probe exited non-zero;"
+  imp=$(g "R=$R; jq -c .imports \"\$R/imports.json\"" 2>/dev/null)
   printf '%s\n' "$imp" > "$OUT/v6-imports.json"
-  if jq -e 'type == "object" and length > 0 and has("sqlite_vec") and all(.[]; .ok == true)' <<<"$imp" >/dev/null 2>&1; then :
+  if [ -z "$imp" ]; then why="$why no fresh imports.json;"
+  elif jq -e 'type == "object" and length > 0 and has("sqlite_vec") and all(.[]; .ok == true)' <<<"$imp" >/dev/null 2>&1; then :
   else
     bad=$(jq -r 'to_entries[] | select(.value.ok != true) | .key' <<<"$imp" 2>/dev/null | one_line)
-    why="$why imports not all ok (${bad:-no/invalid imports.json or no sqlite_vec});"
+    why="$why imports not all ok (${bad:-invalid imports.json or no sqlite_vec});"
   fi
   n=$(g '/snap/frigate/current/usr/lib/ffmpeg/8.0/bin/ffmpeg -hide_banner -decoders | grep -cw hevc' 2>/dev/null | tail -n 1)
   { is_int "$n" && [ "$n" -ge 1 ]; } || why="$why 8.0 ffmpeg hevc decoders=${n:-none};"
@@ -163,8 +201,14 @@ v6_runtime() {
 
 # 4. v18_edgetpu
 v18_edgetpu() {
-  local dl ok path err why=""
-  g "snap run frigate.coral-probe" > "$OUT/v18-coral-probe.txt" 2>&1
+  local dl ok path err why="" cj
+  # Depends on V6: edgetpu-dlopen.json is written by frigate.imports-probe (svc.py), which V6 ran on freshly
+  # cleared results; coral.json is this probe's own. probe_coral.py exits 0 even when the delegate fails to
+  # load (no stick: it writes the error and sys.exit(0)), so a non-zero rc is a real failure here.
+  g "rm -f $R/coral.json" > "$OUT/v18-clear.txt" 2>&1 || why="$why could not clear a stale coral.json;"
+  g 'snap run frigate.coral-probe' > "$OUT/v18-coral-probe.txt" 2>&1 || why="$why coral-probe exited non-zero;"
+  cj=$(g "cat $R/coral.json" 2>/dev/null); printf '%s\n' "$cj" > "$OUT/v18-coral.json"
+  [ -n "$cj" ] || why="$why no fresh coral.json;"
   dl=$(g "R=$R; jq -r '.dlopen.ok, .lib_path' \"\$R/edgetpu-dlopen.json\"" 2>/dev/null)
   ok=$(sed -n 1p <<<"$dl"); path=$(sed -n 2p <<<"$dl")
   err=$(g "R=$R; jq -r '.load_delegate.error // \"\"' \"\$R/coral.json\"" 2>/dev/null)
@@ -185,7 +229,7 @@ v7_h265() {
   codec=$(g "snap run frigate.ffprobe -v error -show_entries stream=codec_name -of csv=p=0 $CLIP" 2>/dev/null)
   [ "$codec" = hevc ] || why="$why clip codec '${codec}' (want hevc);"
   put_config m7c-config.yml > "$OUT/v7-config.txt" 2>&1 || why="$why fixture config install failed;"
-  t0=$(guest_t0); g 'snap restart frigate.frigate' >> "$OUT/v7-config.txt" 2>&1
+  t0=$(guest_t0); shm_reset v7
   wait_s 300
   stats=$(g "curl -sf $AUTH_H http://localhost:5001/stats" 2>/dev/null)
   jq 'del(.cpu_usages)' <<<"$stats" > "$OUT/v7-stats.json" 2>/dev/null || printf '%s\n' "$stats" > "$OUT/v7-stats.json"
@@ -209,14 +253,15 @@ v7_h265() {
 
 # 6. v9_shm (D13a)
 CNT_A=""; CNT_B=""
-shm_counts() {
+shm_counts() {   # shm_counts POINT (evidence: battery/v9-shm-POINT.txt)
+  g "ls -l $SHMDIR" > "$OUT/v9-shm-$1.txt" 2>&1
   CNT_A=$(g "ls $SHMDIR | grep -c '^m7c_a_frame'" 2>/dev/null | tail -n 1)
   CNT_B=$(g "ls $SHMDIR | grep -c '^m7c_b_frame'" 2>/dev/null | tail -n 1)
 }
 v9_shm() {
   local fb tot sizes badsz du why="" ma mb
   fb=$(expected_frame_bytes "$W" "$H"); tot=$(expected_frames_total "$W" "$H" "$FRAMES" "$CAMS")
-  shm_counts
+  shm_counts bound
   sizes=$(g "stat -c '%n %s' $SHMDIR/m7c_*_frame*" 2>/dev/null); printf '%s\n' "$sizes" > "$OUT/v9-sizes.txt"
   badsz=$(awk -v f="$fb" 'NF >= 2 && $NF != f { n++ } END { print n + 0 }' <<<"$sizes")
   du=$(g "du -sb $SHMDIR" 2>/dev/null | awk 'NR == 1 { print $1 }')
@@ -229,11 +274,13 @@ v9_shm() {
   # Mutation: SHM_MAX_FRAMES=10 via the harness hook, then restore.
   why=""
   SHM_ARMED=1
-  g "echo 10 > $SMF; snap restart frigate.frigate" > "$OUT/v9-mutation.txt" 2>&1 || why="$why arming failed;"
-  wait_s 300; shm_counts; ma="$CNT_A,$CNT_B"
+  g "echo 10 > $SMF" > "$OUT/v9-mutation.txt" 2>&1 || why="$why arming failed;"
+  shm_reset mutation
+  wait_s 300; shm_counts mutation; ma="$CNT_A,$CNT_B"
   [ "$CNT_A" = 10 ] && [ "$CNT_B" = 10 ] || why="$why with shm-max-frames=10 frame files a,b=$ma (want 10);"
-  if g "rm -f $SMF; snap restart frigate.frigate" >> "$OUT/v9-mutation.txt" 2>&1; then SHM_ARMED=0; else why="$why restore failed;"; fi
-  wait_s 300; shm_counts; mb="$CNT_A,$CNT_B"
+  if g "rm -f $SMF" >> "$OUT/v9-mutation.txt" 2>&1; then SHM_ARMED=0; else why="$why restore failed;"; fi
+  shm_reset restore
+  wait_s 300; shm_counts restore; mb="$CNT_A,$CNT_B"
   [ "$CNT_A" = "$FRAMES" ] && [ "$CNT_B" = "$FRAMES" ] || why="$why after restore a,b=$mb (want $FRAMES);"
   if [ -z "$why" ]; then pass "V9 mutation: shm-max-frames=10 -> 10 frame files/camera; removed -> $FRAMES again"
   else fail "V9 mutation:$why"; fi
@@ -280,7 +327,7 @@ v11_quota() {
     is_int "$nr" && { [ -z "$nrmax" ] || [ "$nr" -gt "$nrmax" ]; } && nrmax=$nr
     is_int "$sw" && { [ -z "$swmax" ] || [ "$sw" -gt "$swmax" ]; } && swmax=$sw
     echo "$(date -Is) agent=$agent snapd=${snapd:-?} NRestarts=${nr:-?} swap_used=${sw:-?} oom=${oom:-?}" >> "$OUT/v11-watch.txt"
-    i=$((i + 1)); command sleep 30
+    i=$((i + 1)); isleep 30
   done
   if g "snap remove-quota $QG" > "$OUT/v11-remove-quota.txt" 2>&1; then QUOTA_ARMED=0; removed=1; fi
   [ "$agent_down" = 0 ] || why="$why guest agent down in $agent_down samples;"
@@ -364,6 +411,7 @@ v17_lifecycle() {
 
 # ======================================================================================================
 mkdir -p "$OUT" && g "mkdir -p $GOUT" >/dev/null 2>&1
+pre_run_cleanup
 if v5_install; then
   v5_layout; v6_runtime; v18_edgetpu; v7_h265; v9_shm; v10_mem; v11_quota; v_ov_config; v_restore; v17_lifecycle
 else
