@@ -749,7 +749,9 @@ for _i in $(seq 1 18); do
 done
 check "frigate API answers" test -s "$EVIDENCE/frigate-version.txt"
 check "db at split path" test -f /var/snap/frigate/common/db/frigate.db
-check "sidecar written" sh -c "grep -qE '^0\.17\.2' /var/snap/frigate/common/db/.last-writer"
+# M9: the sidecar's first field is the RUNNING version (frigate-run writes "$CUR_VERSION $SNAP_REVISION"), not a literal.
+M9_RUNVER=$(sed -n 's/^VERSION *= *"\([^"+-]*\).*/\1/p' /snap/$SNAP_NAME/current/opt/frigate/frigate/version.py 2>/dev/null | head -1)
+check "sidecar written (running version ${M9_RUNVER:-?})" sh -c "[ -n '$M9_RUNVER' ] && [ \"\$(awk '{print \$1; exit}' /var/snap/frigate/common/db/.last-writer)\" = '$M9_RUNVER' ]"
 
 # --- M4: nginx reverse-proxy (Task 2) ---
 check "nginx service active" sh -c "snap services frigate.nginx | grep -q ' active'"
