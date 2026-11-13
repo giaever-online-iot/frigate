@@ -62,9 +62,20 @@ EOF
 jcount() { journalctl -u "snap.$S.frigate.service" --since "$1" 2>/dev/null; }
 jhas() { jcount "$1" | grep -qF -- "$2"; }
 jhas_re() { jcount "$1" | grep -qiE -- "$2"; }
+# jabsent <since> <control> <label> <ERE>: PASS iff <ERE> is absent from the frigate journal since <since>,
+# but only once the fixed line <control> is present in the same window. Absence in an empty or unreadable
+# journal would otherwise pass vacuously.
+jabsent() {
+  if ! jhas "$1" "$2"; then fail_ "$3: journal empty/unreadable (no '$2' since $1)"; return; fi
+  if jhas_re "$1" "$4"; then fail_ "$3"; else pass_ "$3"; fi
+}
+# Positive control for any window that contains a frigate start: frigate-run prints this line
+# unconditionally before exec'ing Frigate, in the baseline (a39bfb0 spike/bin/frigate-run:99) and in the
+# candidate (spike/bin/frigate-run:102), so it is version-independent.
+START_CONTROL='frigate-run: go2rtc gate waited_ms='
 # 0.18.2 swallows a vec0 load failure (db/sqlitevecq.py:38-42, logger.error). 0.17.2 has no such line:
 # it raises at connect (db/sqlitevecq.py:24-27), so a 0.17.2 start that reaches the API loaded vec0.
-assert_vec0_loaded() { check "vec0 loaded ($2)" bash -c "! journalctl -u snap.$S.frigate.service --since '$1' 2>/dev/null | grep -qF 'Unable to load the sqlite-vec extension'"; }
+assert_vec0_loaded() { jabsent "$1" "$START_CONTROL" "vec0 loaded ($2)" 'Unable to load the sqlite-vec extension'; }
 version_is() { api /version | grep -q "^${1//./\\.}-"; }
 install_snap() {  # install_snap <file> <label>: install or refresh (a refresh runs pre-refresh), connect, wait, vec0
   local m; m=$(mark)
@@ -84,6 +95,19 @@ revert_to() {  # revert_to <revision> <label>
   snap revert "$S" --revision="$1" >/dev/null || { fail_ "snap revert to $1 ($2)"; return 1; }
   wait_api 300 || { fail_ "API up after revert ($2)"; return 1; }
   REVERT_MARK=$m
+}
+revert_probe() {  # revert_probe <revision> <label>: FINDING-ONLY revert for phase F; never calls fail_
+  local m rc; m=$(mark); REVERT_T=$(date +%s); REVERT_MARK=$m
+  if ! rev_present "$1"; then finding "$2: revision $1 no longer installed, revert not attempted"; return 1; fi
+  snap revert "$S" --revision="$1" >/dev/null 2>&1; rc=$?
+  finding "$2: snap revert rc=$rc"
+  local up=no; if [ "$rc" -eq 0 ] && wait_api 300; then up=yes; fi
+  finding "$2: API up within 300 s: $up"
+  if jhas "$m" 'frigate-run: DOWNGRADE detected'; then finding "$2: 'frigate-run: DOWNGRADE detected' logged"
+  else finding "$2: 'frigate-run: DOWNGRADE detected' NOT logged"; fi
+  if jhas "$m" 'no backup available'; then finding "$2: downgrade path took the no-backup branch (expected)"
+  else finding "$2: no-backup branch line NOT logged (see journal since $m)"; fi
+  [ "$up" = yes ]
 }
 rev_of() { snap list "$S" | awk -v s="$S" '$1==s{print $3}'; }
 snapshot() {  # snapshot <tag>: row counts + config sha (contents never printed)
@@ -123,9 +147,17 @@ testclip_capturing() { api /stats | py -c 'import json,sys; sys.exit(0 if (json.
 
 # EXIT trap: put phase F's held backups back and restore the VM's refresh.retain.
 HOLD=""; RETAIN_OLD=""; RETAIN_SET=""
+restore_hold() {  # move phase F's held backups back; clears HOLD only once nothing is left to move
+  [ -n "$HOLD" ] || return 0
+  if [ -d "$HOLD" ]; then
+    local f; for f in "$HOLD"/*; do [ -e "$f" ] || continue; mv -f -- "$f" "$BK"/ || return 1; done
+    rmdir "$HOLD" 2>/dev/null || return 1
+  fi
+  HOLD=""
+}
 # shellcheck disable=SC2317 # invoked by the EXIT trap (indirect)
 cleanup() {
-  if [ -n "$HOLD" ] && [ -d "$HOLD" ]; then mv -f "$HOLD"/* "$BK"/ 2>/dev/null; rmdir "$HOLD" 2>/dev/null; fi
+  restore_hold || echo "WARNING: phase F backups still held in $HOLD; move them back to $BK"
   if [ -n "$RETAIN_SET" ]; then
     if [ -n "$RETAIN_OLD" ]; then snap set system refresh.retain="$RETAIN_OLD"; else snap unset system refresh.retain; fi
   fi
@@ -133,8 +165,10 @@ cleanup() {
 trap cleanup EXIT
 
 # The purge would destroy the VM's livecam secret and its config.yml, which the gate (tests/spike-smoke.sh)
-# treats as the operator's config. Park both in the gate's own recovery stashes (the gate restores them on
-# its next run). Refuse before the purge if a stash from an aborted run is already parked.
+# treats as the operator's config. Park both in the gate's own recovery stashes. They are restored ONLY by
+# the next full-install, non --nvr-safe gate run (spike-smoke.sh: the RECOVER block and the post-install
+# /var/tmp operator-config restore are both NVR_SAFE-gated and install-path only), which is what the
+# controller runs next. Refuse before the purge if a stash from an aborted run is already parked.
 park_vm_state() {
   local lc=$COMMON/livecam-url ls_=/var/tmp/frigate-livecam-url.stash cs=/var/tmp/frigate-operator-config.stash
   if [ -f "$lc" ]; then
@@ -247,24 +281,40 @@ phase_b_refresh_to_candidate() {
     jhas_re "$rm_" 'Embedded [0-9]+ thumbnails and [0-9]+ descriptions|Unable to reindex tracked object embeddings' && break
     sleep 10; t=$((t+10)); done
   check "B: reindex started" jhas "$rm_" 'Indexing tracked object embeddings'
-  check "B: reindex logged no sqlite/vec error" bash -c "! journalctl -u snap.$S.frigate.service --since '$rm_' | grep -qiE 'unable to reindex|sqlite.*error|vec0|no such module: vec'"
+  # no frigate start in this window: its positive control is the reindex's own start line (embeddings.py:321)
+  jabsent "$rm_" 'Indexing tracked object embeddings' "B: reindex logged no sqlite/vec error" 'unable to reindex|sqlite.*error|vec0|no such module: vec'
   if jhas_re "$rm_" 'Embedded [0-9]+ thumbnails and [0-9]+ descriptions'; then pass_ "B: reindex completed"
   else finding "B: reindex completion line not seen within 600 s (the embedding model download is network-gated)"; fi
   phase_b_export_thumbnail
 }
 
+# thumb_window <preview start> <preview end> <now>: prints "<ws> <we>" = [end-120, end-60] iff that window
+# lies inside the preview (ws >= start) AND ends before the current UTC hour boundary (we < floor_hour(now)).
+# save_thumbnail takes the 8.0 branch only when the export starts before that boundary
+# (record/export.py:593-597, datetime.now(UTC).replace(minute=0, ...)); epoch hours are UTC hours.
+thumb_window() {
+  local ps=${1%%.*} pe=${2%%.*} now=${3%%.*} hour ws we
+  hour=$(( now / 3600 * 3600 )); ws=$(( pe - 120 )); we=$(( pe - 60 ))
+  [ "$ws" -ge "$ps" ] && [ "$we" -lt "$hour" ] || return 1
+  echo "$ws $we"
+}
 phase_b_export_thumbnail() {  # item 6: the REAL 8.0 thumbnail branch (record/export.py save_thumbnail)
-  # The 8.0 branch runs only for an export starting before the current hour boundary, with a finalized
-  # hourly preview mp4 (Previews row). Wait (bounded, 75 min) until one exists for testclip.
-  local t=0 row
+  # The 8.0 branch needs an export starting before the current hour boundary inside a finalized preview
+  # mp4 (Previews row). Wait (bounded, 75 min) until some testclip preview yields such a window.
+  local t=0 row win=""
   while :; do
-    row=$(sql "SELECT start_time,end_time FROM previews WHERE camera='testclip' ORDER BY end_time DESC LIMIT 1")
-    [ -n "$row" ] && break
-    [ "$t" -ge 4500 ] && { fail_ "B: no finalized preview mp4 within 75 min (cannot exercise the 8.0 thumbnail)"; return; }
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      win=$(thumb_window "${row%%|*}" "${row#*|}" "$(date +%s)") && break
+      win=""
+    done < <(sql "SELECT start_time,end_time FROM previews WHERE camera='testclip' ORDER BY end_time DESC LIMIT 20")
+    [ -n "$win" ] && break
+    [ "$t" -ge 4500 ] && { fail_ "B: no finalized preview mp4 with a pre-hour window within 75 min (cannot exercise the 8.0 thumbnail)"; return; }
     sleep 60; t=$((t+60))
   done
-  local ps=${row%%|*}; ps=${ps%%.*}
-  apix POST "/export/testclip/start/$((ps+60))/end/$((ps+120))" '{}' > "$EV/B.export.json" || fail_ "B: export request"
+  local ws=${win% *} we=${win#* } hour=$(( $(date +%s) / 3600 * 3600 ))
+  if [ "$we" -ge "$hour" ]; then fail_ "B: export window [$ws,$we] is not before the hour boundary $hour (8.0 branch not provable)"; return; fi
+  apix POST "/export/testclip/start/$ws/end/$we" '{}' > "$EV/B.export.json" || fail_ "B: export request"
   local id thumb=""
   id=$(py -c 'import json,sys; print(json.load(open(sys.argv[1])).get("export_id") or "")' "$EV/B.export.json" 2>/dev/null) || id=""
   [ -n "$id" ] && thumb=$(wait_export "$id" 300)
@@ -317,20 +367,24 @@ phase_e_retention_d21() {
 
 phase_f_v017_on_migrated_db() {  # FINDING ONLY (D21 removes the dependency); research Addendum 6
   echo "== F: 0.17.2 directly on a 0.18-migrated DB (finding) =="
+  # Everything up to the reinstall is FINDING-ONLY (spec 7a): a 0.17.2 that cannot serve on the migrated
+  # DB is the thing being probed, so it never turns the run red and never skips the reinstall below.
   HOLD=$COMMON/db/m9-hold; mkdir -p "$HOLD"; mv "$BK"/frigate-pre-*.db "$HOLD"/ 2>/dev/null || true
-  revert_to "$REV_A" "F revert, no backups" || return 1     # the EXIT trap puts the backups back
-  if jhas "$REVERT_MARK" 'no backup available'; then finding "F: downgrade path took the no-backup branch (expected)"
-  else finding "F: no-backup branch line NOT logged (see journal since $REVERT_MARK)"; fi
-  local n0; n0=$(sql "SELECT COUNT(*) FROM recordings"); sleep 300
-  if api /events >/dev/null && [ "$(sql 'SELECT COUNT(*) FROM recordings')" -gt "$n0" ]; then
-    finding "F: 0.17.2 ran on the 0.18-migrated DB: /events OK, new recordings written"
+  if revert_probe "$REV_A" "F revert, no backups"; then
+    local n0; n0=$(sql "SELECT COUNT(*) FROM recordings" 2>/dev/null); sleep 300
+    if api /events >/dev/null && [ "$(sql 'SELECT COUNT(*) FROM recordings' 2>/dev/null)" -gt "${n0:-0}" ]; then
+      finding "F: 0.17.2 ran on the 0.18-migrated DB: /events OK, new recordings written"
+    else
+      finding "F: 0.17.2 on the 0.18-migrated DB did NOT run cleanly (see journal since $REVERT_MARK)"
+    fi
   else
-    finding "F: 0.17.2 on the 0.18-migrated DB did NOT run cleanly (see journal since $REVERT_MARK)"
+    finding "F: 0.17.2 did not come up on the 0.18-migrated DB (see journal since $REVERT_MARK)"
   fi
-  install_snap "$CAND" "F back to candidate" || return 1
+  # GATING from here: the VM must end on the candidate with its backups back.
+  install_snap "$CAND" "F back to candidate"
   # after the install: the baseline's pre-refresh just stamped the migrated DB as 0.17.2; the held
-  # genuine 0.17.2 backup replaces it
-  mv -f "$HOLD"/* "$BK"/ 2>/dev/null || true; rmdir "$HOLD" 2>/dev/null || true; HOLD=""
+  # genuine 0.17.2 backup replaces it. HOLD stays set (for the EXIT trap to retry) unless this succeeds.
+  restore_hold || fail_ "F: put the held backups back (still in $HOLD)"
   check "F: candidate healthy after the finding phase" version_is 0.18.2
 }
 
