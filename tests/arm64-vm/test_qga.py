@@ -2,14 +2,18 @@ import base64
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.dirname(__file__))
+# QGA_DIR lets a throwaway mutation run point the tests at a modified copy of qga.py.
+QGA_DIR = os.environ.get("QGA_DIR") or os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, QGA_DIR)
 import qga  # noqa: E402
 
 
@@ -108,6 +112,42 @@ class QgaRun(unittest.TestCase):
         fake_agent(p, 0, b"", polls_before_exit=10**6)
         with self.assertRaises(TimeoutError):
             qga.run(p, "sleep 999", 1)
+
+
+class QgaMain(unittest.TestCase):
+    """main()/argv contract: vm.sh calls `qga.py SOCK --timeout N -- "$*"`."""
+
+    def _main(self, argv):
+        with mock.patch.object(qga, "run", return_value=(0, b"", b"")) as r:
+            qga.main(argv)
+        return r.call_args[0]
+
+    def test_timeout_and_command_parsed(self):
+        self.assertEqual(self._main(["S", "--timeout", "7", "--", "uname", "-m"]), ("S", "uname -m", 7))
+
+    def test_single_string_command(self):
+        self.assertEqual(self._main(["S", "--timeout", "7", "--", "uname -m"]), ("S", "uname -m", 7))
+
+    def test_default_timeout_without_flag(self):
+        self.assertEqual(self._main(["S", "--", "true"]), ("S", "true", 3600))
+
+    def test_guest_command_after_separator_is_verbatim(self):
+        self.assertEqual(self._main(["S", "--timeout", "7", "--", "echo", "--timeout", "1", "--", "x"]),
+                         ("S", "echo --timeout 1 -- x", 7))
+
+    def test_end_to_end_timeout_is_honoured(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "qga.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(p)
+        srv.listen(1)  # accepts into the backlog, never replies
+        self.addCleanup(srv.close)
+        t0 = time.monotonic()
+        r = subprocess.run([sys.executable, "-I", os.path.join(QGA_DIR, "qga.py"), p, "--timeout", "2", "--", "true"],
+                           capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 255, r.stderr)
+        self.assertIn("exceeded", r.stderr)
+        self.assertLess(time.monotonic() - t0, 6)
 
 
 if __name__ == "__main__":

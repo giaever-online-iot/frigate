@@ -29,7 +29,7 @@ case "${1:-}" in
           [ -f "$RUN/disk.qcow2" ] || qemu-img create -f qcow2 -F qcow2 -b "$RUN/base.img" "$RUN/disk.qcow2" 40G
           [ -f "$RUN/vars.fd" ] || cp /usr/share/AAVMF/AAVMF_VARS.fd "$RUN/vars.fd"
           mapfile -t c < <(qemu_cmd); "${c[@]}" ;;
-  wait)   end=$(( $(date +%s) + $(scaled 1800) ))
+  wait)   end=$(( $(date +%s) + $(scaled "${VM_WAIT_S:-1800}") ))
           until QGA_TIMEOUT=10 q true >/dev/null 2>&1; do [ "$(date +%s)" -lt "$end" ] || { echo "vm.sh: guest agent never answered" >&2; exit 1; }; command sleep 5; done
           q "cloud-init status --wait" ;;
   exec)   shift; q "$*" ;;

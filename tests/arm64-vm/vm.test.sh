@@ -20,4 +20,13 @@ grep -q -- '-cpu max' "$D/cmd";                           check "never -cpu max"
 grep -q 'org.qemu.guest_agent.0' "$D/cmd";                check "guest agent channel" 0 $?
 grep -qE 'hostfwd|-nic user.*22' "$D/cmd";                check "no port forward" 1 $?
 grep -qE '^IMG_SERIAL="[0-9]{8}(\.[0-9]+)?"$' ./vm.sh;    check "IMG_SERIAL pinned to a dated serial" 0 $?
+# wait: a guest agent that accepts but never replies must end at the loop deadline, not hang (T11 S5)
+rm -f "$D/qemu.pid" "$D/qga.sock"; sleep 300 & WP=$!; echo "$WP" > "$D/qemu.pid"; BYS="$BYS $WP"
+python3 -I -c 'import socket,sys,time
+s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(5);time.sleep(120)' "$D/qga.sock" & FAKE=$!; BYS="$BYS $FAKE"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$D/qga.sock" ] && break; command sleep 0.2; done
+t0=$(date +%s); out=$(M7C_VM_DIR="$D" VM_WAIT_S=3 timeout 60 ./vm.sh wait 2>&1); rc=$?; el=$(( $(date +%s) - t0 ))
+check "wait exits 1 when the agent never answers" 1 $rc
+grep -q "guest agent never answered" <<<"$out";           check "wait says guest agent never answered" 0 $?
+[ "$el" -lt 40 ];                                         check "wait bounded (${el}s)" 0 $?
 exit "$fail"

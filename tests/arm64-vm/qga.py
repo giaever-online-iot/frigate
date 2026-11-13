@@ -96,9 +96,10 @@ def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("sock")
     ap.add_argument("--timeout", type=int, default=3600)
-    ap.add_argument("cmd", nargs=argparse.REMAINDER)
-    a = ap.parse_args(argv)
-    cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
+    # Split at the first '--' ourselves: argparse.REMAINDER after a positional swallowed --timeout too.
+    i = argv.index("--") if "--" in argv else len(argv)
+    head, cmd = argv[:i], argv[i + 1:]
+    a = ap.parse_args(head)
     code, out, err = run(a.sock, " ".join(cmd), a.timeout)
     sys.stdout.buffer.write(out)
     sys.stdout.buffer.flush()
