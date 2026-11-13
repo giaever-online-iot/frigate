@@ -132,4 +132,28 @@ for v in "${INC_A[@]}"; do
   t "drift: ffmpeg part installs usr/lib/ffmpeg/$v/bin/ffprobe" installs_ffprobe "$v"
 done
 
+
+# --- S2 D24 clean stop ---
+app() { awk -v p="  $1:" '/^apps:$/{s=1;next} /^[a-z]/{s=0} s&&$0==p{f=1;next} f&&/^  [a-z0-9-]+:$/{exit} f' snap/snapcraft.yaml; }
+export -f app
+t "S2: frigate app runs bin/frigate-db-quiesce as post-stop-command (D24)" bash -c "app frigate | grep -qx '    post-stop-command: bin/frigate-db-quiesce'"
+t "S2: frigate app plugs unchanged by D24 (no new plugs)" bash -c "app frigate | grep -qx '    plugs: \[network, network-bind, opengl, shm-private, mount-observe, raw-usb, hardware-observe\]'"
+quiesce_fits_stop_budget() {  # systemd arms ExecStopPost with TimeoutStopSec: snapd default 30 s, no stop-timeout set
+  local q=spike/bin/frigate-db-quiesce T K
+  T=$(sed -n 's/.*FRIGATE_DB_QUIESCE_TIMEOUT:-\([0-9][0-9]*\)}.*/\1/p' "$q" | head -1)
+  # K: the hard kill grace. The bound is python-side (coreutils `timeout` is AppArmor-denied under
+  # strict confinement; see the script's header), written as the literal line K=<n>.
+  K=$(sed -n 's/^K=\([0-9][0-9]*\)$/\1/p' "$q" | head -1)
+  [ -n "$T" ] && [ -n "$K" ] && ! app frigate | grep -q 'stop-timeout:' && [ $((T + K)) -le 25 ]
+}
+t "S2: quiesce timeout + kill grace <= 25 s, inside the 30 s stop-post budget (D24)" quiesce_fits_stop_budget
+only_exit_0() { [ "$(sed -n 's/^[[:space:]]*\(exit\b.*\)/\1/p' spike/bin/frigate-db-quiesce | sort -u)" = 'exit 0' ]; }
+t "S2: quiesce always exits 0 (D24)" only_exit_0
+t "S2: quiesce never execs coreutils timeout (AppArmor-denied under strict confinement) (D24)" bash -c "! grep -qE '^[^#]*(^|[^A-Za-z_])timeout +(-k|-s|[0-9])' spike/bin/frigate-db-quiesce"
+t "S2: frigate-run sources lib-db-restore.sh (D24)" grep -qx '\. "\$SNAP/bin/lib-db-restore.sh"' spike/bin/frigate-run
+t "S2: frigate-run restores through db_restore (D24)" grep -q 'db_restore "\$SNAP_COMMON/db/frigate.db" "\$BACKUP"' spike/bin/frigate-run
+t "S2: no bare mv of frigate.db left in frigate-run (D24)" bash -c "! grep -nE 'mv \"\\\$SNAP_COMMON/db/frigate\.db' spike/bin/frigate-run"
+t "S2: spike/bin/frigate-db-quiesce is executable (shipped by the wrappers dump) (D24)" test -x spike/bin/frigate-db-quiesce
+t "S2: wrappers part dumps spike/bin into bin/ (D24)" bash -c "part wrappers | grep -q 'source: spike/bin' && part wrappers | grep -qF \"'*': bin/\""
+
 [ "$FAILS" -eq 0 ]

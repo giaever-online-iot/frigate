@@ -1,0 +1,56 @@
+#!/bin/bash
+# M9 D24: post-stop-command of the frigate app. snapd renders it as ExecStopPost= of THIS revision,
+# so systemd runs it after every process of the unit is gone: on stop, restart, refresh, revert and
+# after a crash (before restart-condition: always restarts the daemon).
+# It leaves $SNAP_COMMON/db/frigate.db self-contained: the WAL is checkpointed into the main file and
+# the header switched to rollback-journal mode, so no -wal/-shm remains. An OLD revision's frigate-run
+# restore (mv db aside; cp backup) then never pairs a restored file with this revision's stale WAL
+# (rehearsal 2026-11-13: "database disk image is malformed"). Frigate (peewee SqliteQueueDatabase)
+# re-enables WAL on its next open.
+# Bounded: systemd arms ExecStopPost= with TimeoutStopSec (snapd default 30 s; this app sets no
+# stop-timeout), so timeout + kill grace stays below it. ALWAYS exits 0: a failed quiesce must never
+# fail a stop, refresh or revert. Logs exactly one line: sizes and a result, never DB content.
+# Runs under the frigate app's existing AppArmor profile (no new plugs) and touches only frigate.db
+# and its -wal/-shm, with the snap's own python3.11 and its sqlite3.
+# The bound is enforced INSIDE python, not with coreutils `timeout -k`: snapd's AppArmor template has
+# no rule for `timeout` (interfaces/apparmor/template.go lists sleep/stat/mv/cp but not timeout), and
+# M7 observed "timeout: Permission denied" in this snap's confined pre-refresh hook (m7-findings).
+# Under confinement `timeout` would fail to exec and the quiesce would never run. Same semantics:
+#   soft: at T s a watchdog thread logs result=timeout and ends python (exit 124). sqlite3 releases
+#         the GIL while it waits on a lock, so the thread runs even mid-checkpoint;
+#   hard: at T+K s SIGALRM at SIG_DFL ends the process in the kernel, even if python is wedged.
+DB="${SNAP_COMMON:-}/db/frigate.db"
+T="${FRIGATE_DB_QUIESCE_TIMEOUT:-20}"
+K=3
+sz() { stat -c %s "$1" 2>/dev/null || echo absent; }
+if [ -z "${SNAP_COMMON:-}" ] || [ ! -f "$DB" ]; then
+    echo "frigate-db-quiesce: db=absent result=nodb"
+    exit 0
+fi
+W0=$(sz "$DB-wal")
+R=$("$SNAP/usr/bin/python3.11" -I - "$DB" "$T" "$K" 2>/dev/null <<'EOF'
+import os, signal, sqlite3, sys, threading
+T, K = float(sys.argv[2]), int(sys.argv[3])
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.alarm(int(T) + K)                       # hard bound: the kernel ends the process
+def _soft():                                   # soft bound: report, then leave without cleanup
+    sys.stdout.write("timeout\n"); sys.stdout.flush(); os._exit(124)
+w = threading.Timer(T, _soft); w.daemon = True; w.start()
+try:
+    con = sqlite3.connect(sys.argv[1], timeout=10, isolation_level=None)
+    busy = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+    mode = con.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+    con.close()
+    print("ok" if busy == 0 and mode == "delete" else "busy=%s,mode=%s" % (busy, mode))
+except Exception as e:  # class name only: an exception message may quote DB content
+    print("error:" + type(e).__name__)
+EOF
+)
+rc=$?
+case "$rc" in
+    0) ;;
+    124|137|142) R=timeout ;;
+    *) R="${R:-error:rc$rc}" ;;
+esac
+echo "frigate-db-quiesce: db=$(sz "$DB") wal_before=$W0 wal_after=$(sz "$DB-wal") shm_after=$(sz "$DB-shm") result=$R"
+exit 0

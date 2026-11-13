@@ -110,6 +110,13 @@ apps:
   frigate:
     command: bin/frigate-run
     daemon: simple
+    # M9 D24: ExecStopPost= of THIS revision (stop/restart/refresh/revert/crash); leaves frigate.db
+    # without -wal/-shm so an older revision's restore cannot replay a stale WAL. No new plugs: it
+    # runs under this app's existing profile. Why: rehearsal 2026-11-13 phase C, a revert to 0.17.2
+    # (whose frozen frigate-run restore leaves -wal/-shm behind; 4,124,152 B -wal) gave "database disk
+    # image is malformed" 7 s after the restore. Bounded to 20 s + 3 s grace, inside snapd's 30 s
+    # default stop timeout (no stop-timeout set here); always exits 0.
+    post-stop-command: bin/frigate-db-quiesce
     # restart-condition: always (not on-failure) — the Web UI "Restart" button calls
     # frigate.util.services.restart_frigate(), which under upstream's s6 sigterms pid 1 (s6
     # restarts frigate on ANY exit). In the snap pid 1 is not s6-svscan, so it instead does

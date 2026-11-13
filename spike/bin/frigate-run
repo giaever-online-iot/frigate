@@ -2,6 +2,7 @@
 # M3: the Frigate daemon under strict confinement.
 set -e
 . "$SNAP/bin/lib-wait.sh"
+. "$SNAP/bin/lib-db-restore.sh"
 
 export FRIGATE_CONFIG_DIR="$SNAP_DATA/config"
 export FRIGATE_BASE_DIR="$SNAP_COMMON/media/frigate"
@@ -138,13 +139,10 @@ if [ -f "$SIDECAR" ]; then
         [ -z "$BACKUP" ] && BACKUP="$LEGACY_FALLBACK"
         if [ -n "$BACKUP" ]; then
             TS=$(date +%s)
-            mv "$SNAP_COMMON/db/frigate.db" "$SNAP_COMMON/db/frigate.db.incompatible-$TS" 2>/dev/null || true
-            if cp "$BACKUP" "$SNAP_COMMON/db/frigate.db"; then
-                echo "frigate-run: restored $BACKUP (incompatible db preserved as frigate.db.incompatible-$TS)"
+            if db_restore "$SNAP_COMMON/db/frigate.db" "$BACKUP" "$TS"; then
+                echo "frigate-run: restored $BACKUP (incompatible db preserved as frigate.db.incompatible-$TS, with its -wal/-shm if present)"
             else
-                echo "frigate-run: ERROR restore cp failed - attempting to move the incompatible db back"
-                mv "$SNAP_COMMON/db/frigate.db.incompatible-$TS" "$SNAP_COMMON/db/frigate.db" 2>/dev/null || \
-                  echo "frigate-run: WARNING no database present - frigate will create a fresh one"
+                echo "frigate-run: ERROR restore cp failed - moved the incompatible db and its -wal/-shm back"
             fi
         else
             echo "frigate-run: WARNING no backup available - proceeding with the newer-schema db"
