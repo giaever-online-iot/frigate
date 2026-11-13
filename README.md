@@ -276,7 +276,7 @@ procedure.
 
 ## Upgrading to 0.18
 
-Revision 0.18 of the snap ships Frigate 0.18.2. The migration is one-way, so
+Snap version 0.18.2 ships Frigate 0.18.2. The migration is one-way, so
 read this before you refresh a working install.
 
 - **The first boot under 0.18 rewrites `config.yml`.** Frigate's own
