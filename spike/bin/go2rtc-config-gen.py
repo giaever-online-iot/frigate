@@ -68,7 +68,7 @@ import yaml
 
 # DEFAULT_FFMPEG_VERSION in bin/frigate-run; go2rtc's `ffmpeg:` source module needs an
 # absolute bin under confinement (bare "ffmpeg" is not on PATH here).
-DEFAULT_FFMPEG_VERSION = "7.0"
+DEFAULT_FFMPEG_VERSION = "8.0"
 
 # Loopback-only control API (M5 ruling). Kept as a constant so the force + the
 # override-detection compare against one source of truth.

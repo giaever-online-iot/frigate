@@ -101,7 +101,7 @@ apps:
     command: bin/mdns-probe
     plugs: [network, network-bind]
   ffprobe:
-    command: usr/lib/ffmpeg/7.0/bin/ffprobe
+    command: usr/lib/ffmpeg/8.0/bin/ffprobe
     plugs: [network]
   vaapi-probe:
     command: bin/vaapi-probe

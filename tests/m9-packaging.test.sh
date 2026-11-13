@@ -66,4 +66,19 @@ for p in ffmpeg go2rtc; do
   t "S1: $p part is per-arch, fails loud off amd64" bash -c "part $p | grep -q 'case \"\$CRAFT_ARCH_BUILD_FOR\" in' && part $p | grep -q 'unsupported arch'"
 done
 
+# --- S2 ffmpeg default ---
+for f in spike/bin/frigate-run spike/bin/validate-config; do
+  t "S2: $f DEFAULT_FFMPEG_VERSION=8.0"        grep -qx 'export DEFAULT_FFMPEG_VERSION="8.0"' "$f"
+  t "S2: $f INCLUDED_FFMPEG_VERSIONS=8.0:7.0:5.0" grep -qx 'export INCLUDED_FFMPEG_VERSIONS="8.0:7.0:5.0"' "$f"
+done
+t "S2: bridge default 8.0"                    grep -qx 'DEFAULT_FFMPEG_VERSION = "8.0"' spike/bin/go2rtc-config-gen.py
+t "S2: ffprobe app runs the 8.0 tree"         grep -q 'command: usr/lib/ffmpeg/8.0/bin/ffprobe' snap/snapcraft.yaml
+t "S2: no_stray_7_0_default (spike/, snap/ apps)" bash -c "! grep -rn 'ffmpeg/7\.0/bin' spike/bin spike/config | grep -v '^\s*#'"
+for f in spike/bin/frigate-run spike/bin/validate-config; do
+  t "S2: $f exports LIBAVFORMAT_VERSION_MAJOR from the default tree (D23)" bash -c \
+    "grep -q 'ffmpeg/\$DEFAULT_FFMPEG_VERSION/bin/ffmpeg\" -version' $f && grep -qx 'export LIBAVFORMAT_VERSION_MAJOR' $f"
+done
+LAVF_SED='s/^libavformat[[:space:]]*\([0-9][0-9]*\)\..*/\1/p'
+t "S2: libavformat parse yields the major" bash -c "[ \"\$(printf 'ffmpeg version n8.1.1\nlibavformat    62.  3.100 / 62.  3.100\n' | sed -n '$LAVF_SED' | head -1)\" = 62 ]"
+
 [ "$FAILS" -eq 0 ]
