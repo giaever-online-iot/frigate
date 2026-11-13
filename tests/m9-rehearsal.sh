@@ -200,8 +200,37 @@ EOF
 }
 # shellcheck disable=SC2317 # invoked only as an argument of check (indirect); shellcheck cannot see it
 integrity_ok() { [ "$(integrity_of "$@")" = ok ]; }
-# wal_finding <label>: before a revert, record whether frigate.db's -wal/-shm sidecars exist and their size
-# (frigate-run's restore moves frigate.db but not its -wal/-shm; follow-up, docs/m9-findings.md).
+# quiesce_ok_since <mark>: the candidate's post-stop hook (D24) logged a clean quiesce since <mark>.
+# shellcheck disable=SC2317 # invoked only as an argument of check (indirect)
+quiesce_ok_since() { jcount "$1" | grep -E 'frigate-db-quiesce: db=[0-9]+ wal_before=[0-9a-z]+ wal_after=absent shm_after=absent result=ok$' >/dev/null; }
+# shellcheck disable=SC2317
+no_sidecars() { [ ! -e "$DB-wal" ] && [ ! -e "$DB-shm" ]; }
+# db_hdr: frigate.db header bytes 18-19 read as raw bytes, not via sqlite ("1 1" rollback/DELETE, "2 2" WAL).
+db_hdr() { py -I -c 'import sys; b=open(sys.argv[1],"rb").read(20); print(b[18], b[19])' "$DB" 2>/dev/null; }
+
+phase_g_stop_paths() {  # D24: every stop path of the candidate leaves a self-contained, intact DB
+  echo "== G: stop paths of the candidate (D24) =="
+  local m
+  m=$(mark); snap stop "$S.frigate" >/dev/null
+  check "G stop: quiesce logged result=ok" quiesce_ok_since "$m"
+  check "G stop: no -wal/-shm left" no_sidecars
+  check "G stop: header is rollback-journal (bytes 18-19 = 1 1; got $(db_hdr))" test "$(db_hdr)" = "1 1"
+  check "G stop: integrity_check = ok" integrity_ok
+  snap start "$S.frigate" >/dev/null; wait_api 300 || fail_ "G: API after start"
+  m=$(mark); snap restart "$S.frigate" >/dev/null; wait_api 300 || fail_ "G: API after restart"
+  check "G restart: quiesce logged result=ok" quiesce_ok_since "$m"
+  check "G restart: integrity_check = ok" integrity_ok
+  # crash: SIGKILL every process of the unit; ExecStopPost still runs, then restart-condition: always restarts
+  m=$(mark); systemctl kill -s KILL "snap.$S.frigate.service"
+  sleep 5; wait_api 300 || fail_ "G: API after the crash restart"
+  check "G crash: quiesce logged result=ok" quiesce_ok_since "$m"
+  check "G crash: integrity_check = ok" integrity_ok
+  check "G: frigate re-enabled WAL on its next open" test "$(sql 'PRAGMA journal_mode')" = wal
+  check "G: header is WAL again (bytes 18-19 = 2 2; got $(db_hdr))" test "$(db_hdr)" = "2 2"
+}
+# wal_finding <label>: before a revert, record whether frigate.db's -wal/-shm sidecars exist and their size.
+# Taken while the candidate still runs, so a live -wal is expected here; the candidate's post-stop hook
+# (D24) clears it at the revert's stop, which quiesce_ok_since checks.
 wal_finding() {
   local f out=""
   for f in "$DB-wal" "$DB-shm"; do
@@ -420,6 +449,7 @@ phase_c_revert() {
   local h0; h0=$(hook_runs)
   wal_finding "C"
   revert_to "$REV_A" "C revert" || return 1
+  check "C: candidate's stop quiesced the DB (D24)" quiesce_ok_since "$REVERT_MARK"
   check "C: running 0.17.2 (serves the API)" version_is 0.17.2
   check "C: frigate-run detected the downgrade" jhas "$REVERT_MARK" 'frigate-run: DOWNGRADE detected'
   check "C: restored the 0.17.2 backup" jhas "$REVERT_MARK" "frigate-run: restored $BK/frigate-pre-0.17.2-r$REV_A.db"
@@ -454,12 +484,17 @@ phase_d_rerefresh() {
 
 phase_e_retention_d21() {
   echo "== E: two more 0.18 refreshes keep the 0.17.2 downgrade target (D21) =="
+  local m1 m2; m1=$(mark)
   install_snap "$CAND" "E refresh 1" || return 1
+  check "E refresh 1: candidate's stop quiesced the DB (D24)" quiesce_ok_since "$m1"
+  m2=$(mark)
   install_snap "$CAND" "E refresh 2" || return 1
+  check "E refresh 2: candidate's stop quiesced the DB (D24)" quiesce_ok_since "$m2"
   check "E: a 0.17.2 backup survives two 0.18 refreshes" test -s "$BK/frigate-pre-0.17.2-r$REV_A.db"
   check "E: at most 3 backups" test "$(find "$BK" -maxdepth 1 -name 'frigate-pre-*.db' | wc -l)" -le 3
   wal_finding "E"
   revert_to "$REV_A" "E revert to the baseline" || return 1
+  check "E: candidate's stop quiesced the DB (D24)" quiesce_ok_since "$REVERT_MARK"
   check "E: revert across the boundary restored the 0.17.2 backup" jhas "$REVERT_MARK" "frigate-run: restored $BK/frigate-pre-0.17.2-r$REV_A.db"
   check "E: restored DB integrity_check = ok" integrity_ok
   finding "E: integrity_check after the revert: $(integrity_of | head -3 | tr '\n' ' ')"
@@ -474,6 +509,8 @@ phase_f_v017_on_migrated_db() {  # FINDING ONLY (D21 removes the dependency); re
   HOLD=$COMMON/db/m9-hold; mkdir -p "$HOLD"; mv "$BK"/frigate-pre-*.db "$HOLD"/ 2>/dev/null || true
   wal_finding "F"
   local f_up=0; revert_probe "$REV_A" "F revert, no backups" && f_up=1
+  check "F: candidate's stop quiesced the DB (D24)" quiesce_ok_since "$REVERT_MARK"
+  check "F: DB integrity_check = ok after the revert (D24; gating)" integrity_ok
   finding "F: integrity_check after the revert (no restore): $(integrity_of | head -3 | tr '\n' ' ')"
   if [ "$f_up" -eq 1 ]; then
     local n0; n0=$(sql "SELECT COUNT(*) FROM recordings" 2>/dev/null); sleep 300
@@ -495,6 +532,7 @@ phase_f_v017_on_migrated_db() {  # FINDING ONLY (D21 removes the dependency); re
 
 if phase_a_seed_on_baseline && phase_b_refresh_to_candidate; then
   phase_c_revert; phase_d_rerefresh; phase_e_retention_d21; phase_f_v017_on_migrated_db
+  phase_g_stop_paths
 else
   fail_ "phase A or B aborted: C-F not run"
 fi

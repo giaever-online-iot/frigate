@@ -162,6 +162,48 @@ m9_cfg_restore() {
 m9_g2r_bin() { "$M9_PY" -c 'import sys,yaml; print((yaml.safe_load(open(sys.argv[1])) or {}).get("ffmpeg",{}).get("bin",""))' \
   "/var/snap/$SNAP_NAME/current/go2rtc.yaml"; }
 export -f m9_g2r_bin; export M9_PY SNAP_NAME   # used inside `bash -c` checks
+# >>> M9-WAL-HELPERS (the stub harness extracts this region by its markers; keep them)
+# M9 WAL fix: spike/bin/frigate-db-quiesce is the frigate app's post-stop-command (ExecStopPost).
+M9_DB="/var/snap/$SNAP_NAME/common/db/frigate.db"
+M9_UNIT="snap.$SNAP_NAME.frigate.service"
+# A clean quiesce line: checkpoint ran, the file is in DELETE mode, no -wal/-shm was left at that moment.
+# Same pattern as tests/m9-rehearsal.sh quiesce_ok_since (plan T10 D24 addendum).
+M9_QUIESCE_OK_RE='frigate-db-quiesce: db=[0-9]+ wal_before=[0-9a-z]+ wal_after=absent shm_after=absent result=ok$'
+# m9_jre <since> <ERE>: m9_jhas with a regex (drains its input, same pipefail reason).
+m9_jre() { journalctl -u "$M9_UNIT" --since "$1" 2>/dev/null | grep -E -- "$2" >/dev/null; }
+# m9_quiesce_first <since>: within the window, the first quiesce line comes BEFORE the first
+# frigate start (M9_START_CONTROL), i.e. the post-stop ran between the stop and the next start.
+m9_quiesce_first() {
+  local first
+  first=$(journalctl -u "$M9_UNIT" --since "$1" 2>/dev/null | grep -F -e 'frigate-db-quiesce: ' -e "$M9_START_CONTROL" | head -n 1)
+  case "$first" in *'frigate-db-quiesce: '*) return 0 ;; *) return 1 ;; esac
+}
+# m9_db_hdr: frigate.db header bytes 18/19 read as raw bytes, not via sqlite ("1,1" DELETE, "2,2" WAL).
+m9_db_hdr() { "$M9_PY" -I -c 'import sys
+b = open(sys.argv[1], "rb").read(20); print("%d,%d" % (b[18], b[19]))' "$M9_DB" 2>/dev/null; }
+# m9_db_integrity_ok: PRAGMA integrity_check is exactly "ok". mode=rw: a missing DB is an error, not a
+# fresh empty file. Read-only check; no row data is printed.
+m9_db_integrity_ok() { [ "$("$M9_PY" -I - "$M9_DB" 2>&1 <<'PYEOF'
+import sqlite3, sys, urllib.parse
+try:
+    con = sqlite3.connect("file:" + urllib.parse.quote(sys.argv[1]) + "?mode=rw", uri=True, timeout=30)
+    print("\n".join(str(r[0]) for r in con.execute("PRAGMA integrity_check"))); con.close()
+except Exception as e:
+    print("error: %s" % type(e).__name__)
+PYEOF
+)" = ok ]; }
+# m9_wal_after_restart <step> <since>: for the stop paths that bring frigate straight back (restart,
+# refresh, crash). The files cannot be inspected between the stop and the start (no window), so the
+# on-disk state AT the stop is attested by the quiesce line itself (wal_after= is measured by the
+# script after its close), plus the ordering, then the live DB is checked once frigate is back.
+m9_wal_after_restart() {
+  check "m9: wal: quiesce ran on $1 (clean line since the mark)" m9_jre "$2" "$M9_QUIESCE_OK_RE"
+  check "m9: wal: quiesce ran BEFORE the next frigate start ($1)" m9_quiesce_first "$2"
+  m9_wait_api 180 || true; assert_vec0_loaded "$2" "wal $1"
+  check "m9: wal: frigate re-enabled WAL after $1 (header 18/19 = 2,2; got $(m9_db_hdr))" test "$(m9_db_hdr)" = 2,2
+  check "m9: wal: integrity_check ok after $1" m9_db_integrity_ok
+}
+# <<< M9-WAL-HELPERS
 if render_node_present; then RENDER_NODE=yes; else RENDER_NODE=no; fi
 RENDER_NODE_REASON="no Intel(0x8086)/AMD(0x1002) render node under /sys/class/drm/renderD* (headless VM: virtio-gpu)"
 # PR#3 review (credential hygiene, layer 2 of 2): go2rtc /api/streams and frigate /stats emit
@@ -1150,6 +1192,70 @@ else
 fi
 else
   echo "SKIP (nvr-safe): certsync live cert swap"
+fi
+
+if [ "$NVR_SAFE" -eq 0 ]; then
+# >>> M9-WAL-BLOCK (the stub harness extracts this region by its markers; keep them)
+# --- M9 WAL fix: the post-stop-command quiesce runs on EVERY stop path ---
+# Why: rehearsal #1 phase C (2026-11-13) — a revert to 0.17.2 crash-looped on "database disk image is
+# malformed" because 0.17.2's frozen frigate-run restore left the 0.18 -wal beside the restored backup
+# and SQLite replayed it. The 0.18 snap therefore checkpoints + switches to journal_mode=DELETE in
+# bin/frigate-db-quiesce (post-stop-command -> ExecStopPost). This block proves it runs on stop,
+# restart, refresh and crash (kill -9 of MainPID; systemd runs ExecStopPost before Restart=always).
+# What DELETE mode leaves (tests/frigate-db-quiesce.test.sh, host sqlite 3.45): -wal AND -shm are both
+# unlinked, so the stop step asserts both ABSENT (strict). Revert is covered by tests/m9-rehearsal.sh.
+# Config-mutating class: it stops/kills/reinstalls frigate, so it is gated out of --nvr-safe.
+# MUTATION (controller, in the VM; not run by the gate itself): repack the candidate without the hook,
+#   unsquashfs -d /tmp/mut frigate_*.snap
+#   sed -i '/post-stop-command: bin\/frigate-db-quiesce/d' /tmp/mut/meta/snap.yaml
+#   snap pack /tmp/mut /tmp && snap install --dangerous /tmp/frigate_*.snap
+# then run this gate. Expected (shown on a stub harness, fix report walfix-report.md): FAIL for every
+# "quiesce ran …" line (stop, restart, refresh, crash: no line, so no ordering either) and for the
+# snap-stop file checks (-wal/-shm present, header 2,2); integrity, the 2,2-after-start lines and
+# NRestarts still PASS (they hold with or without the hook). Reinstall the real candidate afterwards.
+# Same plan D24 log format as tests/m9-rehearsal.sh (quiesce_ok_since), which covers revert (C/E/F)
+# and its own stop paths (phase G, systemctl kill -s KILL).
+echo "== m9: WAL quiesce on every stop path =="
+# 1) snap stop: frigate stays down, so the files themselves are inspected.
+M9_M=$(m9_mark)
+snap stop "$SNAP_NAME.frigate" >/dev/null 2>&1 || fail_ "m9: wal: snap stop frigate.frigate"
+check "m9: wal: quiesce ran on snap stop (clean line since the mark)" m9_jre "$M9_M" "$M9_QUIESCE_OK_RE"
+check "m9: wal: no frigate.db-wal after snap stop" test ! -e "$M9_DB-wal"
+check "m9: wal: no frigate.db-shm after snap stop" test ! -e "$M9_DB-shm"
+check "m9: wal: header 18/19 = 1,1 (DELETE) after snap stop (got $(m9_db_hdr))" test "$(m9_db_hdr)" = 1,1
+check "m9: wal: integrity_check ok after snap stop" m9_db_integrity_ok
+M9_M=$(m9_mark)
+snap start "$SNAP_NAME.frigate" >/dev/null 2>&1 || fail_ "m9: wal: snap start frigate.frigate"
+m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "wal start after stop"
+check "m9: wal: frigate re-enabled WAL after start (header 18/19 = 2,2; got $(m9_db_hdr))" test "$(m9_db_hdr)" = 2,2
+# 2) snap restart
+M9_M=$(m9_mark)
+snap restart "$SNAP_NAME.frigate" >/dev/null 2>&1 || fail_ "m9: wal: snap restart frigate.frigate"
+m9_wal_after_restart "snap restart" "$M9_M"
+# 3) refresh: reinstall the PINNED artifact (same identity guard as the rollback block below)
+M9_M=$(m9_mark)
+if [ -n "$SNAP_FILE_SHA" ] && [ "$(sha256sum "$SNAP_FILE" 2>/dev/null | awk '{print $1}')" != "$SNAP_FILE_SHA" ]; then
+  fail_ "m9: wal: pinned artifact identity changed mid-gate ($SNAP_FILE) — refusing to reinstall a swapped build"
+else
+  snap install --dangerous "$SNAP_FILE" >/dev/null 2>&1 || fail_ "m9: wal: reinstall-refresh failed"
+fi
+m9_wal_after_restart "refresh" "$M9_M"
+# 4) crash: SIGKILL the main PID; systemd must run ExecStopPost, then Restart=always.
+M9_M=$(m9_mark)
+M9_PID=$(systemctl show -p MainPID --value "$M9_UNIT" 2>/dev/null)
+M9_NR0=$(systemctl show -p NRestarts --value "$M9_UNIT" 2>/dev/null)
+if [ -n "$M9_PID" ] && [ "$M9_PID" -gt 0 ] 2>/dev/null; then
+  kill -9 "$M9_PID" 2>/dev/null || fail_ "m9: wal: kill -9 MainPID $M9_PID"
+  sleep 10
+  m9_wal_after_restart "crash (kill -9 MainPID $M9_PID)" "$M9_M"
+  check "m9: wal: systemd restarted frigate after the crash (NRestarts ${M9_NR0:-?} -> $(systemctl show -p NRestarts --value "$M9_UNIT" 2>/dev/null))" \
+    test "$(systemctl show -p NRestarts --value "$M9_UNIT" 2>/dev/null)" -gt "${M9_NR0:-0}"
+else
+  fail_ "m9: wal: frigate MainPID unreadable (got '${M9_PID:-}')"
+fi
+# <<< M9-WAL-BLOCK
+else
+  echo "SKIP (nvr-safe): m9 WAL quiesce stop/restart/refresh/crash"
 fi
 
 if [ "$NVR_SAFE" -eq 0 ]; then
