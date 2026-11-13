@@ -1,6 +1,6 @@
 name: frigate
 title: Frigate NVR
-version: '0.17.2'
+version: '0.18.2'
 summary: Locally-processed AI NVR for IP cameras — no cloud, no subscription
 description: |
   Frigate is a complete, locally-processed network video recorder with
@@ -101,7 +101,7 @@ apps:
     command: bin/mdns-probe
     plugs: [network, network-bind]
   ffprobe:
-    command: usr/lib/ffmpeg/7.0/bin/ffprobe
+    command: usr/lib/ffmpeg/8.0/bin/ffprobe
     plugs: [network]
   vaapi-probe:
     command: bin/vaapi-probe
@@ -110,6 +110,13 @@ apps:
   frigate:
     command: bin/frigate-run
     daemon: simple
+    # M9 D24: ExecStopPost= of THIS revision (stop/restart/refresh/revert/crash); leaves frigate.db
+    # without -wal/-shm so an older revision's restore cannot replay a stale WAL. No new plugs: it
+    # runs under this app's existing profile. Why: rehearsal 2026-11-13 phase C, a revert to 0.17.2
+    # (whose frozen frigate-run restore leaves -wal/-shm behind; 4,124,152 B -wal) gave "database disk
+    # image is malformed" 7 s after the restore. Bounded to 20 s + 3 s grace, inside snapd's 30 s
+    # default stop timeout (no stop-timeout set here); always exits 0.
+    post-stop-command: bin/frigate-db-quiesce
     # restart-condition: always (not on-failure) — the Web UI "Restart" button calls
     # frigate.util.services.restart_frigate(), which under upstream's s6 sigterms pid 1 (s6
     # restarts frigate on ANY exit). In the snap pid 1 is not s6-svscan, so it instead does
@@ -239,9 +246,10 @@ parts:
         \) -exec rm -rf {} +
       fi
       # R4 (M8): Frigate loads the sqlite-vec extension from the HARDCODED path /usr/local/lib/vec0
-      # (frigate/db/sqlitevecq.py:11,26 — it does NOT import the pip package). The sqlite-vec==0.1.3
-      # wheel bundles the identical v0.1.3 vec0.so that upstream builds from source
-      # (docker/main/build_sqlite_vec.sh, SQLITE_VEC_VERSION=0.1.3). Copy it where Frigate expects it;
+      # (frigate/db/sqlitevecq.py:21,39 @ v0.18.2 — it does NOT import the pip package). The
+      # sqlite-vec==0.1.9 wheel bundles the vec0.so of the same sqlite-vec release, v0.1.9, that upstream
+      # builds from source (docker/main/build_sqlite_vec.sh:5 @ v0.18.2, SQLITE_VEC_VERSION="0.1.9";
+      # wheel vs source build, not byte-compared). Copy it where Frigate expects it;
       # the /usr/local/lib -> $SNAP/usr/local/lib layout makes that absolute path resolve under strict
       # confinement (Frigate is NOT patched — user ruling). Fail loud if the wheel layout changed.
       VEC0="$SP/sqlite_vec/vec0.so"
@@ -296,29 +304,47 @@ parts:
     plugin: nil
     build-packages: [wget, xz-utils, bzip2]
     override-build: |
-      # 8.0 tree DROPPED (M8 A2): upstream v0.17.2 amd64 ships exactly 7.0 (default) + 5.0
-      # (docker/main/install_deps.sh amd64 block; Dockerfile INCLUDED_FFMPEG_VERSIONS="7.0:5.0")
-      # — upstream-parity; the 8.0 tree was OUR M1 addition, −409MB uncompressed.
+      # upstream v0.18.2 amd64 ships 8.0 (default) + 7.0 + 5.0 (install_deps.sh:48-61, Dockerfile:268-269); Frigate hardcodes /usr/lib/ffmpeg/8.0 in record/export.py + util/classification.py (M9 D4)
       # Build temps live in $CRAFT_PART_BUILD (M1 review fix).
-      # --- 5.0 tree (tag-exact, v0.17.2 install_deps.sh) ---
-      wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linux64-gpl-5.1.tar.xz"
-      echo "377abec133f9d9e8014dee1b91c9684ac8bb0b5b7d80100a57116ff837c4c0d4  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -
-      mkdir -p "$CRAFT_PART_BUILD/f5" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" -C "$CRAFT_PART_BUILD/f5" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
-      install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffmpeg"
-      install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffprobe"
-      # --- 7.0 tree (tag-exact default; tarball is bzip2 despite .xz name — use tar -xf for auto-detect) ---
-      wget -O "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linux64-gpl-7.0.tar.xz"
-      echo "e13860eb90409c8218319c928067834ce450128e86f24cfed5cfe91ce6e31037  $CRAFT_PART_BUILD/ffmpeg-7.tar.xz" | sha256sum -c -
-      mkdir -p "$CRAFT_PART_BUILD/f7" && tar -xf "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" -C "$CRAFT_PART_BUILD/f7" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
-      install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffmpeg"
-      install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffprobe"
+      # Per-arch (M9 D17): fail loud off amd64 — W-7 adds arm64.
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64)
+          # --- 5.0 tree (tag-exact, v0.18.2 install_deps.sh) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linux64-gpl-5.1.tar.xz"
+          echo "377abec133f9d9e8014dee1b91c9684ac8bb0b5b7d80100a57116ff837c4c0d4  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f5" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" -C "$CRAFT_PART_BUILD/f5" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffprobe"
+          # --- 7.0 tree (tag-exact; tarball is bzip2 despite .xz name — use tar -xf for auto-detect) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linux64-gpl-7.0.tar.xz"
+          echo "e13860eb90409c8218319c928067834ce450128e86f24cfed5cfe91ce6e31037  $CRAFT_PART_BUILD/ffmpeg-7.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f7" && tar -xf "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" -C "$CRAFT_PART_BUILD/f7" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffprobe"
+          # --- 8.0 tree (tag-exact default; real xz, verified) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linux64-gpl-8.1.tar.xz"
+          echo "9bac85054d351cdc89c0a4f45c8ea5c44df94009aabd964b719bbadd56aedae9  $CRAFT_PART_BUILD/ffmpeg-8.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f8" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" -C "$CRAFT_PART_BUILD/f8" --strip-components=1 amd64/bin/ffmpeg amd64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
+          ;;
+        *)
+          echo "ffmpeg: unsupported arch $CRAFT_ARCH_BUILD_FOR (W-7 adds arm64)" >&2; exit 1 ;;
+      esac
   go2rtc:
     plugin: nil
     build-packages: [wget]
     override-build: |
-      wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.13/go2rtc_linux_amd64"
-      echo "dce491325c28890ad0b85e83090753dc111b903ef83f43b834798f9114520dba  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
-      install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+      # Per-arch (M9 D17): fail loud off amd64 — W-7 adds arm64.
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64)
+          wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_amd64"
+          echo "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
+          install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+          ;;
+        *)
+          echo "go2rtc: unsupported arch $CRAFT_ARCH_BUILD_FOR (W-7 adds arm64)" >&2; exit 1 ;;
+      esac
   go2rtc-config:
     plugin: dump
     source: spike/config
@@ -331,9 +357,11 @@ parts:
     permissions:
       - path: config/logrotate.conf
         mode: "644"
-  # M4 Task 1: upstream's exact nginx recipe (docker/main/build_nginx.sh @ v0.17.2) as a part.
+  # M4 Task 1: upstream's exact nginx recipe (docker/main/build_nginx.sh @ v0.18.2) as a part.
   # nginx 1.27.4 + kaltura vod 1.31 (2 upstream patches, committed under patches/nginx/) +
-  # secure-token 1.5 + set-misc v0.33 + ngx_devel_kit v0.3.3; upstream configure flags verbatim.
+  # secure-token 1.5 + set-misc v0.33 + ngx_devel_kit v0.3.3 (build_nginx.sh:5-9 @ v0.18.2, the same
+  # versions as v0.17.2); upstream configure flags verbatim (build_nginx.sh:72-84 @ v0.18.2, which adds
+  # --with-http_v2_module over v0.17.2; the snap already had it) + one cc-opt addition (below).
   # vod 1.31 and secure-token 1.5 are fetched from tree-identical forks since the kaltura repos
   # went 404 (W-19; provenance in the comments above each download).
   # THIRD-PARTY build patches (nginx-vod-module, not Frigate source) — outside the
@@ -352,7 +380,7 @@ parts:
     # logrotate binary ("$SNAP/usr/sbin/logrotate"): the frigate.logrotate oneshot timer app
     # rotates nginx's access/error logs (M7 hardening — bin/logrotate-run + config/logrotate.conf).
     # cc-opt flags below are two different things. "-O3 -Wno-error=implicit-fallthrough" is
-    # upstream-verbatim, copied as-is from Frigate's own docker/main/build_nginx.sh @ v0.17.2 —
+    # upstream-verbatim, copied as-is from Frigate's own docker/main/build_nginx.sh:84 @ v0.18.2 —
     # not a downstream deviation. "-Wno-error=unterminated-string-initialization" IS our
     # downstream addition (M7 Task 4, root-build verification): nginx core's
     # src/http/v2/ngx_http_v2_filter_module.c hits GCC 15's new
@@ -434,19 +462,20 @@ parts:
   frigate-src:
     plugin: nil
     source: https://github.com/blakeblackshear/frigate.git
-    source-tag: v0.17.2
+    source-tag: v0.18.2
     source-depth: 1
     override-build: |
       patch -p1 < "$CRAFT_PROJECT_DIR/spike/patches/0001-env-driven-paths.patch"
       # NOTE (2026-07-05 user ruling): NO behavior patches beyond 0001. A motion-calibration
       # patch (forced exit after 60 frames) was trialed because the looping test clip's
-      # constant motion never satisfies stock calibration exit (pct_motion < 5%), and the
-      # config alternative motion.enabled=false is hard-rejected by v0.17.2 validation when
-      # detect.enabled=true. Ruling: run STOCK code; the detection money test is POSTPONED
+      # constant motion never satisfies stock calibration exit (pct_motion < 5%; still so at v0.18.2,
+      # motion/improved_motion.py:195-197), and the config alternative motion.enabled=false is
+      # hard-rejected by validation when detect.enabled=true (v0.17.2 config/config.py:262, v0.18.2
+      # :382-385, verify_motion_and_detect). Ruling: run STOCK code; the detection money test is POSTPONED
       # until live cameras (natural quiet intervals) are available. See docs/patches.md.
       # frigate/version.py is generated at build time upstream (Makefile `version` target:
       # echo 'VERSION = "$(VERSION)-$(COMMIT_HASH)"' > frigate/version.py) — not in the git tree.
-      echo "VERSION = \"0.17.2-$(git rev-parse --short HEAD)\"" > frigate/version.py
+      echo "VERSION = \"0.18.2-$(git rev-parse --short HEAD)\"" > frigate/version.py
       mkdir -p "$CRAFT_PART_INSTALL/opt/frigate"
       cp -r frigate migrations "$CRAFT_PART_INSTALL/opt/frigate/"
       # Upstream Dockerfile COPYs labelmap.txt / audio-labelmap.txt to the image root; / is
@@ -541,7 +570,13 @@ parts:
         \) -exec rm -rf {} +
       fi
   # M4 Task 3: upstream web UI built at base=/ for root-path serving via nginx.
-  # DEVIATION: e2e:build absent at v0.17.2; scripts block = dev/build/lint/lint:fix/preview/test/coverage.
+  # DEVIATION (D8): upstream v0.18.2 e2e:build exists (= tsc && vite build --base=/; tsconfig noEmit) but is a Playwright-flow script; we run the identical vite invocation directly so test-only changes upstream never reach the shipped UI.
+  # DIVERGENCE (D8, postinstall): web/package.json:8 @ v0.18.2 has "postinstall": "patch-package", so our
+  # `npm ci` (full source tree present) applies web/patches/ (the two @radix-ui patches). Upstream's web
+  # stage copies only package.json + package-lock.json before `npm install` (docker/main/Dockerfile:345-346
+  # @ v0.18.2; COPY web/ follows at :348), so its postinstall probably finds no patches. We keep applying
+  # them: --ignore-scripts would also skip every other install script (e.g. esbuild's binary fetch).
+  # [NOT VERIFIED: upstream image not built]
   # build script uses --base=/BASE_PATH/ (Docker substitution token, not root base).
   # Minimal equivalent: vite build --base=/ (deviation documented in task-3-report.md).
   # Source isolated via pinned git tag + separate source: local project edits never retrigger npm build.
@@ -549,7 +584,7 @@ parts:
   web-ui:
     plugin: nil
     source: https://github.com/blakeblackshear/frigate.git
-    source-tag: v0.17.2
+    source-tag: v0.18.2
     source-depth: 1
     build-snaps: [node/20/stable]
     override-build: |

@@ -11,6 +11,8 @@ on:
       - 'snap/hooks/**'
       - 'tests/**'
       - '.github/scripts/**'
+      - 'snap/**'
+      - 'spike/**'
       - '.github/workflows/lint-test.yml'
   workflow_dispatch:
 
@@ -26,7 +28,7 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
-      - name: shellcheck — spike/bin, snap/hooks, spike-smoke (owned by other tasks)
+      - name: shellcheck — spike/bin, snap/hooks, tests/*.sh (owned by other tasks)
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -34,8 +36,9 @@ jobs:
           # root alongside snap/snapcraft.yaml via the parallel M7 "productize" task
           # (Task 4). nullglob makes that an empty (not literal, not erroring) arg
           # list until it does.
-          targets=(spike/bin/* snap/hooks/*)
-          [ -f tests/spike-smoke.sh ] && targets+=(tests/spike-smoke.sh)
+          # M9: tests/*.sh covers spike-smoke.sh plus the rehearsal, the hermetic
+          # *.test.sh suites and the libraries they source, with the same flags.
+          targets=(spike/bin/* snap/hooks/* tests/*.sh)
           # FINDING (task-6, CI adaptation, recorded in task-6-report.md): these two
           # codes pre-date this task and are owned by other milestones' scripts, not
           # by .github/ — Task 6 must not edit outside .github/, so they are excluded
@@ -61,3 +64,12 @@ jobs:
             echo "== $t"
             bash "$t" || exit 1
           done
+
+      - name: Run tests/*.test.sh and tests/test_*.py
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+          for t in tests/*.test.sh; do
+            echo "== $t"
+            bash "$t" || exit 1
+          done
+          python3 -m unittest discover -s tests -p 'test_*.py' -v

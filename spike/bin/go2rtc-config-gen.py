@@ -49,9 +49,13 @@ DIVERGENCES from create_config.py (deliberate, documented):
     context carries no FRIGATE_* vars (secrets are embedded directly in config.yml under
     root 0600), and str.format() would additionally corrupt literal `{output}` in the
     baseline exec streams.
-  * restricted-source (exec/echo/expr) filtering is NOT applied — the baseline itself
-    ships exec streams, config.yml is operator-owned (root 0600, not a remote surface),
-    and go2rtc runs strict-confined.
+  * restricted-source (exec/echo/expr) filtering is NOT applied YET — pending M9 T11 /
+    W-16 (spec D13). Upstream filters these sources in the operator's streams unless
+    GO2RTC_ALLOW_ARBITRARY_EXEC is set. Since 0.18 an admin can save every config
+    section, go2rtc streams included, from the web UI, so config.yml is a remote surface
+    too; 0.18.2's own API rejects NEW exec/echo/expr sources on those saves, which leaves
+    hand-edited config.yml unfiltered. The baseline's test/testclip exec streams are
+    packaging, not operator input, and stay exempt once the filter lands.
   * birdseye restream stream generation is NOT wired — it needs frigate module imports
     in the go2rtc context; out of scope for the config bridge.
   * A config.yml that fails to parse falls back to BASELINE-ONLY (go2rtc still starts,
@@ -68,11 +72,30 @@ import yaml
 
 # DEFAULT_FFMPEG_VERSION in bin/frigate-run; go2rtc's `ffmpeg:` source module needs an
 # absolute bin under confinement (bare "ffmpeg" is not on PATH here).
-DEFAULT_FFMPEG_VERSION = "7.0"
+DEFAULT_FFMPEG_VERSION = "8.0"
+# Bundled ffmpeg trees (INCLUDED_FFMPEG_VERSIONS in bin/frigate-run); an alias outside this
+# set falls back to the default, exactly like upstream.
+INCLUDED_FFMPEG_VERSIONS = ("8.0", "7.0", "5.0")
 
 # Loopback-only control API (M5 ruling). Kept as a constant so the force + the
 # override-detection compare against one source of truth.
 FORCED_API_LISTEN = "127.0.0.1:1984"
+
+
+def resolve_ffmpeg_path(path: str, binary: str, snap: str) -> str:
+    """Resolve Frigate's top-level `ffmpeg.path` (alias or absolute dir) to a binary path.
+    Mirrors upstream v0.18.2 frigate/util/config.py resolve_ffmpeg_path, except bundled
+    trees live under $SNAP: "default"/unknown alias -> default tree, INCLUDED alias -> that
+    tree, absolute path -> <path>/bin/<binary>."""
+    if path == "default" or (
+        not path.startswith("/") and path not in INCLUDED_FFMPEG_VERSIONS
+    ):
+        version = DEFAULT_FFMPEG_VERSION
+    elif path in INCLUDED_FFMPEG_VERSIONS:
+        version = path
+    else:
+        return "%s/bin/%s" % (path, binary)
+    return "%s/usr/lib/ffmpeg/%s/bin/%s" % (snap, version, binary)
 
 
 def log(msg: str) -> None:
@@ -120,11 +143,14 @@ def main() -> int:
 
     # --- 2. operator go2rtc section (deep-merge OVER baseline) --------------------------
     operator_g2r = {}
+    top_path = "default"  # Frigate's top-level ffmpeg.path (create_config.py:94-95)
     if os.path.exists(config_path):
         try:
             with open(config_path) as f:
                 full = yaml.safe_load(f.read()) or {}
             section = full.get("go2rtc") if isinstance(full, dict) else None
+            if isinstance(full, dict) and isinstance(full.get("ffmpeg"), dict):
+                top_path = str(full["ffmpeg"].get("path", "default"))
             if isinstance(section, dict):
                 operator_g2r = section
                 log("operator go2rtc: section merged from config.yml")
@@ -191,7 +217,8 @@ def main() -> int:
         ffmpeg = {}
         cfg["ffmpeg"] = ffmpeg
     if ffmpeg.get("bin") is None:
-        ffmpeg["bin"] = "%s/usr/lib/ffmpeg/%s/bin/ffmpeg" % (snap, DEFAULT_FFMPEG_VERSION)
+        # Upstream parity: create_config.py:94-95 + util/config.py resolve_ffmpeg_path @ v0.18.2.
+        ffmpeg["bin"] = resolve_ffmpeg_path(top_path, "ffmpeg", snap)
 
     # --- 5. write (umask 077; contents NEVER printed) ----------------------------------
     os.umask(0o077)

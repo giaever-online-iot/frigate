@@ -1,8 +1,6 @@
-diff --git a/frigate/const.py b/frigate/const.py
-index 41c24f0..fe82271 100644
 --- a/frigate/const.py
 +++ b/frigate/const.py
-@@ -2,18 +2,18 @@ import os
+@@ -2,18 +2,18 @@
  import re
  
  INSTALL_DIR = "/opt/frigate"
@@ -22,6 +20,6 @@ index 41c24f0..fe82271 100644
 -CACHE_DIR = "/tmp/cache"
 +CACHE_DIR = os.environ.get("FRIGATE_CACHE_DIR", "/tmp/cache")
 +BIRDSEYE_PIPE = f"{CACHE_DIR}/birdseye"
- FRIGATE_LOCALHOST = "http://127.0.0.1:5000"
+ REPLAY_CAMERA_PREFIX = "_replay_"
+ REPLAY_DIR = os.path.join(CLIPS_DIR, "replay")
  PLUS_ENV_VAR = "PLUS_API_KEY"
- PLUS_API_HOST = "https://api.frigate.video"

@@ -2,7 +2,7 @@
 # (or validate-config) — (sed replaces __SNAP_COMMON__ and __SNAP__ tokens). Once
 # config.yml exists, the OPERATOR owns it: delete the file and restart frigate to
 # regenerate from this template (edits are never clobbered on subsequent starts).
-# version pinned to CURRENT_CONFIG_VERSION (0.17-0) so migrate_frigate_config() does not rewrite.
+# version pinned to CURRENT_CONFIG_VERSION (0.18-0) so migrate_frigate_config() does not rewrite.
 mqtt:
   enabled: false
 # M5 Task 4: real auth — enabled: true + cookie_secure: true (TLS on :8971; Secure cookie correct).
@@ -24,7 +24,8 @@ database:
 # cpu) and delete the other two regions at render time. Markers are stripped from the kept block,
 # leaving a plain `detectors:` -> `model:` -> `cameras:` shape (the M6 coral phase awk transform
 # anchors on ^detectors:/^cameras: in the RENDERED file and depends on that shape). Upstream
-# v0.17.2 supports ONE model geometry across all detectors, so each block carries its own model:.
+# Frigate (v0.17.2 and v0.18.2) supports ONE model geometry across all detectors (each detector takes
+# the root-level model:), so each block carries its own model:.
 # DETECTOR-OV-BEGIN
 detectors:
   ov:
@@ -118,4 +119,4 @@ record:
   enabled: true
   continuous:
     days: 1
-version: "0.17-0"
+version: "0.18-0"

@@ -126,7 +126,9 @@ start, so a camera change needs both services cycled — the whole-snap
 restart covers it.
 
 Snap refreshes never touch an existing `config.yml`; a new snap revision's
-template updates only apply to a config that doesn't exist yet. If you want
+template updates only apply to a config that doesn't exist yet. (The one
+exception is Frigate itself: 0.18 migrates the file on its first boot — see
+"Upgrading to 0.18" below.) If you want
 to discard your edits and start over from the shipped defaults, delete the
 file and restart:
 
@@ -272,6 +274,95 @@ explicitly (and delete/regenerate `config.yml`) to use a Coral USB
 Accelerator instead — see the accelerator matrix below for the full setup
 procedure.
 
+## Upgrading to 0.18
+
+Snap version 0.18.2 ships Frigate 0.18.2. The migration is one-way, so
+read this before you refresh a working install.
+
+- **The first boot under 0.18 rewrites `config.yml`.** Frigate's own
+  migrator brings the file to `version: 0.18-0` and keeps the previous copy
+  as `backup_config.yaml` next to it. The snap itself still never rewrites
+  your config. The rewrite may also re-flow the file's formatting, not only
+  change `version`. Edits made under 0.18 are **lost on `snap revert`**: a
+  revert goes back to the 0.17 `config.yml`, which 0.17 can read, and not to
+  your newer file.
+- **ffmpeg 8 is now the default.** The snap ships ffmpeg 5.0, 7.0 and 8.0
+  and Frigate uses 8.0 unless you say otherwise. go2rtc streams that use
+  `#hardware` transcoding need one of these workarounds in `config.yml`:
+
+  ```yaml
+  go2rtc:
+    ffmpeg:
+      global: "-vaapi_device /dev/dri/renderD128"
+  ```
+
+  or switch to the 7.0 tree:
+
+  ```yaml
+  ffmpeg:
+    path: "7.0"
+  ```
+
+  `ffmpeg.path` is Frigate's own setting, so it moves Frigate's camera
+  pipelines (detect and record) to 7.0 too, not only go2rtc. Export
+  thumbnails still use the 8.0 tree, whose path Frigate hardcodes. An explicit
+  `go2rtc.ffmpeg.bin` always wins over `ffmpeg.path` for go2rtc.
+- **`exec:`, `echo:` and `expr:` go2rtc streams.** Upstream 0.18 drops these
+  stream sources unless `GO2RTC_ALLOW_ARBITRARY_EXEC` is set, because the web
+  UI can now edit the go2rtc section. Frigate 0.18.2's own API already rejects
+  *new* sources of these types when a config or stream is saved from the UI,
+  so the gap that remains is a hand-edited `config.yml`. This snap does **not**
+  filter them there yet; the filter is planned but not part of this revision.
+  Do not rely on it, and avoid `exec:` sources you did not write yourself.
+- **Intel GPU stats need a recent kernel.** Upstream's requirement is Linux
+  5.19 or newer with the `i915` driver (6.5 or newer on 12th-gen and newer
+  Intel GPUs), or any kernel with the `xe` driver, on a Broadwell (5th-gen) or
+  newer GPU. With VAAPI or QSV camera hwaccel, Frigate 0.18 reads
+  `/proc/*/fdinfo` on every stats poll to find GPU usage. Under this snap's
+  strict confinement that scan is **unproven**: it has not run on Intel
+  hardware yet, so whether it works or only produces AppArmor denials is not
+  known. To turn the scan off, set this in `config.yml`:
+
+  ```yaml
+  telemetry:
+    stats:
+      intel_gpu_stats: false
+  ```
+- **Toggles persist in `.runtime_state.json`.** Settings you change in the UI
+  or over MQTT are stored in
+  `/var/snap/frigate/current/config/.runtime_state.json`. A full reset to the
+  shipped defaults means deleting that file **and** `config.yml`, then
+  restarting:
+
+  ```
+  sudo rm /var/snap/frigate/current/config/config.yml \
+          /var/snap/frigate/current/config/.runtime_state.json \
+          /var/snap/frigate/current/config/.runtime_state.json.lock
+  sudo snap restart frigate
+  ```
+- **`networking.listen.*` is ignored.** Ports come from the snap options
+  (`ports.https`, see above), not from Frigate's config.
+- **Reverting to 0.17.** The database part of this list is spec-derived
+  (D11/D12). The revert rehearsal (#2, phase C) confirmed it on the local
+  candidate: green, integrity check ok, 0.17.2 restored its backup and served
+  its data (see `docs/m9-findings.md`).
+  - `sudo snap revert frigate` works only while the 0.17 revision is still
+    on the system. Check with `snap list --all frigate`. snapd keeps 2
+    revisions by default on classic systems (3 on Ubuntu Core; the
+    `refresh.retain` system option), so on classic the next refresh after
+    the move to 0.18 removes the 0.17 revision.
+  - On the first 0.17 start after the revert, the snap restores the database
+    from the backup taken before the refresh. Events, review items and
+    exports created under 0.18 disappear from the UI.
+  - The 0.18 database is kept, not deleted, as
+    `/var/snap/frigate/common/db/frigate.db.incompatible-<timestamp>`.
+  - Recording files written under 0.18 stay on disk with no database rows,
+    so 0.17's retention never deletes them. Remove them by hand, or set
+    0.17's `record.sync_recordings: true`, which deletes recording files
+    that have no database entry (it gives up if more than half of the files
+    would go).
+- **Reverting safely.** On every stop (including the stop a `snap revert` or refresh performs) the 0.18 snap checkpoints its database and leaves `frigate.db` without `-wal`/`-shm` files, so the older revision's restore cannot be corrupted by a stale write-ahead log. That stop hook does not finish on power loss during the revert, or if it runs out of time; and if another process still holds the database it gives up with `result=busy` and leaves the write-ahead log in place. To revert deliberately, run `sudo snap stop frigate.frigate` first, check that `journalctl -u snap.frigate.frigate.service -n 20` shows `frigate-db-quiesce: … result=ok` (only `result=ok` is safe; `busy`, `timeout` or `error:…` are not), then `sudo snap revert frigate`.
+
 ## Diagnostics
 
 The snap ships a few one-shot commands for checking hardware access
@@ -314,6 +405,32 @@ Two things worth calling out here:
   release.
 - **arm64 is planned** but not available yet; this snap currently ships for
   `amd64` only.
+
+## Known upstream issues
+
+- **`/config` shows go2rtc credentials to logged-in users.** At Frigate
+  v0.18.2 the `/config` endpoint redacts `user:pass` in go2rtc stream URLs,
+  but not the username and password of the `go2rtc.rtsp`, `go2rtc.api` and
+  `go2rtc.mqtt` sections. Any logged-in user can read them. Upstream fixed
+  this on its development branch only, so v0.18.2 is affected (checked: the
+  fix, `_redact_go2rtc_credentials`, is absent from the v0.18.2 tag). This
+  snap carries no Frigate behaviour patches and does not fix it. Do not reuse
+  those credentials anywhere else, and give accounts only to people you would
+  trust with them.
+- **Advisories that are still open in Frigate 0.18.2** (no patched version
+  listed upstream):
+  - GHSA-w3c4: server-side request forgery through web push, because the
+    check at registration time does not match what is resolved or redirected
+    at send time.
+  - GHSA-4xp7: a go2rtc RTSP panic on a negative `Content-Length`. The
+    affected code is identical in the go2rtc version the snap shipped before
+    (1.9.13), so the upgrade adds no exposure here. It needs an attacker-
+    controlled RTSP source URL.
+  - GHSA-74x4: camera access-control bypass through the nginx static
+    locations (recordings of cameras a user may not see). It lists all
+    versions as affected. This snap mirrors upstream's nginx layout.
+
+  How much these matter on a single-admin install has not been assessed.
 
 ## Getting help
 
