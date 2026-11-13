@@ -1915,17 +1915,30 @@ if [ "$NVR_SAFE" -eq 0 ]; then
 # not s6-svscan); restart-condition: always brings it back. POST /restart (require_role admin ->
 # Remote-Role header) on :5001, then bound-wait for recovery. Placed AFTER the bridge proof so it
 # never disturbs the bridge's own state.
+M9_RS_OLD=$(systemctl show -p MainPID --value snap.$SNAP_NAME.frigate.service 2>/dev/null)
 curl -s -o /dev/null -X POST -H 'Remote-User: admin' -H 'Remote-Role: admin' --max-time 5 http://127.0.0.1:5001/restart 2>/dev/null || true
 echo "  restart finding: POST :5001/restart issued (frigate self-SIGINT; awaiting always-restart)"
-_b=0; while [ "$_b" -lt 120 ]; do
-  if snap services $SNAP_NAME.frigate 2>/dev/null | grep -q ' active' && curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1; then break; fi
-  sleep 3; _b=$((_b+3))
-done
+# The OLD process still answers /version while it shuts down (post-stop hook widens the gap), so
+# "API answers" alone is not proof of recovery: wait for a NEW non-zero MainPID that also answers.
+M9_RS_NEW=""
+_b=0
+if [ -n "$M9_RS_OLD" ] && [ "$M9_RS_OLD" != "0" ]; then
+  while [ "$_b" -lt 120 ]; do
+    M9_RS_NEW=$(systemctl show -p MainPID --value snap.$SNAP_NAME.frigate.service 2>/dev/null)
+    if [ -n "$M9_RS_NEW" ] && [ "$M9_RS_NEW" != "0" ] && [ "$M9_RS_NEW" != "$M9_RS_OLD" ] \
+       && curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1; then break; fi
+    sleep 3; _b=$((_b+3))
+  done
+else
+  fail_ "restart: frigate MainPID readable before UI restart (got '${M9_RS_OLD:-empty}'); cannot prove a new process"
+fi
 check "restart: frigate.frigate active again after UI restart (restart-condition: always)" \
   sh -c "snap services $SNAP_NAME.frigate | grep -q ' active'"
 check "restart: frigate API answers again after UI restart (:5001/version)" \
   sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1"
-echo "  restart finding: recovery after ${_b}s (clean-exit self-restart proven; on-failure would stay DOWN)"
+check "restart: frigate MainPID changed after UI restart (${M9_RS_OLD:-?}→${M9_RS_NEW:-?})" \
+  test -n "$M9_RS_OLD" -a "$M9_RS_OLD" != "0" -a -n "$M9_RS_NEW" -a "$M9_RS_NEW" != "0" -a "$M9_RS_NEW" != "$M9_RS_OLD"
+echo "  restart finding: MainPID ${M9_RS_OLD:-?} -> ${M9_RS_NEW:-?}, recovery after ${_b}s (clean-exit self-restart proven; on-failure would stay DOWN)"
 else
   echo "SKIP (nvr-safe): UI-restart POST /restart"
 fi
