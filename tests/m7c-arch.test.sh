@@ -127,7 +127,8 @@ t "T4: mutation copy really has arm64 platform"   test "$(yq '.platforms | has("
 t "T4: D5 guard rejects arm64 platform without a go2rtc arm64 row" sh -c "! d5_ok '$TMP/mut2.yaml'"
 
 # --- T7 harness ---
-t "T7: harness sources harness-arch.sh"  grep -qF '. "$(dirname "$0")/lib/harness-arch.sh"' tests/spike-smoke.sh
+t "T7: harness sources harness-arch.sh from the repo root"  grep -qxF '. tests/lib/harness-arch.sh' tests/spike-smoke.sh
+t "T7: harness rejects a bad SPIKE_TIME_SCALE up front" sh -c "SPIKE_TIME_SCALE=0 bash tests/spike-smoke.sh --nvr-safe 2>&1 | grep -q 'SPIKE_TIME_SCALE must be'"
 t "T7: artifact glob is per-arch"        sh -c "[ \$(grep -c 'artifact_glob \"\$HOST_ARCH\"' tests/spike-smoke.sh) -ge 2 ]"
 t "T7: size floor via helper"            grep -q 'size_floor_for_arch "\$HOST_ARCH"' tests/spike-smoke.sh
 t "T7: no size literal left in harness"  sh -c "! grep -qE '\[ .\\\$SNAP_SZ. -ge [0-9]{9}' tests/spike-smoke.sh"

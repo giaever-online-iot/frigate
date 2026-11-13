@@ -9,7 +9,8 @@ SNAP_NAME=frigate
 # before those guards run. The descriptive --nvr-safe comment block stays at its original site below.
 NVR_SAFE=0
 [ "${1:-}" = "--nvr-safe" ] && NVR_SAFE=1
-. "$(dirname "$0")/lib/harness-arch.sh"
+. tests/lib/harness-arch.sh
+scaled 1 >/dev/null || { echo "spike-smoke: SPIKE_TIME_SCALE must be an integer 1..20 (got '${SPIKE_TIME_SCALE:-}')" >&2; exit 1; }
 # M7 Task 4: project root is now the snapcraft project (snap/snapcraft.yaml at root);
 # `snapcraft pack` at root produces ./frigate_*.snap. Root-first, but tolerate old
 # spike/frigate_*.snap artifacts and Task 1's remote-built spike/frigate-remote_amd64.snap
