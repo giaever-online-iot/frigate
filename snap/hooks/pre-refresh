@@ -8,7 +8,7 @@ mkdir -p "$SNAP_COMMON/db/backups"
 # schema is COMPATIBLE with the code being booted. VERSION parsed exactly as frigate-run does
 # (this hook runs from the OUTGOING revision, so $SNAP/version.py = the version that wrote the db).
 VERSION=$(sed -n 's/^VERSION *= *"\([^"+-]*\).*/\1/p' "$SNAP/opt/frigate/frigate/version.py" | head -1)
-VERSION="${VERSION:-0.17.2}"
+VERSION="${VERSION:-$SNAP_VERSION}"
 DEST="$SNAP_COMMON/db/backups/frigate-pre-${VERSION}-r${SNAP_REVISION}.db"
 # 300s bound: a hung backup (lock contention / huge db) must not stall the refresh forever. The
 # bound is enforced INSIDE python because the base `timeout` binary is DENIED under the confined
@@ -48,7 +48,30 @@ echo "$MSG" >> "$SNAP_COMMON/db/backups/hook.log"
 # always newest → always kept; legacy files age out within 2 refreshes). Per-refresh backups never
 # share an mtime second, so ordering is deterministic in practice. `tail -n +3` drops all but the 2
 # newest; the leading `--` guards the rm against any pathological name.
-ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | tail -n +3 | xargs -r rm -f --
+# D21 (downgrade target): a 0.17->0.18 refresh followed by a second refresh would otherwise prune the
+# only backup whose schema a rollback can restore. So also keep ONE extra file: the newest-by-mtime
+# stamped frigate-pre-<ver>-r<rev>.db whose <ver> sorts STRICTLY below the outgoing $VERSION (sort -V,
+# same pair-compare idiom as frigate-run). Equal/newer stamps and unstamped legacy files are never
+# picked, so with no older-version backup the behaviour is exactly the plain keep-2 above.
+KEEP_OLD=""
+# shellcheck disable=SC2045 # mtime order needs ls; names are stamped by this hook (no whitespace)
+for _bk in $(ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null); do
+    _name="${_bk##*/}"
+    case "$_name" in
+        frigate-pre-*-r*.db)
+            _rest="${_name#frigate-pre-}"     # <ver>-r<rev>.db
+            _ver="${_rest%-r*}"               # <ver>
+            [ "$_ver" = "$VERSION" ] && continue
+            _min=$(printf '%s\n%s\n' "$_ver" "$VERSION" | sort -V | head -1)
+            if [ "$_min" = "$_ver" ]; then KEEP_OLD="$_bk"; break; fi
+            ;;
+    esac
+done
+if [ -n "$KEEP_OLD" ]; then
+    ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | tail -n +3 | grep -vxF -- "$KEEP_OLD" | xargs -r rm -f -- || true
+else
+    ls -1t "$SNAP_COMMON/db/backups"/frigate-pre-*.db 2>/dev/null | tail -n +3 | xargs -r rm -f --
+fi
 # retention: keep hook.log bounded (one line per refresh would otherwise grow forever)
 if [ -f "$SNAP_COMMON/db/backups/hook.log" ]; then
     tail -n 100 "$SNAP_COMMON/db/backups/hook.log" > "$SNAP_COMMON/db/backups/hook.log.tmp" \

@@ -81,4 +81,9 @@ done
 LAVF_SED='s/^libavformat[[:space:]]*\([0-9][0-9]*\)\..*/\1/p'
 t "S2: libavformat parse yields the major" bash -c "[ \"\$(printf 'ffmpeg version n8.1.1\nlibavformat    62.  3.100 / 62.  3.100\n' | sed -n '$LAVF_SED' | head -1)\" = 62 ]"
 
+# --- S2 fallback ---
+t "S2: fallback_is_snap_version_pre_refresh" grep -qx 'VERSION="${VERSION:-$SNAP_VERSION}"' snap/hooks/pre-refresh
+t "S2: fallback_is_snap_version_frigate_run" grep -qx 'CUR_VERSION="${CUR_VERSION:-$SNAP_VERSION}"' spike/bin/frigate-run
+t "S2: no literal version fallback left"     bash -c "! grep -nE ':-[0-9]+\.[0-9]+\.[0-9]+\}' snap/hooks/pre-refresh spike/bin/frigate-run"
+
 [ "$FAILS" -eq 0 ]

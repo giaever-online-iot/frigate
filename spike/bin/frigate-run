@@ -103,7 +103,7 @@ echo "frigate-run: go2rtc gate waited_ms=${WAITED_MS:--1}"
 
 # CUR_VERSION computed once; used by both the restore block and the sidecar write below.
 CUR_VERSION=$(sed -n 's/^VERSION *= *"\([^"+-]*\).*/\1/p' "$SNAP/opt/frigate/frigate/version.py" | head -1)
-CUR_VERSION="${CUR_VERSION:-0.17.2}"
+CUR_VERSION="${CUR_VERSION:-$SNAP_VERSION}"
 # Downgrade-restore: if the DB was last written by a NEWER frigate than this code,
 # a migration may have advanced the schema - restore the newest backup instead.
 SIDECAR="$SNAP_COMMON/db/.last-writer"
