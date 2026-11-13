@@ -53,5 +53,16 @@ check "zero-release empty list: exit 1, no release" "1:" "$([ "$rc" -ne 0 ] && e
 run latest/edge latest/beta arm64; rc=$?
 check "zero-release beta arm64: exit 1, no release" "1:" "$([ "$rc" -ne 0 ] && echo 1 || echo 0):$(releases)"
 check "zero-release beta arm64: error line" 1 "$(grep -c "^$ERR arm64 in latest/edge: nothing released\$" "$STUB/out")"
+# Live capture (T13 Step 4): the real `snapcraft revisions frigate` rows, amd64 only today.
+LIVE=snapcraft-revisions.live.txt
+FIXTURE=$LIVE run latest/edge/PR8 latest/edge amd64;       check "live merge PR8: exit 0" 0 $?
+check "live merge PR8: releases 7 only"         "release frigate 7 latest/edge;" "$(releases)"
+FIXTURE=$LIVE run latest/edge latest/beta amd64,arm64;     check "live beta: exit 0" 0 $?
+check "live beta: releases current edge 7 (not historic 6/5/3/2/1)" "release frigate 7 latest/beta;" "$(releases)"
+check "live beta: arm64 skipped with message"   1 "$(grep -c '^no current arm64 revision in latest/edge; skipping arm64$' "$STUB/out")"
+FIXTURE=$LIVE run latest/edge/PR8 latest/edge arm64;       rc=$?
+check "live arm64-only allowlist: exit 1, no release" "1:" "$([ "$rc" -ne 0 ] && echo 1 || echo 0):$(releases)"
+FIXTURE=$LIVE run --revision 3 latest/beta amd64;          check "live revision 3: exit 0" 0 $?
+check "live revision 3 released"                "release frigate 3 latest/beta;" "$(releases)"
 [ "$fail" -eq 0 ] && echo "All release-arch tests passed." || echo "Some release-arch tests FAILED."
 exit "$fail"

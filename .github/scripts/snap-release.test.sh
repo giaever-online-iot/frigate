@@ -59,4 +59,15 @@ check "in-list arm64 amd64"                       "no"  "$("$SR" in-list arm64 a
 check "in-list arm64 amd64,arm64"                 "yes" "$("$SR" in-list arm64 amd64,arm64)"
 check "in-list arm amd64,arm64"                   "no"  "$("$SR" in-list arm amd64,arm64)"
 
+# Live capture (T13 Step 4): `snapcraft revisions frigate` after the M9 merge (Store rev 7).
+# Real format: comma lists WITHOUT spaces, and every channel carries historic (unstarred) entries.
+LX="$HERE/fixtures/snapcraft-revisions.live.txt"
+check "live: current edge amd64 -> 7 (1,2,3,5,6 historic)" "7" "$("$SR" revisions-in latest/edge amd64 < "$LX" | tr '\n' ' ' | sed 's/ $//')"
+check "live: current PR8 amd64 -> 7"                 "7" "$("$SR" revisions-in latest/edge/PR8 amd64 < "$LX" | tr '\n' ' ' | sed 's/ $//')"
+check "live: current PR4 amd64 -> 5 (4 historic)"    "5" "$("$SR" revisions-in latest/edge/PR4 amd64 < "$LX" | tr '\n' ' ' | sed 's/ $//')"
+check "live: current beta amd64 -> 3"                "3" "$("$SR" revisions-in latest/beta amd64 < "$LX" | tr '\n' ' ' | sed 's/ $//')"
+check "live: edge arm64 -> none"                     ""  "$("$SR" revisions-in latest/edge arm64 < "$LX")"
+check "live: arch-of 7 -> amd64"                     "amd64" "$("$SR" arch-of 7 < "$LX")"
+"$SR" arch-of 8 < "$LX" >/dev/null 2>&1;             check "live: arch-of 8 (not uploaded) -> exit 1" "1" "$?"
+
 exit "$fail"
