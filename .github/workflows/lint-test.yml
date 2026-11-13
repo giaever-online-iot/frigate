@@ -64,9 +64,11 @@ jobs:
             bash "$t" || exit 1
           done
 
-      - name: Run tests/*.test.sh
+      - name: Run tests/*.test.sh and tests/test_*.py
         run: |
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
           for t in tests/*.test.sh; do
             echo "== $t"
             bash "$t" || exit 1
           done
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
