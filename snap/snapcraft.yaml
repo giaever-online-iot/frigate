@@ -1,6 +1,6 @@
 name: frigate
 title: Frigate NVR
-version: '0.17.2'
+version: '0.18.2'
 summary: Locally-processed AI NVR for IP cameras — no cloud, no subscription
 description: |
   Frigate is a complete, locally-processed network video recorder with
@@ -415,7 +415,7 @@ parts:
   frigate-src:
     plugin: nil
     source: https://github.com/blakeblackshear/frigate.git
-    source-tag: v0.17.2
+    source-tag: v0.18.2
     source-depth: 1
     override-build: |
       patch -p1 < "$CRAFT_PROJECT_DIR/spike/patches/0001-env-driven-paths.patch"
@@ -427,7 +427,7 @@ parts:
       # until live cameras (natural quiet intervals) are available. See docs/patches.md.
       # frigate/version.py is generated at build time upstream (Makefile `version` target:
       # echo 'VERSION = "$(VERSION)-$(COMMIT_HASH)"' > frigate/version.py) — not in the git tree.
-      echo "VERSION = \"0.17.2-$(git rev-parse --short HEAD)\"" > frigate/version.py
+      echo "VERSION = \"0.18.2-$(git rev-parse --short HEAD)\"" > frigate/version.py
       mkdir -p "$CRAFT_PART_INSTALL/opt/frigate"
       cp -r frigate migrations "$CRAFT_PART_INSTALL/opt/frigate/"
       # Upstream Dockerfile COPYs labelmap.txt / audio-labelmap.txt to the image root; / is
@@ -522,7 +522,7 @@ parts:
         \) -exec rm -rf {} +
       fi
   # M4 Task 3: upstream web UI built at base=/ for root-path serving via nginx.
-  # DEVIATION: e2e:build absent at v0.17.2; scripts block = dev/build/lint/lint:fix/preview/test/coverage.
+  # DEVIATION (D8): upstream v0.18.2 e2e:build exists (= tsc && vite build --base=/; tsconfig noEmit) but is a Playwright-flow script; we run the identical vite invocation directly so test-only changes upstream never reach the shipped UI.
   # build script uses --base=/BASE_PATH/ (Docker substitution token, not root base).
   # Minimal equivalent: vite build --base=/ (deviation documented in task-3-report.md).
   # Source isolated via pinned git tag + separate source: local project edits never retrigger npm build.
@@ -530,7 +530,7 @@ parts:
   web-ui:
     plugin: nil
     source: https://github.com/blakeblackshear/frigate.git
-    source-tag: v0.17.2
+    source-tag: v0.18.2
     source-depth: 1
     build-snaps: [node/20/stable]
     override-build: |
