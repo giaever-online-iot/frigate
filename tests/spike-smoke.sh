@@ -74,6 +74,8 @@ BRIDGE_CFG_BAK=""
 # M8 (R4): the semantic-search proof's own backup while it injects semantic_search.enabled into
 # the operator config; the EXIT trap restores from it if the proof dies mid-flight.
 M8_SEM_CFG_BAK=""
+# M9: m9_cfg_edit's trap-guarded backup (restored by the EXIT trap if a mid-flight edit dies).
+M9_CFG_BAK=""
 mkdir -p "$EVIDENCE"
 # Evidence dir is created by the root harness but must stay writable by the invoking user
 # (agents capture run transcripts here). chown to SUDO_USER when run via sudo.
@@ -98,6 +100,38 @@ render_node_present() {  # Intel(0x8086)/AMD(0x1002) DRM render node under /sys/
   done
   return 1
 }
+# ===================== M9 helpers (Frigate 0.18) =====================
+M9_CFG="/var/snap/$SNAP_NAME/current/config/config.yml"
+M9_PY="/snap/$SNAP_NAME/current/usr/bin/python3.11"
+m9_mark() { date '+%Y-%m-%d %H:%M:%S'; }
+m9_wait_api() { local t=0; until curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1; do
+  sleep 3; t=$((t+3)); [ "$t" -ge "${1:-120}" ] && return 1; done; return 0; }
+# 0.18.2 loads vec0 unconditionally and SWALLOWS a load failure (db/sqlitevecq.py:35-45, logger.error):
+# Frigate keeps running, so only this log line reveals it. Call after EVERY frigate (re)start.
+assert_vec0_loaded() {
+  check "m9: vec0 loaded ($2)" sh -c "! journalctl -u snap.$SNAP_NAME.frigate.service --since \"$1\" 2>/dev/null | grep -qF 'Unable to load the sqlite-vec extension'"
+}
+# m9_cfg_edit '<python statement on cfg>': trap-guarded backup (M9_CFG_BAK) + one yaml edit, 0600, never printed.
+m9_cfg_edit() {
+  M9_CFG_BAK=$(mktemp); cp -p "$M9_CFG" "$M9_CFG_BAK"
+  "$M9_PY" - "$M9_CFG" "$1" <<'PYEOF'
+import os, sys, yaml
+p, stmt = sys.argv[1], sys.argv[2]
+with open(p) as f:
+    cfg = yaml.safe_load(f) or {}
+exec(stmt, {"cfg": cfg})
+os.umask(0o077)
+with open(p, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+PYEOF
+}
+m9_cfg_restore() {
+  if [ -n "${M9_CFG_BAK:-}" ] && cp -p "$M9_CFG_BAK" "$M9_CFG"; then rm -f "$M9_CFG_BAK"; M9_CFG_BAK=""; fi
+}
+# go2rtc's generated ffmpeg.bin (the only value read; the file is never printed).
+m9_g2r_bin() { "$M9_PY" -c 'import sys,yaml; print((yaml.safe_load(open(sys.argv[1])) or {}).get("ffmpeg",{}).get("bin",""))' \
+  "/var/snap/$SNAP_NAME/current/go2rtc.yaml"; }
+export -f m9_g2r_bin; export M9_PY SNAP_NAME   # used inside `bash -c` checks
 if render_node_present; then RENDER_NODE=yes; else RENDER_NODE=no; fi
 RENDER_NODE_REASON="no Intel(0x8086)/AMD(0x1002) render node under /sys/class/drm/renderD* (headless VM: virtio-gpu)"
 # PR#3 review (credential hygiene, layer 2 of 2): go2rtc /api/streams and frigate /stats emit
@@ -280,6 +314,11 @@ trap '
     fi
     snap restart $SNAP_NAME.frigate 2>/dev/null || true
   fi
+  # M9: same shape for the m9_cfg_edit backup (go2rtc ffmpeg.path / fdinfo hwaccel phases).
+  if [ -n "${M9_CFG_BAK:-}" ] && [ -f "${M9_CFG_BAK:-}" ]; then
+    cp -p "$M9_CFG_BAK" "/var/snap/$SNAP_NAME/current/config/config.yml" 2>/dev/null && rm -f "$M9_CFG_BAK"
+    snap restart $SNAP_NAME 2>/dev/null || true
+  fi
   # PR#3: operator config safety net — if the run aborted after the purge but before the explicit
   # restore, put the stashed config.yml back so the gate never leaves the operator config-less.
   # Review fix: rm the stash only after the restore copy VERIFIABLY landed (install && cmp);
@@ -340,6 +379,7 @@ if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
   # Install mesa-2604 content provider BEFORE frigate so gpu-2604 plug is live when daemons start.
   # This ensures libGL.so.1 (removed from snap prime by gpu/cleanup) is available via content mount.
   snap install mesa-2604 2>/dev/null || true
+  M9_M=$(m9_mark)
   snap install --dangerous "$SNAP_FILE" || { fail_ "snap install"; exit 1; }
   snap connect $SNAP_NAME:gpu-2604 mesa-2604:gpu-2604 2>/dev/null || true
   # mount-observe: not auto-connected for --dangerous installs; required by frigate daemon so
@@ -353,7 +393,11 @@ if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
     install -m 0600 -o root -g root "$LIVECAM_STASH" "/var/snap/$SNAP_NAME/common/livecam-url"
     rm -f "$LIVECAM_STASH"
     rm -f "/var/snap/$SNAP_NAME/current/config/config.yml"
+    rm -f "/var/snap/$SNAP_NAME/current/config/.runtime_state.json" "/var/snap/$SNAP_NAME/current/config/.runtime_state.json.lock"  # 0.18 replays UI/MQTT toggles from it (comms/runtime_state.py)
+    M9_M=$(m9_mark)
     snap restart $SNAP_NAME.frigate 2>/dev/null || true
+    # no readiness wait in this block: wait for the API here (M9)
+    m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "config re-render"
   fi
   # PR#3: restore the operator's config.yml OVER any template/livecam render — the operator owns
   # config.yml and the gate must not destroy their cameras. Authoritative last-writer; whole-snap
@@ -396,6 +440,7 @@ if [ "${1:-}" != "--skip-install" ] && [ "$NVR_SAFE" -eq 0 ]; then
   fi
   pass_ "snap install --dangerous ($SNAP_FILE)"
   sleep 30  # let daemons start and probes write; frigate needs extra time for Python imports (~12s) + startup
+  m9_wait_api 240 || true; assert_vec0_loaded "$M9_M" "fresh install"
 fi
 
 # RETIRED (M8 Task 5): the M0 svc-a/b/c ordering-spike daemons are removed from the snap; their
@@ -550,11 +595,11 @@ else
   echo "SKIP (nvr-safe): npu custom-device probe block (dormant)"
 fi
 
-# --- M2: ffmpeg matrix (Task 1) --- ffprobe app follows the tag-default 7.0 tree
-check "ffprobe app runs tag-default 7.0" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n7'"
+# --- M2/M9: ffmpeg matrix --- ffprobe app follows the tag-default 8.0 tree (upstream v0.18.2 Dockerfile:268)
+check "ffprobe app runs tag-default 8.0" sh -c "snap run frigate.ffprobe -version 2>/dev/null | head -1 | grep -q '^ffprobe version n8'"
 # static builds run directly from the mounted squashfs (no confinement needed for -version)
-# 8.0 dropped (M8 A2): upstream v0.17.2 amd64 ships only 7.0+5.0 — enumeration mirrors the verdict set
-for V in 5.0 7.0; do
+# upstream v0.18.2 amd64 ships 8.0 (default) + 7.0 + 5.0 (install_deps.sh:48-61) — M9 D4
+for V in 5.0 7.0 8.0; do
   check "ffmpeg tree $V present+runs" sh -c "/snap/frigate/current/usr/lib/ffmpeg/$V/bin/ffprobe -version | head -1 | grep -q '^ffprobe version'"
 done
 
@@ -979,6 +1024,14 @@ if [ -n "$ADMIN_PW" ]; then
         https://127.0.0.1:8971/api/version 2>/dev/null)
     check "auth: authed GET https://127.0.0.1:8971/api/version → 200 (M5 MONEY LINE)" test "$AUTHED_STATUS" = "200"
     echo "  auth finding: login=$LOGIN_STATUS cookie=frigate_token authed_get=$AUTHED_STATUS — JWT gate proven end-to-end"
+    # M9 (D9, master #24682): an authed request through /auth must not log the uninitialized-variable warning
+    M9_NGX_LOG=/var/snap/$SNAP_NAME/current/nginx/logs/error.log
+    M9_NGX_L0=$(wc -l < "$M9_NGX_LOG" 2>/dev/null || echo 0)
+    curl -sk --max-time 10 -b /tmp/m5-gate-cookie.jar -o /dev/null https://127.0.0.1:8971/api/stats 2>/dev/null || true
+    check "m9: no uninitialized go2rtc_stream_proxy warning after an authed request" sh -c \
+      "! tail -n +$((M9_NGX_L0+1)) '$M9_NGX_LOG' 2>/dev/null | grep -q 'uninitialized \"go2rtc_stream_proxy\"'"
+    M9_LOGOUT=$(curl -sk --max-time 10 -b /tmp/m5-gate-cookie.jar -o /dev/null -w '%{http_code}' https://127.0.0.1:8971/api/logout 2>/dev/null)
+    check "m9: /api/logout location answers (HTTP $M9_LOGOUT, not 404)" sh -c "case '$M9_LOGOUT' in 200|302|303|307|401) exit 0;; *) exit 1;; esac"
     # Discard derived credentials (JWT in cookie jar + response headers — not the password)
     rm -f /tmp/m5-gate-cookie.jar /tmp/m5-gate-headers.txt
 elif [ "$NVR_SAFE" -eq 1 ]; then
@@ -1126,12 +1179,14 @@ if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
     /^cameras:/ {skip=0}
     skip!=1 {print}
   ' "$CORAL_CFG_BAK" > "$CORAL_CFG"
+  M9_M=$(m9_mark)
   snap restart $SNAP_NAME.frigate
   CORAL_UP=""
   for i in $(seq 1 24); do
     sleep 5
     curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1 && { CORAL_UP=yes; break; }
   done
+  m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "coral phase"
   # TPU init markers land seconds AFTER /version answers (API and detector init in parallel;
   # gate run 3 evidence: 'TPU found' logged at +2 s, one-shot capture raced past it) — poll
   # the journal bounded (≤60 s), never sample once.
@@ -1145,11 +1200,13 @@ if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
   if [ -z "$TPU_FOUND" ]; then
     if lsusb 2>/dev/null | grep -qi '1a6e:089a'; then
       snap run $SNAP_NAME.coral-probe >/dev/null 2>&1 || true
+      M9_M=$(m9_mark)
       snap restart $SNAP_NAME.frigate
       for i in $(seq 1 24); do
         sleep 5
         curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1 && { CORAL_UP=yes; break; }
       done
+      m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "coral phase re-enumeration"
       for i in $(seq 1 12); do
         journalctl -u snap.frigate.frigate --since "$MARK_CORAL" 2>/dev/null | grep -q 'TPU found' && { TPU_FOUND=yes; break; }
         sleep 5
@@ -1221,6 +1278,7 @@ if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
   # Restore the OpenVINO default and prove steady state returns.
   cp -p "$CORAL_CFG_BAK" "$CORAL_CFG"
   rm -f "$CORAL_CFG_BAK"; CORAL_CFG_BAK=""
+  M9_M=$(m9_mark)
   snap restart $SNAP_NAME.frigate
   OV_BACK=""
   for i in $(seq 1 24); do
@@ -1228,6 +1286,7 @@ if lsusb 2>/dev/null | grep -qEi '1a6e:089a|18d1:9302'; then
     curl -sf --max-time 5 -H "Remote-User: admin" -H "Remote-Role: admin" \
       http://127.0.0.1:5001/stats 2>/dev/null | jq -e '.detectors.ov' >/dev/null 2>&1 && { OV_BACK=yes; break; }
   done
+  m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "coral phase restore"
   check "coral phase: OpenVINO default restored (ov reporting in /stats)" test "$OV_BACK" = "yes"
   check "coral phase: frigate healthy after restore" sh -c "snap services frigate.frigate | grep -q ' active'"
 else
@@ -1421,27 +1480,31 @@ EOF
 
   # (4) VERSIONED-BACKUP RESTORE SELECTION — forge three stamped backups and a newer-than-code
   # sidecar; frigate-run's downgrade-restore must pick the newest backup whose version ≤ current
-  # (0.17.2), skipping the too-new 99.0.0 and the older 0.16.0. A fresh mark isolates this restore
+  # (the running version, M7_CUR below), skipping the too-new 99.0.0 and the older 0.16.0. A fresh mark isolates this restore
   # from the earlier rollback-machinery restore already in the journal since $MARK.
   M7_BKDIR=/var/snap/$SNAP_NAME/common/db/backups
   M7_DB=/var/snap/$SNAP_NAME/common/db/frigate.db
   if [ -f "$M7_DB" ] && [ -d "$M7_BKDIR" ]; then
+    # M9: the "running version" is the installed code's stamp, not a literal (0.18.2 now)
+    M7_CUR=$(sed -n 's/^VERSION *= *"\([^"+-]*\).*/\1/p' /snap/$SNAP_NAME/current/opt/frigate/frigate/version.py | head -1)
     cp "$M7_DB" "$M7_BKDIR/frigate-pre-0.16.0-r1.db"
-    cp "$M7_DB" "$M7_BKDIR/frigate-pre-0.17.2-r2.db"
+    cp "$M7_DB" "$M7_BKDIR/frigate-pre-${M7_CUR}-r2.db"
     cp "$M7_DB" "$M7_BKDIR/frigate-pre-99.0.0-r3.db"
     echo "99.0.0 x999" > /var/snap/$SNAP_NAME/common/db/.last-writer   # newer-than-code → downgrade path
     M7_MARK4=$(date '+%Y-%m-%d %H:%M:%S')
+    M9_M=$(m9_mark)
     snap restart $SNAP_NAME.frigate 2>/dev/null || true
     sleep 20
+    m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "backup-select"
     journalctl -u snap.$SNAP_NAME.frigate --since "$M7_MARK4" 2>/dev/null | grep 'frigate-run: restored' | tail -1 > "$EVIDENCE/m7-backup-restore.txt" || true
     check "backup-select: restore fired on forged newer sidecar" test -s "$EVIDENCE/m7-backup-restore.txt"
-    check "backup-select: chose a 0.17.2 backup (newest ≤ current)" grep -q 'frigate-pre-0\.17\.2-r' "$EVIDENCE/m7-backup-restore.txt"
+    check "backup-select: chose the running-version backup ($M7_CUR, newest ≤ current)" grep -q "frigate-pre-${M7_CUR}-r2" "$EVIDENCE/m7-backup-restore.txt"
     check "backup-select: never chose the too-new 99.0.0 backup" sh -c "! grep -q 'frigate-pre-99\.0\.0' '$EVIDENCE/m7-backup-restore.txt'"
     check "backup-select: never chose the older 0.16.0 backup" sh -c "! grep -q 'frigate-pre-0\.16\.0' '$EVIDENCE/m7-backup-restore.txt'"
     check "backup-select: too-new 99.0.0 backup left intact (copy-not-consume)" test -f "$M7_BKDIR/frigate-pre-99.0.0-r3.db"
     check "backup-select: frigate healthy after restore" sh -c "snap services $SNAP_NAME.frigate | grep -q ' active'"
-    echo "  backup-select finding: $(sed 's/.*frigate-run: //' "$EVIDENCE/m7-backup-restore.txt" 2>/dev/null) (0.17.2 chosen; 99.0.0 skipped as newer-schema; 0.16.0 skipped as older)"
-    rm -f "$M7_BKDIR/frigate-pre-0.16.0-r1.db" "$M7_BKDIR/frigate-pre-0.17.2-r2.db" "$M7_BKDIR/frigate-pre-99.0.0-r3.db"
+    echo "  backup-select finding: $(sed 's/.*frigate-run: //' "$EVIDENCE/m7-backup-restore.txt" 2>/dev/null) ($M7_CUR chosen; 99.0.0 skipped as newer-schema; 0.16.0 skipped as older)"
+    rm -f "$M7_BKDIR/frigate-pre-0.16.0-r1.db" "$M7_BKDIR/frigate-pre-${M7_CUR}-r2.db" "$M7_BKDIR/frigate-pre-99.0.0-r3.db"
   else
     fail_ "backup-select: restore fired on forged newer sidecar (db or backups dir absent)"
   fi
@@ -1468,7 +1531,7 @@ else
   echo "SKIP: m7 ports.https=9443 live rebind + reset — no M7 config surface"
   echo "SKIP: m7 certsync.interval=15 fast reload (≤45 s) — no M7 config surface"
   echo "SKIP: m7 tls.cert-profile ecdsa-p256 / rsa-4096 — no M7 config surface"
-  echo "SKIP: m7 versioned-backup restore selection (0.17.2 over 99.0.0) — no M7 config surface"
+  echo "SKIP: m7 versioned-backup restore selection (running version over 99.0.0) — no M7 config surface"
   echo "SKIP: m7 logrotate >10 MB rotation — no M7 config surface"
 fi
 else
@@ -1587,6 +1650,57 @@ fi
 check "m8: journald still receives frigate lines (tee passthrough)" sh -c \
   "journalctl -u snap.$SNAP_NAME.frigate.service --since \"$MARK\" | grep -q ."
 
+# ===================== M9: Frigate 0.18 behaviour =====================
+check "m9: frigate is 0.18.2" sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version | grep -q '^0\.18\.2-'"
+check "m9: rendered/migrated config is version 0.18-0" sh -c "grep -qE '^version: \"?0\.18-0\"?\$' '$M9_CFG'"
+# record/export.py + util/classification.py hardcode /usr/lib/ffmpeg/8.0/bin/ffmpeg and need libwebp. Prove the
+# layout path resolves INSIDE the daemon's sandbox and encodes webp (deterministic). The real export-thumbnail
+# branch needs a finalized hourly preview mp4 -> exercised by tests/m9-rehearsal.sh, not here.
+check "m9: 8.0 ffmpeg resolves in the frigate sandbox and encodes webp" snap run --shell $SNAP_NAME.frigate -c \
+  '/usr/lib/ffmpeg/8.0/bin/ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=size=64x48 -frames:v 1 -c:v libwebp -y /tmp/m9.webp && test -s /tmp/m9.webp; rc=$?; rm -f /tmp/m9.webp; exit $rc'
+M9_FPID=$(pgrep -f 'python3.11 -u -m frigate' | head -1)
+M9_LAVF=$(/snap/$SNAP_NAME/current/usr/lib/ffmpeg/8.0/bin/ffmpeg -version 2>/dev/null | sed -n 's/^libavformat[[:space:]]*\([0-9][0-9]*\)\..*/\1/p' | head -1)
+check "m9: LIBAVFORMAT_VERSION_MAJOR=${M9_LAVF:-?} in the frigate env (D23)" sh -c \
+  "[ -n '$M9_FPID' ] && [ -n '$M9_LAVF' ] && tr '\\0' '\\n' < /proc/$M9_FPID/environ | grep -qx 'LIBAVFORMAT_VERSION_MAJOR=$M9_LAVF'"
+check "m9: nginx -t on the rendered conf" snap run --shell $SNAP_NAME.nginx -c \
+  '"$SNAP/usr/local/nginx/sbin/nginx" -t -p "$SNAP_DATA/nginx" -c "$SNAP_DATA/nginx/conf/nginx.conf"'
+M9_WEBP=$(ls -1 /var/snap/$SNAP_NAME/common/media/frigate/clips/*.webp 2>/dev/null | head -1)
+if [ -n "$M9_WEBP" ]; then
+  check "m9: .webp served as image/webp (nginx mime)" sh -c \
+    "curl -sI --max-time 5 'http://127.0.0.1:5000/clips/$(basename "$M9_WEBP")' | grep -qi '^content-type: image/webp'"
+else
+  echo "SKIP (no data): m9 .webp mime — no clips/*.webp yet (snapshots need a tracked object)"
+fi
+
+# D22: ffmpeg.path reaches go2rtc's ffmpeg.bin (config mutation -> gated out of --nvr-safe).
+if [ "$NVR_SAFE" -eq 0 ] && [ -f "$M9_CFG" ]; then
+  m9_cfg_edit 'cfg.setdefault("ffmpeg", {})["path"] = "7.0"'
+  snap restart $SNAP_NAME.go2rtc 2>/dev/null || true; sleep 5
+  check "m9: go2rtc ffmpeg.bin follows ffmpeg.path 7.0 (D22)" bash -c "m9_g2r_bin | grep -q '/usr/lib/ffmpeg/7.0/bin/ffmpeg\$'"
+  m9_cfg_restore
+  snap restart $SNAP_NAME.go2rtc 2>/dev/null || true; sleep 5
+  check "m9: go2rtc ffmpeg.bin back on the 8.0 default" bash -c "m9_g2r_bin | grep -q '/usr/lib/ffmpeg/8.0/bin/ffmpeg\$'"
+else
+  echo "SKIP (nvr-safe): m9 ffmpeg.path -> go2rtc (config mutation)"
+fi
+
+# D16: 0.18 GPU stats scan /proc/*/fdinfo — only with a VAAPI/QSV camera (stats/util.py:279-286). Measure, don't gate.
+if [ "$NVR_SAFE" -eq 0 ] && render_node_present && [ -f "$M9_CFG" ]; then
+  m9_cfg_edit 'cfg["cameras"]["testclip"].setdefault("ffmpeg", {})["hwaccel_args"] = "preset-vaapi"'
+  M9_M=$(m9_mark); snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "fdinfo window"
+  sleep 120
+  M9_FD=$(journalctl -k --since "$M9_M" 2>/dev/null | grep -cE "apparmor=\"DENIED\".*profile=\"snap\.$SNAP_NAME\.frigate\".*name=\"/proc/[0-9]+/fdinfo/" || true)
+  M9_GPU=$(curl -sf --max-time 5 -H 'Remote-User: admin' -H 'Remote-Role: admin' http://127.0.0.1:5001/stats 2>/dev/null | jq -r '.gpu_usages // {} | keys | join(",")' 2>/dev/null)
+  echo "== m9 fdinfo denials: ${M9_FD:-0} in 120 s (gpu_usages keys: ${M9_GPU:-none}) =="
+  m9_cfg_restore
+  M9_M=$(m9_mark); snap restart $SNAP_NAME.frigate 2>/dev/null || true
+  m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "after fdinfo restore"
+else
+  echo "SKIP (capability): m9 fdinfo scan — needs a VAAPI render node and no --nvr-safe"
+fi
+
+
 # M8 Task 7 — go2rtc crash-propagation proof (FULL-GATE ONLY: kills the go2rtc daemon, which
 # --nvr-safe must never do to the production NVR). The tee is a bash PROCESS SUBSTITUTION, not a
 # `daemon | tee` pipe, so the go2rtc binary stays the unit's MainPID: a kill -9 is seen by systemd
@@ -1671,12 +1785,14 @@ with open(p, "w") as f:
 PYEOF
   # Mark the journal window at the restart instant so the vec-load grep only sees this enablement.
   M8_SEM_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
+  M9_M=$(m9_mark)
   snap restart $SNAP_NAME.frigate 2>/dev/null || true
   # Bounded wait for frigate API. The sqlite-vec extension loads at DB-connect during app init
   # (app.py: load_vec_extension=semantic_search.enabled), BEFORE the API answers — so a healthy
   # :5001/version implies the extension loaded (a missing-flag build would crash-loop here instead).
   _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
   echo "  m8 finding: frigate API answered ${_b}s after restart with semantic_search enabled"
+  m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "semantic search"
   # (1) R4 DEFECT SIGNATURE (load-bearing): NO sqlite-vec extension-load error in the window.
   #     Independent of the first-enable Jina/CLIP model download (that runs later, in the embeddings
   #     maintainer) — the vec load is at DB connect. grep -q ONLY; no journal excerpt persisted.
@@ -1701,8 +1817,10 @@ PYEOF
   echo "  m8 finding: R4 fix exercised — vec0 loaded via conn.load_extension('/usr/local/lib/vec0'); first enable downloads Jina CLIP v1 models to \$SNAP_DATA/config/model_cache (network-gated, sizes not asserted)"
   # Restore the operator's pristine config (byte-exact) and restart so semantic_search drops.
   if cp -p "$M8_SEM_CFG_BAK" "$M8_SEM_CFG"; then rm -f "$M8_SEM_CFG_BAK"; M8_SEM_CFG_BAK=""; fi
+  M9_M=$(m9_mark)
   snap restart $SNAP_NAME.frigate 2>/dev/null || true
   _b=0; while [ "$_b" -lt 120 ]; do curl -sf --max-time 3 http://127.0.0.1:5001/version >/dev/null 2>&1 && break; sleep 3; _b=$((_b+3)); done
+  m9_wait_api 180 || true; assert_vec0_loaded "$M9_M" "semantic restore"
   check "m8: frigate healthy again after semantic_search restore (:5001/version, ${_b}s)" \
     sh -c "curl -sf --max-time 5 http://127.0.0.1:5001/version >/dev/null 2>&1"
 else
