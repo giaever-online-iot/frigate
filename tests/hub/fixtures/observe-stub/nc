@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fake nc for observe.test.sh: Home Assistant answers 200.
+cat > /dev/null; printf 'HTTP/1.0 200 OK\r\n'
