@@ -164,3 +164,38 @@ Tooling prepared for it (tests only, run by the orchestrator through its existin
 **Results:** none in this document. The orchestrator adds the hub results.
 
 **Still NOT PROVEN by anything here:** Store auto-connect (F11) and refresh-under-hold on arm64; the D13b number; V11's swap-or-OOM behaviour; V17 and the F10 purge residue on arm64; arm64-only AppArmor or seccomp denial arms (V8); and the start-time D10 behaviour.
+
+## Synthetic H.265 stand-in for the Pi trial (W-7 Q7, answer 1)
+
+At the first H5 start both cameras refused RTSP (connection refused on port 554), so the maintainer chose synthetic H.265 streams as the camera stand-in. The purpose is native decode CPU, the memory peak and shm numbers on the Pi under load (spec §7.2, §7.3), with the hub's Coral doing the inference. The tooling (tests/** only, laptop side):
+
+- `tests/hub/make-clips.sh` makes two clips on the laptop with libx265 from the snap's own ffmpeg 8.0 tree, extracted from the sha-checked local amd64 file. The clips are:
+  - `main-1080p25.mp4`: 1920x1080, 25 fps, ~1.6 Mbit/s, matching the cameras' main stream as measured;
+  - `sub-360p15.mp4`: 640x360, 15 fps, ~256 kbit/s. This is spec §7.3's first row and the V7 precedent; the bitrate is an ESTIMATE.
+
+  The picture is static bars, a moving box (`--motion`, % of the frame) and light temporal noise. The encoding is a closed GOP with an IDR every 2 s, no B-frames, tag hvc1, and a duration in whole GOPs, so the loop seam is an IDR. Every clip is checked before it is moved into place. With tag hvc1 the MP4 muxer keeps VPS/SPS/PPS in hvcC only; over RTSP they travel in the SDP.
+- `tests/hub/make-config.sh` with `M7C_SOURCE=clip` reads nothing in the private env dir. Its cameras are go2rtc `exec:` sources that loop the clips with the snap's ffmpeg and `-c copy`, so nothing is re-encoded on the hub:
+  - cam1 is the 1080p25 clip on ONE input with roles detect+record. It is detected at its native size, the worst case.
+  - cam2 records the 1080p25 clip and detects the 360p15 clip.
+
+  The fallback lever, if decode cannot keep up, is detect at 1280x720 (spec §7.3 row 3).
+- `tests/hub/serve.test.sh` runs that path end to end on laptop loopback: the snap's generator, the snap's go2rtc 1.9.14 and decoding consumers.
+- `tests/hub/observe.sh` is the read-only one-shot measurement at ~30 min and ~24 h. It covers slice and unit memory and CPU, cpu.stat throttling, per-process %CPU, the go2rtc exec ffmpegs and their restarts, shm, Frigate's /stats, the Coral, and host pressure.
+
+**Finding (fixed before the hub): go2rtc 1.9.14 collides on identical exec source lines.** cam1 and cam2 loop the same clip. With byte-identical exec lines and both consumers starting at once (as Frigate's start does), one consumer got RTSP `DESCRIBE 404`, and go2rtc ran 2 exec ffmpegs instead of 3. This happened in 3 of 3 rounds on the laptop; with distinct lines it was 0 of 5. Each line now carries `-metadata title=m7c-<stream>`, which only names the SDP session. make-config tests that the lines are distinct, and serve.test catches the reverse mutation.
+
+**Loopback evidence** (amd64 binaries, unconfined): three simultaneous 10 s decoding consumers on 4 s clips, each crossing at least two loop seams:
+- cam1: 250 frames at 1920x1080;
+- cam2: 250 frames at 1920x1080;
+- cam2_sub: 150 frames at 640x360.
+
+On all three, pts were strictly increasing and there were 0 decode error lines, 3 exec ffmpegs and 0 go2rtc ERR lines.
+
+**NOT PROVEN by the stand-in:**
+- the hub's AppArmor profile for the exec plus the clip read (the first start's go2rtc log shows it), and validate-config accepting exec lines in `config.yml`;
+- the real cameras' RTSP (they refuse it today), logins, reconnects, packet loss and timestamp jumps;
+- real keyframe intervals, VBR and I-frame bitrate spikes, and night/IR scene changes;
+- the cameras' real sub-stream size and fps (unknown, so cam2 is an assumption);
+- object load: there are no people or cars in the picture, so the Coral, the tracker and the review work see little.
+
+The synthetic motion is constant, which is pessimistic for motion detection and optimistic for object detection.

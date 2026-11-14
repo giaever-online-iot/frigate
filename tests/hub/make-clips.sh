@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M7c hub, synthetic camera stand-in (W-7 Q7 answer 1): make the two H.265 clips on the LAPTOP. Nothing is
 # re-encoded on the hub: go2rtc serves them there with `-c copy` (tests/hub/make-config.sh, M7C_SOURCE=clip).
-#   main-1080p25.mp4  1920x1080, 25 fps, ~1.6 Mbit/s: the C3W main stream as measured (1080p, ~25 fps,
+#   main-1080p25.mp4  1920x1080, 25 fps, ~1.6 Mbit/s: the cameras' main stream as measured (1080p, ~25 fps,
 #                     ~1.6 Mbit/s). cam1 decodes it as its DETECT input (the worst case); cam2 records it.
 #   sub-360p15.mp4    640x360, 15 fps, ~256 kbit/s: cam2's detect input. 640x360 at 15 fps is the first row of
 #                     spec §7.3, the §7.1 shm example and the VM battery V7 clip. The real cameras' sub-stream size
