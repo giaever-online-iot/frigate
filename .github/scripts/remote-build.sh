@@ -20,6 +20,9 @@
 # This is exactly why the retry/timeout behaviour here is carried over UNCHANGED
 # from the source pattern rather than "optimized": a heavier build makes transient
 # fetch failures on a long-lived remote-build MORE likely, not less, to matter.
+# One change since (PR 9's run): fetched files are parked outside the project dir
+# between attempts, because `--recover` only finds the build while the tree hashes
+# as it did at attempt 1 (see park_fetched below).
 #
 # Usage:  remote-build.sh <comma-separated-archs>        # e.g. amd64,arm64,armhf
 # Env:    MAX_ATTEMPTS (default 3), RETRY_DELAY seconds (default 15)
@@ -52,10 +55,44 @@ prune_corrupt() {
     done
 }
 
-valid_count() {                # number of *.snap files in the current directory
-    local n=0 f
-    for f in ./*.snap; do [ -e "$f" ] && n=$((n + 1)); done
-    printf '%s\n' "$n"
+# A retry must see the project tree exactly as attempt 1 did. snapcraft 9 derives
+# the remote build id from an md5 over EVERY file in the project dir
+# (craft_application remote/utils.py get_build_id), so a fetched .snap left in the
+# checkout makes `--recover` look for a build that does not exist ("Could not find
+# repository at path ..."). PR 9 lost a SUCCEEDED arm64 build that way after its
+# download broke mid-stream. So, between attempts, every file that was not in the
+# tree before attempt 1 is parked outside it, and it is restored at the end.
+PARK="$(mktemp -d "${TMPDIR:-/tmp}/remote-build-park.XXXXXX")"
+mkdir -p "$PARK/tree"
+tree_files() { find . -path ./.git -prune -o -type f -print | LC_ALL=C sort; }
+tree_files > "$PARK/baseline"
+
+park_fetched() {
+    local f n=0
+    while IFS= read -r f; do
+        mkdir -p "$PARK/tree/$(dirname "$f")"
+        mv -f "$f" "$PARK/tree/$f"
+        n=$((n + 1))
+    done < <(tree_files | LC_ALL=C comm -13 "$PARK/baseline" -)
+    echo "parked ${n} fetched file(s) outside the project dir (a retry must hash the tree as attempt 1 did)"
+    if [ "$(tree_files)" != "$(cat "$PARK/baseline")" ]; then
+        echo "::warning::project tree differs from attempt 1 (a tracked file is gone); --recover will look for a different build id"
+    fi
+}
+
+# Put parked files back; a file fetched again by a later attempt wins (it was validated last).
+restore_parked() {
+    local f rel
+    while IFS= read -r f; do
+        rel="${f#"$PARK/tree/"}"
+        if [ -e "$rel" ]; then rm -f "$f"; else mkdir -p "$(dirname "$rel")"; mv "$f" "$rel"; fi
+    done < <(find "$PARK/tree" -type f)
+    rm -rf "$PARK"
+}
+
+valid_count() {                # distinct *.snap names, in the project dir or parked
+    local f
+    for f in ./*.snap "$PARK"/tree/*.snap; do [ -e "$f" ] && basename "$f"; done | sort -u | wc -l | tr -d ' '
 }
 
 attempt=1
@@ -77,12 +114,14 @@ while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
     [ "$count" -ge "$want" ] && break
 
     if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+        park_fetched
         echo "incomplete (${count}/${want}) — re-fetching in ${RETRY_DELAY}s"
         sleep "$RETRY_DELAY"
     fi
     attempt=$((attempt + 1))
 done
 
+restore_parked
 count="$(valid_count)"
 ls -1 ./*.snap 2>/dev/null || echo "(no .snap files produced)"
 echo "snaps=${count}"
