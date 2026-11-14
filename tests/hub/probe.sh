@@ -37,7 +37,7 @@ one_line() { tr '\n' ' ' | sed 's/  */ /g; s/ $//' | cut -c1-240; }
 # Never called in a subshell, so a lost master (ssh-exec exit 3) ends the whole probe here.
 g() {
   local rc
-  "$EXEC" exec "$2" > "$OUT/$1.raw" 2>&1; rc=$?
+  "$EXEC" exec "$2" > "$OUT/$1.raw" 2>&1 </dev/null; rc=$?   # never forward the caller's stdin
   scrub < "$OUT/$1.raw" > "$OUT/$1.txt"; rm -f "$OUT/$1.raw"
   if [ "$rc" = 3 ]; then
     cat "$OUT/$1.txt" >&2
