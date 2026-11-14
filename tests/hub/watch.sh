@@ -3,8 +3,11 @@
 # through tests/hub/ssh-exec.sh (the operator's existing ssh master only) and logs one line. It trips on:
 #   MemAvailable < 2 GB;  memory PSI `some avg60` > 10 for 5 min;  1-min load > 3.5 for 10 min;
 #   snap.frigate.frigate NRestarts grows by more than 3 in 10 min;  free space on the data fs < 20 GB;
-#   swap used > the H0 baseline + 1 GB;  Home Assistant restarts: its snap unit (MainPID change, NRestarts
-#   growth, not active) or its docker container (Running false, RestartCount up, StartedAt changed);
+#   swap used > the H0 baseline + 1 GB;  Home Assistant restarts: its docker container (Running false,
+#   RestartCount up, StartedAt changed), or its snap unit not active in 2 samples in a row (a one-sample blip,
+#   as in a snap refresh, does not trip). A change of the HA snap unit's MainPID or NRestarts alone is logged as
+#   INFO, not tripped on: a home-assistant snap refresh restarts the unit while the container and the frontend
+#   stay up (hub, 14 Nov: MainPID changed twice, container StartedAt and RestartCount unchanged);
 #   Home Assistant slow: no HTTP status line within 5 s in 3 consecutive samples. The slow check is a HEURISTIC
 #   (no curl on the hub): `printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 5 127.0.0.1 <port> | head -n 1`, timed;
 #   any `HTTP/1.x NNN` status line counts as an answer. A plain `nc -z` TCP result is logged, not tripped on.
@@ -67,7 +70,7 @@ KEYS="memavail_kb swap_used_kb psi_some_avg60 load1 fr_nrestarts free_kb ha_Load
 "$EXEC" check >/dev/null 2>&1 </dev/null || { loud "watch: MASTER GONE: no live ssh master; not watching (exit 3)"; exit 3; }
 log "watch: start $(date -Is); mode $([ "$ACT" = 1 ] && echo ACT || echo DETECT-ONLY); interval ${IV}s; swap baseline ${BASE_MB} MB; HA unit $HAU container $HAC port $PORT; data fs $DATA"
 
-declare -A V; bad=0; i=0; psi_since=""; load_since=""; ha_bad=0; ha_pid0=""; ha_nr0=""; ctr_rc0=""; ctr_st0=""
+declare -A V; bad=0; i=0; psi_since=""; load_since=""; ha_bad=0; ha_down=0; ha_pid0=""; ha_nr0=""; ctr_rc0=""; ctr_st0=""
 NRT=(); NRV=()
 while :; do
   i=$((i + 1)); t=$(now)
@@ -107,10 +110,14 @@ while :; do
     [ $(( V[fr_nrestarts] - nmin )) -gt 3 ] && TRIPS+=("snap.frigate.frigate NRestarts grew by $(( V[fr_nrestarts] - nmin )) in 600 s")
     [ "${V[free_kb]}" -lt 20971520 ] && TRIPS+=("free space on $DATA is $(( V[free_kb] / 1048576 )) GB < 20 GB")
     [ "${V[swap_used_kb]}" -gt $(( (BASE_MB + 1024) * 1024 )) ] && TRIPS+=("swap used $(( V[swap_used_kb] / 1024 )) MB > baseline $BASE_MB MB + 1024 MB")
-    [ "${V[ha_ActiveState]}" = active ] || TRIPS+=("Home Assistant ActiveState=${V[ha_ActiveState]}")
+    if [ "${V[ha_ActiveState]}" = active ]; then ha_down=0; else ha_down=$((ha_down + 1)); fi
+    [ "$ha_down" -ge 2 ] && TRIPS+=("Home Assistant ActiveState=${V[ha_ActiveState]} for $ha_down samples")
+    # The unit's MainPID/NRestarts: INFO on each change (then the new value is the reference), never a trip.
     if [ -z "$ha_pid0" ]; then ha_pid0=${V[ha_MainPID]}; ha_nr0=${V[ha_NRestarts]}; fi
-    [ "${V[ha_MainPID]}" != "$ha_pid0" ] && TRIPS+=("Home Assistant restarted (MainPID $ha_pid0 -> ${V[ha_MainPID]})")
-    [ "${V[ha_NRestarts]}" -gt "$ha_nr0" ] && TRIPS+=("Home Assistant NRestarts grew from $ha_nr0 to ${V[ha_NRestarts]}")
+    untouched=""; [ "${ctr_st:-}" = "$ctr_st0" ] && [ "${ctr_rc:-}" = "$ctr_rc0" ] && untouched=", container untouched"
+    if [ "${V[ha_MainPID]}" != "$ha_pid0" ]; then log "INFO: HA unit restarted (MainPID $ha_pid0 -> ${V[ha_MainPID]})$untouched"; ha_pid0=${V[ha_MainPID]}
+    elif [ "${V[ha_NRestarts]}" != "$ha_nr0" ]; then log "INFO: HA unit restarted (NRestarts $ha_nr0 -> ${V[ha_NRestarts]})$untouched"; fi
+    ha_nr0=${V[ha_NRestarts]}
     [ "${ctr_run:-}" = true ] || TRIPS+=("Home Assistant container $HAC Running=${ctr_run:-unknown}")
     uint "${ctr_rc:-}" && [ "$ctr_rc" -gt "$ctr_rc0" ] && TRIPS+=("Home Assistant container RestartCount rose from $ctr_rc0 to $ctr_rc")
     [ "${ctr_st:-}" = "$ctr_st0" ] || TRIPS+=("Home Assistant container restarted (StartedAt $ctr_st0 -> ${ctr_st:-unknown})")

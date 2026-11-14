@@ -81,9 +81,23 @@ run w2 W_SWAP="1152000" -- "${B[@]}"; check "swap > base + 1 GB: exit 1" 1 "$(rc
 has   "swap TRIP line" "TRIP: swap used 1125 MB > baseline 100 MB + 1024 MB" "$(O w2)"
 
 # --- Home Assistant: restart, not active, slow or no answer ---
-run ha1 W_HAPID="4321 4321 5555" -- "${B[@]}";  check "HA MainPID changes: exit 1" 1 "$(rc ha1)"; has "HA restart TRIP" "TRIP: Home Assistant restarted (MainPID 4321 -> 5555)" "$(O ha1)"
-run ha2 W_HAACT="active failed" -- "${B[@]}";   check "HA not active: exit 1" 1 "$(rc ha2)"; has "HA inactive TRIP" "TRIP: Home Assistant ActiveState=failed" "$(O ha2)"
-run ha3 W_HANR="0 1" -- "${B[@]}";              check "HA NRestarts grows: exit 1" 1 "$(rc ha3)"
+# The HA snap unit restarting (MainPID or NRestarts) is INFO, not a trip: a snap refresh of home-assistant restarts
+# the unit while the container and the frontend stay up (hub, 14 Nov: MainPID changed, container untouched).
+run ha1 W_HAPID="4321 4321 5555" -- "${B[@]}" --samples 5;  check "HA unit MainPID changes: no trip" 0 "$(rc ha1)"
+has   "HA MainPID change is INFO" "INFO: HA unit restarted (MainPID 4321 -> 5555), container untouched" "$(O ha1)"
+hasnt "HA MainPID change: no TRIP line" "TRIP" "$(O ha1)"; check "HA MainPID change: INFO once, not per sample" 1 "$(grep -c 'INFO: HA unit restarted' "$(O ha1)")"
+run ha3 W_HANR="0 1" -- "${B[@]}" --samples 4;              check "HA unit NRestarts grows: no trip" 0 "$(rc ha3)"
+has   "HA NRestarts growth is INFO" "INFO: HA unit restarted (NRestarts 0 -> 1), container untouched" "$(O ha3)"
+run ha10 W_HAPID="4321 5555 7777" W_HANR="0 1 2" W_HAACT="active activating active" -- "${B[@]}" --samples 6
+check "HA snap refresh (2 unit restarts, one activating blip, container untouched): no trip" 0 "$(rc ha10)"
+check "HA snap refresh: two INFO lines" 2 "$(grep -c 'INFO: HA unit restarted' "$(O ha10)")"
+run ha11 W_HAPID="4321 5555" W_CTR="true_0_2026-11-14T10:27:54Z true_0_2026-11-14T13:01:02Z" -- "${B[@]}"
+check "HA unit and container both restart: exit 1" 1 "$(rc ha11)"; has "container restart still trips" "TRIP: Home Assistant container restarted" "$(O ha11)"
+hasnt "the INFO line does not claim the container is untouched" "container untouched" "$(O ha11)"
+# The unit not active trips only on 2 samples in a row (a refresh blip of a few seconds is one sample).
+run ha2 W_HAACT="active failed" -- "${B[@]}";   check "HA not active 2 in a row: exit 1" 1 "$(rc ha2)"; check "HA inactive trips at sample 3" 3 "$(samples ha2)"
+has   "HA inactive TRIP" "TRIP: Home Assistant ActiveState=failed for 2 samples" "$(O ha2)"
+run ha12 W_HAACT="active activating active deactivating active" -- "${B[@]}" --samples 6; check "HA not active once at a time: no trip" 0 "$(rc ha12)"
 run ha4 W_HTTPMS="40 6000 6000 40" -- "${B[@]}" --samples 6; check "HA slow twice in a row: no trip" 0 "$(rc ha4)"
 run ha5 W_HTTPMS="40 6000 6000 6000" -- "${B[@]}"; check "HA slow 3 in a row: exit 1" 1 "$(rc ha5)"; check "HA slow trips at sample 4" 4 "$(samples ha5)"
 has   "HA slow TRIP" "TRIP: Home Assistant gave no HTTP status line within 5 s in 3 samples" "$(O ha5)"
