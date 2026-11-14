@@ -16,6 +16,12 @@ set +x +o xtrace   # first: no trace of any value, even under `bash -x` or an in
 #   fps 5 (the template's value). Record: the main stream. Cameras reach Frigate via go2rtc at
 #   rtsp://127.0.0.1:8554/<stream> (the snap's go2rtc-config-gen.py convention: a `go2rtc:` block in config.yml).
 # D21 edits: the testclip camera removed, mqtt.enabled false, ffmpeg.hwaccel_args "", record.continuous.days 1.
+# go2rtc listeners: the snap's baseline (config/go2rtc.yaml.in) binds RTSP :8554 and WebRTC :8555 on every address,
+#   and its RTSP restream has no login (W-16), so the cameras would be on the hub's LAN. go2rtc-config-gen.py
+#   deep-merges this config's `go2rtc:` block over the baseline (only api.listen is forced), so the block sets
+#   rtsp.listen M7C_GO2RTC_RTSP_LISTEN (default 127.0.0.1:8554) and webrtc.listen M7C_GO2RTC_WEBRTC_LISTEN (default
+#   127.0.0.1:8555); an empty value leaves the baseline's LAN bind. Frigate's own ffmpeg reads rtsp://127.0.0.1:8554.
+#   With WebRTC on loopback a LAN browser's live view cannot use WebRTC and uses MSE through nginx instead.
 #
 # Secret hygiene: umask 077; xtrace off; the codes and addresses live only in shell variables and travel only on
 # stdin (to yq for the final self-check, to the hub for the write), never on a command line or in a child's
@@ -47,6 +53,8 @@ case "$KEYFILE" in '~/'*) KEYFILE="$HOME/${KEYFILE#\~/}" ;; esac
 [ -n "$KEYFILE" ] || die 2 "env has no M7C_KEYFILE= line"
 if [ ! -f "$KEYFILE" ] || [ ! -r "$KEYFILE" ]; then die 2 "the key file named by M7C_KEYFILE is missing or unreadable"; fi
 MAIN="${M7C_RTSP_MAIN:-/Streaming/Channels/101}"; SUB="${M7C_RTSP_SUB:-/Streaming/Channels/102}"
+RL="${M7C_GO2RTC_RTSP_LISTEN-127.0.0.1:8554}"; WL="${M7C_GO2RTC_WEBRTC_LISTEN-127.0.0.1:8555}"
+for l in "$RL" "$WL"; do [ -z "$l" ] || [[ "$l" =~ ^[0-9.]*:[0-9]{1,5}$ ]] || die 2 "M7C_GO2RTC_RTSP_LISTEN/M7C_GO2RTC_WEBRTC_LISTEN must be like 127.0.0.1:8554, :8554 or empty"; done
 for p in "$MAIN" "$SUB"; do [[ "$p" =~ ^/[A-Za-z0-9/_.=-]*$ ]] || die 2 "M7C_RTSP_MAIN/M7C_RTSP_SUB must be a path like /Streaming/Channels/101"; done
 ipv4() {   # pattern match only: no here-string (bash may back one with a temp file)
   local o; [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
@@ -104,13 +112,14 @@ BASE=$(printf '%s\n' "$SRC" | yq '
       {"path": "rtsp://127.0.0.1:8554/cam2", "input_args": "preset-rtsp-restream", "roles": ["record"]},
       {"path": "rtsp://127.0.0.1:8554/cam2_sub", "input_args": "preset-rtsp-restream", "roles": ["detect"]}]},
     "detect": {"enabled": true, "fps": 5}}' - 2>/dev/null) || die 5 "yq could not transform the source"
-printf -v G2 'go2rtc:\n  streams:\n    cam1:\n      - "rtsp://admin:%s@%s%s"\n    cam1_sub:\n      - "rtsp://admin:%s@%s%s"\n    cam2:\n      - "rtsp://admin:%s@%s%s"\n    cam2_sub:\n      - "rtsp://admin:%s@%s%s"\n' \
-  "${PW[0]}" "${IPS[0]}" "$MAIN" "${PW[0]}" "${IPS[0]}" "$SUB" "${PW[1]}" "${IPS[1]}" "$MAIN" "${PW[1]}" "${IPS[1]}" "$SUB"
+LST=""; [ -n "$RL" ] && LST+=$'  rtsp:\n    listen: "'"$RL"$'"\n'; [ -n "$WL" ] && LST+=$'  webrtc:\n    listen: "'"$WL"$'"\n'
+printf -v G2 'go2rtc:\n%s  streams:\n    cam1:\n      - "rtsp://admin:%s@%s%s"\n    cam1_sub:\n      - "rtsp://admin:%s@%s%s"\n    cam2:\n      - "rtsp://admin:%s@%s%s"\n    cam2_sub:\n      - "rtsp://admin:%s@%s%s"\n' \
+  "$LST" "${PW[0]}" "${IPS[0]}" "$MAIN" "${PW[0]}" "${IPS[0]}" "$SUB" "${PW[1]}" "${IPS[1]}" "$MAIN" "${PW[1]}" "${IPS[1]}" "$SUB"
 printf -v CFG '%s\n%s\n%s' "# M7c hub config (spec D21), written by tests/hub/make-config.sh; the rendered copy is config.yml.pre-h4." "$BASE" "$G2"
-got=$(printf '%s' "$CFG" | yq -r '[(.cameras | keys | join(",")), (.go2rtc.streams | keys | length), (.ffmpeg.hwaccel_args == ""), .mqtt.enabled, .record.continuous.days, (.detectors | has("coral"))] | map(tostring) | join(" ")' - 2>/dev/null)
+got=$(printf '%s' "$CFG" | yq -r '[(.cameras | keys | join(",")), (.go2rtc.streams | keys | length), (.ffmpeg.hwaccel_args == ""), .mqtt.enabled, .record.continuous.days, (.detectors | has("coral")), (.go2rtc.rtsp.listen // ""), (.go2rtc.webrtc.listen // "")] | map(tostring) | join(" ")' - 2>/dev/null)
 tc=$(printf '%s' "$CFG" | grep -c testclip)
-if [ "$got" != "cam1,cam2 4 true false 1 true" ] || [ "$tc" != 0 ]; then die 5 "the built config failed its own check"; fi
-say "built: 2 cameras, 4 go2rtc streams, testclip 0, hwaccel_args empty, mqtt off, continuous.days 1, detector coral"
+if [ "$got" != "cam1,cam2 4 true false 1 true $RL $WL" ] || [ "$tc" != 0 ]; then die 5 "the built config failed its own check"; fi
+say "built: 2 cameras, 4 go2rtc streams, testclip 0, hwaccel_args empty, mqtt off, continuous.days 1, detector coral, go2rtc rtsp ${RL:-baseline :8554} webrtc ${WL:-baseline :8555}"
 
 # --- write: backup once, new file, sha compare, move ----------------------------------------------------
 hub BK "if [ -f $C/config.yml.pre-h4 ]; then echo kept; else cp $C/config.yml $C/config.yml.pre-h4.m7c-part && chown root:root $C/config.yml.pre-h4.m7c-part && chmod 0600 $C/config.yml.pre-h4.m7c-part && mv -f $C/config.yml.pre-h4.m7c-part $C/config.yml.pre-h4 && echo created; fi" \

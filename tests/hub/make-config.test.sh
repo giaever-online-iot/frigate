@@ -61,8 +61,9 @@ PRE='printf "%s %s\n" "$ID1" "$IP1" > "$T/$n/envd/cameras.pairs"' run u5 --; che
 PRE='printf "%s 192.0.2.300\n%s %s\n" "$ID1" "$ID2" "$IP2" > "$T/$n/envd/cameras.pairs"' run u6 --; check "bad IPv4: exit 2" 2 "$(rc u6)"
 PRE='printf "a;b %s\n%s %s\n" "$IP1" "$ID2" "$IP2" > "$T/$n/envd/cameras.pairs"' run u7 --; check "bad camera id: exit 2" 2 "$(rc u7)"
 run u8 M7C_RTSP_SUB='/x y' --;                         check "bad M7C_RTSP_SUB: exit 2" 2 "$(rc u8)"
+run u9 M7C_GO2RTC_RTSP_LISTEN='0.0.0.0:85x' --;        check "bad M7C_GO2RTC_RTSP_LISTEN: exit 2" 2 "$(rc u9)"
 check "input errors send no hub command" 0 "$(cat "$T"/u?/st/cmds | wc -l)"
-for n in u2 u3 u4 u5 u6 u7 u8; do noleak "$n"; done
+for n in u2 u3 u4 u5 u6 u7 u8 u9; do noleak "$n"; done
 
 # --- key file: a missing or odd code is an error that names no value ---
 PRE='printf "original QR Code keys:\r\n  %s: %s\r\n" "$ID1" "$CA" > "$T/$n/envd/keys.yaml"' run k1 --
@@ -103,6 +104,17 @@ check "cam1 main stream: first pair, main path" "rtsp://admin:$CA@$IP1/Streaming
 check "cam1 sub stream" "rtsp://admin:$CA@$IP1/Streaming/Channels/102" "$(y h1 '.go2rtc.streams.cam1_sub[0]')"
 check "cam2 main stream: second pair" "rtsp://admin:$CB@$IP2/Streaming/Channels/101" "$(y h1 '.go2rtc.streams.cam2[0]')"
 check "4 go2rtc streams" 4 "$(y h1 '.go2rtc.streams | keys | length')"
+check "go2rtc RTSP bound to loopback by default" "127.0.0.1:8554" "$(y h1 '.go2rtc.rtsp.listen')"
+check "go2rtc WebRTC bound to loopback by default" "127.0.0.1:8555" "$(y h1 '.go2rtc.webrtc.listen')"
+# The snap's own generator (spike/bin/go2rtc-config-gen.py, run here unchanged) must keep the bind and the streams.
+if python3 -c 'import yaml' 2>/dev/null; then
+  mkdir -p "$T/gen"; python3 -I spike/bin/go2rtc-config-gen.py spike/config/go2rtc.yaml.in "$(HC h1)" /snap/frigate/x1 "$T/gen/go2rtc.yaml" 2> "$T/gen/err"
+  check "generator: rtsp.listen stays 127.0.0.1:8554" "127.0.0.1:8554" "$(yq -r '.rtsp.listen' - < "$T/gen/go2rtc.yaml")"
+  check "generator: webrtc.listen stays 127.0.0.1:8555" "127.0.0.1:8555" "$(yq -r '.webrtc.listen' - < "$T/gen/go2rtc.yaml")"
+  check "generator: api.listen still forced to loopback" "127.0.0.1:1984" "$(yq -r '.api.listen' - < "$T/gen/go2rtc.yaml")"
+  check "generator: the 4 camera streams merged over the 2 baseline streams" "cam1,cam1_sub,cam2,cam2_sub,test,testclip" "$(yq -r '.streams | keys | join(",")' - < "$T/gen/go2rtc.yaml")"
+  check "generator: says it merged the section, prints no secret" 0 "$(grep -cF -e "$CA" -e "$IP1" "$T/gen/err")"
+else echo "SKIP - generator cross-check (no PyYAML on this host)"; fi
 hasnt "new.common never reaches the hub" "$NC" "$(HC h1)"
 hasnt "another camera's code never reaches the hub" "QZOTHR" "$(HC h1)"
 has   "the config is sent on stdin, never in the remote command" "cat > /var/snap/frigate/current/config/config.yml.m7c-new" "$T/h1/st/cmds"
@@ -113,6 +125,12 @@ check "re-run: exit 0" 0 "$(rc h2)"
 check "re-run: backup still the rendered config" "$(sha256sum < "$FX/rendered-config.coral.yml")" "$(sha256sum < "$T/h2/st/hubcfg/config.yml.pre-h4")"
 check "re-run: M7C_RTSP_SUB applied" "rtsp://admin:$CA@$IP1/ch1/sub" "$(y h2 '.go2rtc.streams.cam1_sub[0]')"
 has   "re-run: says the backup was kept" "backup config.yml.pre-h4: kept" "$(O h2)"; noleak h2
+
+# --- LAN bind on request: empty keeps the baseline's, a value is used as given ---
+run l1 M7C_GO2RTC_RTSP_LISTEN= M7C_GO2RTC_WEBRTC_LISTEN=:8555 --
+check "listen override: exit 0" 0 "$(rc l1)"
+check "empty RTSP listen: no rtsp key (baseline :8554)" null "$(y l1 '.go2rtc.rtsp')"
+check "WebRTC listen as given" ":8555" "$(y l1 '.go2rtc.webrtc.listen')"; noleak l1
 
 # --- write damaged in transit: refused, old config untouched ---
 PRE='touch "$T/$n/st/corrupt"' run w1 --
