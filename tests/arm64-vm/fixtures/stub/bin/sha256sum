@@ -1,0 +1,2 @@
+#!/bin/bash
+echo "sha256sum $*" >> "$STUB_ST/log"; echo "$STUB_SHA  $1"

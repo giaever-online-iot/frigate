@@ -2,18 +2,36 @@
 # M7c T12: the arm64 VM battery (spec §9 V5-V11, V17, V18; D10 Review Focus 3).
 # Runs on the HOST. Every guest step goes through `vm.sh exec` (qemu-guest-agent); no SSH, no other host.
 # Usage: M7C_VM_DIR=<run dir> tests/arm64-vm/battery.sh <channel>
+#        M7C_VM_DIR=<run dir> tests/arm64-vm/battery.sh --file <guest path of a .snap> <sha256>
+#   File mode (M7c T15: the snap is private on the Store and the VM has no Store login): V5 copies the file to the
+#   guest's disk, hashes the copy and installs it with --dangerous only if it matches. The Store-only parts (F11
+#   auto-connect, V17 refresh under hold, V17 snap download) are INFO "not exercised"; the rest runs as is.
 # Prints one `PASS: Vn ...`, `FAIL: Vn ...` or `INFO: Vn ...` line per check, writes evidence to
 # $M7C_VM_DIR/out/battery/ (the guest's /mnt/out/battery/) and exits 1 on any FAIL.
-# Test hooks: M7C_VM_SH overrides the vm.sh path (a stub, for a dry run without a VM).
+# Test hooks: M7C_VM_SH overrides the vm.sh path (a stub, for a dry run without a VM); M7C_BATTERY_CHECKS
+# (space-separated check names) runs only V5 and those checks, in the battery's order.
 set -uo pipefail   # no -e: a failing check must not abort the later independent checks
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 . "$REPO/tests/lib/harness-arch.sh"
 . "$HERE/lib-checks.sh"
 
-CH="${1:-}"
-case "$CH" in
-  ''|*[!A-Za-z0-9./_-]*) echo "usage: battery.sh <channel>   (e.g. latest/edge/pr5; [A-Za-z0-9./_-] only)" >&2; exit 2 ;;
-esac
+usage() { echo "usage: battery.sh <channel>   (e.g. latest/edge/pr5; [A-Za-z0-9./_-] only)" >&2
+          echo "       battery.sh --file <absolute guest path, [A-Za-z0-9./_-] only> <sha256, 64 lowercase hex>" >&2; exit 2; }
+MODE=channel; CH=""; SRC=""; WANT_SHA=""; GSNAP=/root/m7c-snap/frigate.snap
+NOSTORE="not exercised: private snap, no Store in the VM"
+if [ "${1:-}" = --file ]; then
+  MODE='file'; SRC="${2:-}"; WANT_SHA="${3:-}"; [ $# -eq 3 ] || usage
+  case "$SRC" in /*) ;; *) usage ;; esac
+  case "$SRC" in *[!A-Za-z0-9./_-]*|*..*) usage ;; esac
+  [[ "$WANT_SHA" =~ ^[0-9a-f]{64}$ ]] || usage
+else
+  CH="${1:-}"; [ $# -eq 1 ] || usage
+  case "$CH" in ''|-*|*[!A-Za-z0-9./_-]*) usage ;; esac
+fi
+ALL_CHECKS="v5_layout v6_runtime v18_edgetpu v7_h265 v9_shm v10_mem v11_quota v_ov_config v_restore v17_lifecycle"
+CHECKS="${M7C_BATTERY_CHECKS:-$ALL_CHECKS}"
+for c in $CHECKS; do case " $ALL_CHECKS " in *" $c "*) ;; *) echo "battery.sh: unknown check in M7C_BATTERY_CHECKS: $c" >&2; exit 2 ;; esac; done
+install_cmd() { if [ "$MODE" = file ]; then echo "snap install --dangerous $GSNAP"; else echo "snap install frigate --channel=$CH"; fi; }
 [ -n "${M7C_VM_DIR:-}" ] || { echo "battery.sh: set M7C_VM_DIR (the vm.sh run dir)" >&2; exit 2; }
 command -v jq >/dev/null || { echo "battery.sh: jq is required on the host" >&2; exit 2; }
 scaled 1 >/dev/null || exit 2
@@ -137,16 +155,29 @@ services_up() {
   VER=$(g "curl -sf $AUTH_H http://localhost:5001/version" 2>/dev/null) && [ -n "$VER" ]
 }
 plug_slot() { awk -v p="frigate:$1" '$2 == p { print $3; exit }' "$2"; }
+v5_bytes() {   # file mode: copy to the guest disk, hash the copy; the exact bytes or no install
+  local got
+  g "mkdir -p ${GSNAP%/*} && cp $SRC $GSNAP && sha256sum $GSNAP" > "$OUT/v5-sha256.txt" 2>&1
+  got=$(awk -v f="$GSNAP" '$2 == f { print $1 }' "$OUT/v5-sha256.txt" | tail -n 1)
+  if [ "$got" = "$WANT_SHA" ]; then pass "V5 bytes: the guest copy of $SRC has sha256 $WANT_SHA"; return 0; fi
+  fail "V5 install: sha256 of the guest copy of $SRC is ${got:-unknown}, want $WANT_SHA; not installed ($(one_line < "$OUT/v5-sha256.txt"))"
+  return 1
+}
 v5_install() {
   local p auto="" notcon="" s
-  if ! g "snap install frigate --channel=$CH" > "$OUT/v5-install.txt" 2>&1; then
-    fail "V5 install: snap install frigate --channel=$CH failed ($(one_line < "$OUT/v5-install.txt"))"; return 1
+  if [ "$MODE" = file ]; then v5_bytes || return 1; fi
+  if ! g "$(install_cmd)" > "$OUT/v5-install.txt" 2>&1; then
+    fail "V5 install: $(install_cmd) failed ($(one_line < "$OUT/v5-install.txt"))"; return 1
   fi
   g 'snap connections frigate' > "$OUT/connections-at-install.txt" 2>&1
   for p in raw-usb hardware-observe mount-observe shm-private; do
     s=$(plug_slot "$p" "$OUT/connections-at-install.txt"); [ -n "$s" ] && [ "$s" != - ] && auto="$auto $p"
   done
-  info "V5 auto-connected at install (F11):${auto:- none} (of raw-usb hardware-observe mount-observe shm-private)"
+  if [ "$MODE" = file ]; then
+    info "V5 F11 Store auto-connect: $NOSTORE (--dangerous install; auto-connected:${auto:- none} of raw-usb hardware-observe mount-observe shm-private)"
+  else
+    info "V5 auto-connected at install (F11):${auto:- none} (of raw-usb hardware-observe mount-observe shm-private)"
+  fi
   g 'for p in raw-usb hardware-observe mount-observe shm-private; do snap connect frigate:$p; done; snap restart frigate' \
     > "$OUT/v5-connect.txt" 2>&1
   g 'snap connections frigate' > "$OUT/connections-after-connect.txt" 2>&1
@@ -383,6 +414,12 @@ v17_lifecycle() {
   notes=$(list_row <<<"$out" | awk '{ print $NF }')
   info "V17 snap list Notes after --hold: '${notes}' (whether it says held is [NOT VERIFIED])"
   [ "$hold_rc" = 0 ] || why="$why hold rc=${hold_rc:-?};"
+  if [ "$MODE" = file ]; then
+    rev1=$rev0
+    info "V17 refresh under hold: $NOSTORE (installed r${rev0:-?})"
+    info "V17 snap download: $NOSTORE (the second --dangerous install reuses the V5-hashed copy $GSNAP)"
+    g "snap install --dangerous $GSNAP" > "$OUT/v17-dangerous.txt" 2>&1 || why="$why install --dangerous failed;"
+  else
   chrev=$(g 'snap info frigate' 2>/dev/null | awk -v c="$CH:" '$1 == c { for (i = 2; i <= NF; i++) if ($i ~ /^\([0-9]+\)$/) { gsub(/[()]/, "", $i); print $i; exit } }')
   out=$(g "snap refresh frigate --channel=$CH; echo rc=\$?" 2>&1); printf '%s\n' "$out" > "$OUT/v17-refresh.txt"
   ref_rc=$(rc_of <<<"$out"); rev1=$(g 'snap list frigate' 2>/dev/null | list_rev)
@@ -392,11 +429,17 @@ v17_lifecycle() {
   g "rm -rf /root/dl && mkdir -p /root/dl && snap download frigate --channel=$CH --target-directory=/root/dl" > "$OUT/v17-download.txt" 2>&1 \
     || why="$why snap download failed;"
   g 'snap install --dangerous /root/dl/frigate_*.snap' > "$OUT/v17-dangerous.txt" 2>&1 || why="$why install --dangerous failed;"
+  fi
   revx=$(g 'snap list frigate' 2>/dev/null | list_rev)
   out=$(g 'snap revert frigate; snap list frigate' 2>&1); printf '%s\n' "$out" > "$OUT/v17-revert.txt"
   revr=$(list_rev <<<"$out")
+  if [ "$MODE" = file ]; then   # both revisions are local (x1, x2): revert must land on the earlier one
+    { [ -n "$revr" ] && [ "$revr" = "$rev1" ] && [ "$revr" != "$revx" ]; } \
+      || why="$why after revert r${revr:-?}, want the previous r${rev1:-?} (dangerous was '${revx}');"
+  else
   case "$revr" in ''|x*) why="$why after revert rev '${revr}' (dangerous was '${revx}');" ;;
     *) [ "$revr" = "$rev1" ] || why="$why after revert r$revr, want the Store r${rev1:-?};" ;; esac
+  fi
   out=$(g "snap remove frigate; echo rc=\$?; ls -d $SHMDIR" 2>&1); printf '%s\n' "$out" > "$OUT/v17-remove.txt"
   if [ -z "$(rc_of <<<"$out")" ]; then info "V17 plain snap remove: unknown (the guest call failed)"; why="$why plain remove call failed;"
   elif grep -qx "$SHMDIR" <<<"$out"; then info "V17 plain snap remove LEFT $SHMDIR (deleted before the purge cycle)"; g "rm -rf $SHMDIR" >/dev/null 2>&1
@@ -404,7 +447,7 @@ v17_lifecycle() {
   # Purge cycle. A fresh install has none of V5's manual connections, and $SHMDIR only exists once the snap's
   # mount namespace is built with shm-private connected. So: install, connect shm-private, build the namespace
   # synchronously (not racing the daemon's first start), and record whether $SHMDIR exists BEFORE the purge.
-  out=$(g "snap install frigate --channel=$CH; echo rc=\$?" 2>&1); printf '%s\n' "$out" > "$OUT/v17-purge-install.txt"
+  out=$(g "$(install_cmd); echo rc=\$?" 2>&1); printf '%s\n' "$out" > "$OUT/v17-purge-install.txt"
   [ "$(rc_of <<<"$out")" = 0 ] || why="$why purge-cycle install rc=$(rc_of <<<"$out");"
   out=$(g 'snap connect frigate:shm-private; echo connect_rc=$?; snap run --shell frigate.frigate -c true; echo rc=$?' 2>&1)
   printf '%s\n' "$out" > "$OUT/v17-purge-namespace.txt"
@@ -426,7 +469,8 @@ v17_lifecycle() {
     absent)  info "V17 F10 purge residue: not exercised ($SHMDIR absent before remove --purge; the namespace build did not create it; after the purge: $([ "$left" = 1 ] && echo present || echo absent))" ;;
     *)       why="$why could not check $SHMDIR before remove --purge;" ;;
   esac
-  if [ -z "$why" ]; then pass "V17 lifecycle: hold rc=0; explicit refresh rc=0; revert -> Store r$revr (dangerous was $revx); $f10"
+  if [ -z "$why" ] && [ "$MODE" = file ]; then pass "V17 lifecycle: hold rc=0; revert -> previous r$revr (dangerous was $revx); $f10"
+  elif [ -z "$why" ]; then pass "V17 lifecycle: hold rc=0; explicit refresh rc=0; revert -> Store r$revr (dangerous was $revx); $f10"
   else fail "V17 lifecycle:$why"; fi
 }
 
@@ -434,7 +478,7 @@ v17_lifecycle() {
 mkdir -p "$OUT" && g "mkdir -p $GOUT" >/dev/null 2>&1
 pre_run_cleanup
 if v5_install; then
-  v5_layout; v6_runtime; v18_edgetpu; v7_h265; v9_shm; v10_mem; v11_quota; v_ov_config; v_restore; v17_lifecycle
+  for c in $CHECKS; do "$c"; done
 else
   for c in "V5 layout" "V6 runtime" "V18 edgetpu" "V7 h265" "V9 shm" "V9 mutation" "V10 mem" "V11 quota" \
            "V-OV config (RF3)" "V-restore" "V17 lifecycle"; do
