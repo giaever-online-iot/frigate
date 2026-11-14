@@ -10,6 +10,8 @@ SNAP_NAME=frigate
 NVR_SAFE=0
 [ "${1:-}" = "--nvr-safe" ] && NVR_SAFE=1
 . tests/lib/harness-arch.sh
+# shellcheck source=tests/lib/nginx-settle.sh
+. tests/lib/nginx-settle.sh
 scaled 1 >/dev/null || { echo "spike-smoke: SPIKE_TIME_SCALE must be an integer 1..20 (got '${SPIKE_TIME_SCALE:-}')" >&2; exit 1; }
 # M7 Task 4: project root is now the snapcraft project (snap/snapcraft.yaml at root);
 # `snapcraft pack` at root produces ./frigate_*.snap. Root-first, but tolerate old
@@ -1604,7 +1606,10 @@ EOF
 
   # (2) CERT PROFILE — snap set tls.cert-profile=ecdsa-p256 → DELETE the cert files → restart nginx
   # (regeneration only fires when no cert is on disk) → served leaf is EC / P-256. Then reset
-  # (unset → rsa-4096 default) → delete → restart → RSA-4096 regenerates. Runs LAST of the TLS items
+  # (unset → rsa-4096 default) → delete → restart → RSA-4096 regenerates. Each set/unset fires the
+  # configure hook's own nginx restart, so the delete waits for that nginx to load the certs first
+  # (nginx_settle, tests/lib/nginx-settle.sh: a delete inside its startup made nginx [emerg] and hit the
+  # start limit in the M7c amd64 gate run 1, 2026-11-14 03:20:38). Runs LAST of the TLS items
   # so the block ends on the clean RSA-4096 default. Gen-time comparison measured directly on scratch
   # (restart-to-served latency also folds in nginx boot, so it is not a clean gen figure).
   M7_ECT=$(mktemp -d)
@@ -1613,8 +1618,11 @@ EOF
   M7_ECGEN=$(awk -v a="$M7_T0" -v b="$M7_T1" 'BEGIN{printf "%.2f", b-a}')
   M7_RSGEN=$(awk -v a="$M7_T2" -v b="$M7_T3" 'BEGIN{printf "%.2f", b-a}')
   rm -rf "$M7_ECT"
+  M7_NGX0=$(systemctl show -p MainPID --value "snap.$SNAP_NAME.nginx.service" 2>/dev/null)
   snap set $SNAP_NAME tls.cert-profile=ecdsa-p256 2>/dev/null || fail_ "tls.cert-profile=ecdsa-p256: snap set (valid) should succeed"
   if [ -d "$M7_CERT_DIR" ]; then
+    if M7_NGX=$(nginx_settle "${M7_NGX0:-0}"); then echo "  cert-profile: hook nginx restart settled after set ecdsa-p256 (MainPID ${M7_NGX0:-?} -> $M7_NGX)"
+    else echo "  cert-profile: hook nginx restart NOT settled after set ecdsa-p256 (MainPID ${M7_NGX0:-?}); deleting anyway"; fi
     rm -f "$M7_CERT_DIR/privkey.pem" "$M7_CERT_DIR/fullchain.pem"
     snap restart $SNAP_NAME.nginx 2>/dev/null || true
     M7_EC_SERVED=""
@@ -1626,7 +1634,10 @@ EOF
     check "cert-profile ecdsa-p256: served leaf is EC (id-ecPublicKey)" test "$M7_EC_SERVED" = yes
     check "cert-profile ecdsa-p256: served leaf curve is P-256" grep -q 'NIST CURVE: P-256' "$EVIDENCE/m7-ecdsa-cert.txt"
     # reset to the RSA-4096 default and force regeneration the same way
+    M7_NGX0=$(systemctl show -p MainPID --value "snap.$SNAP_NAME.nginx.service" 2>/dev/null)
     snap unset $SNAP_NAME tls.cert-profile 2>/dev/null || true
+    if M7_NGX=$(nginx_settle "${M7_NGX0:-0}"); then echo "  cert-profile: hook nginx restart settled after unset (MainPID ${M7_NGX0:-?} -> $M7_NGX)"
+    else echo "  cert-profile: hook nginx restart NOT settled after unset (MainPID ${M7_NGX0:-?}); deleting anyway"; fi
     rm -f "$M7_CERT_DIR/privkey.pem" "$M7_CERT_DIR/fullchain.pem"
     snap restart $SNAP_NAME.nginx 2>/dev/null || true
     M7_RS_SERVED=""
