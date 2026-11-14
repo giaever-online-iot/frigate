@@ -10,6 +10,10 @@
 #   branch-has-revisions <track> <pr>  (stdin: `snap info`) -> yes|no
 #   needs-stable-bump <new> <cand>     yes iff cand set & major(new)>major(cand)
 #   is-at-least <ver> <floor>          yes iff ver>=floor  (floor "" -> yes)
+#   revisions-in <channel> <arch>      (stdin: `snapcraft revisions`) -> revisions of <arch> whose
+#                                      CURRENT revision (trailing `*`) in <channel> they are, highest first
+#   arch-of <rev>                      (stdin: `snapcraft revisions`) -> arch; exit 1 if absent
+#   in-list <item> <csv>               yes iff item is an exact member of the comma list
 #
 # M7 note: frigate's release-on-merge.yml is LATEST-ONLY (no per-major version
 # tracks yet — see the spec's latest-only ruling), so it uses only
@@ -87,6 +91,32 @@ case "$cmd" in
     if [ -z "$floor" ]; then echo yes; exit 0; fi
     c="$(_vercmp "$ver" "$floor")"
     if [ "$c" -ge 0 ]; then echo yes; else echo no; fi
+    ;;
+  revisions-in)
+    # stdin = `snapcraft revisions`: header, then `Rev. Uploaded Arches Version Channels...`.
+    # Channels (fields 5..NF) is a comma-separated list; a trailing `*` marks the channel's
+    # current revision, an entry without it is historic.
+    awk -v ch="${1:-}" -v arch="${2:-}" '
+      NR==1 || $3!=arch { next }
+      {
+        c=$5; for (i=6; i<=NF; i++) c=c " " $i
+        n=split(c, e, ",")
+        for (j=1; j<=n; j++) {
+          x=e[j]; gsub(/^[ \t]+|[ \t]+$/, "", x)
+          if (x !~ /\*$/) continue # current-marker filter
+          sub(/\*$/, "", x)
+          if (x==ch) { print $1; break }
+        }
+      }' | sort -rn
+    ;;
+  arch-of)
+    awk -v rev="${1:-}" 'NR>1 && $1==rev { print $3; found=1; exit } END { exit !found }'
+    ;;
+  in-list)
+    case ",${2:-}," in
+      *",${1:-},"*) echo yes ;;
+      *) echo no ;;
+    esac
     ;;
   *)
     echo "snap-release.sh: unknown subcommand: ${cmd:-<none>}" >&2

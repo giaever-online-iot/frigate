@@ -5,11 +5,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from probe_common import write_result
+from probe_common import write_result, edgetpu_lib
 
 out: dict = {"status": "complete"}
 snap = os.environ.get("SNAP", "")
-lib = os.path.join(snap, "usr/lib/x86_64-linux-gnu/libedgetpu.so.1")
+lib = edgetpu_lib()
 model = os.path.join(snap, "models/edgetpu-test.tflite")
 
 try:

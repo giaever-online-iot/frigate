@@ -9,6 +9,10 @@ SNAP_NAME=frigate
 # before those guards run. The descriptive --nvr-safe comment block stays at its original site below.
 NVR_SAFE=0
 [ "${1:-}" = "--nvr-safe" ] && NVR_SAFE=1
+. tests/lib/harness-arch.sh
+# shellcheck source=tests/lib/nginx-settle.sh
+. tests/lib/nginx-settle.sh
+scaled 1 >/dev/null || { echo "spike-smoke: SPIKE_TIME_SCALE must be an integer 1..20 (got '${SPIKE_TIME_SCALE:-}')" >&2; exit 1; }
 # M7 Task 4: project root is now the snapcraft project (snap/snapcraft.yaml at root);
 # `snapcraft pack` at root produces ./frigate_*.snap. Root-first, but tolerate old
 # spike/frigate_*.snap artifacts and Task 1's remote-built spike/frigate-remote_amd64.snap
@@ -20,7 +24,8 @@ NVR_SAFE=0
 # frigate*_*.snap artifacts mean a stale .snap was left behind — fail loudly so nothing picks the wrong
 # one. spike/frigate*_*.snap (frigate_0.0.1-spike, frigate-remote — M7 evidence) is the documented
 # FALLBACK only when the repo root has none; it is NOT part of the ambiguity set.
-ROOT_SNAPS=$(ls -1 frigate*_*.snap 2>/dev/null)
+# shellcheck disable=SC2046 # the glob must expand unquoted
+ROOT_SNAPS=$(ls -1 $(artifact_glob "$HOST_ARCH") 2>/dev/null)
 # M8 final review (Task 6c): nvr-safe SKIPs this guard (gated on NVR_SAFE) — a read-only production
 # run must not fail on stray checkout .snap files it never installs.
 if [ "$NVR_SAFE" -eq 0 ] && [ "$(printf '%s\n' "$ROOT_SNAPS" | grep -c .)" -gt 1 ]; then
@@ -30,7 +35,8 @@ if [ "$NVR_SAFE" -eq 0 ] && [ "$(printf '%s\n' "$ROOT_SNAPS" | grep -c .)" -gt 1
     exit 1
   fi
 fi
-SNAP_FILE=$(ls -t frigate*_*.snap spike/frigate*_*.snap 2>/dev/null | head -1)
+# shellcheck disable=SC2046 # the glob must expand unquoted
+SNAP_FILE=$(ls -t $(artifact_glob "$HOST_ARCH") spike/$(artifact_glob "$HOST_ARCH") 2>/dev/null | head -1)
 SNAP_FILE_SHA=""
 if [ -n "$SNAP_FILE" ]; then
   SNAP_FILE_SHA=$(sha256sum "$SNAP_FILE" 2>/dev/null | awk '{print $1}')
@@ -243,8 +249,13 @@ if [ "$NVR_SAFE" -eq 1 ]; then
   echo "SKIP (nvr-safe): snap size floor — production outcome must not depend on checkout .snap files"
 elif [ -n "$SNAP_FILE" ]; then
   SNAP_SZ=$(stat -c %s "$SNAP_FILE" 2>/dev/null || echo 0)
-  check "m8: snap size floor (>=802 MiB, prime not gutted)" sh -c "[ '$SNAP_SZ' -ge 840957952 ]"
-  echo "  m8 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (floor 840957952 = 802 MiB; contaminated was 989880320, clean 989868032)"
+  FLOOR=$(size_floor_for_arch "$HOST_ARCH")
+  if [ -z "$FLOOR" ]; then
+    echo "SKIP: snap size floor — no floor recorded for $HOST_ARCH yet (M7c T14)"
+  else
+    check "m8: snap size floor (>=$((FLOOR / 1048576)) MiB, prime not gutted)" sh -c "[ '$SNAP_SZ' -ge '$FLOOR' ]"
+  fi
+  echo "  m8 finding: chosen snap=$SNAP_FILE size=${SNAP_SZ} bytes (arch $HOST_ARCH floor ${FLOOR:-none}; amd64 contaminated was 989880320, clean 989868032)"
 fi
 
 # M8 final review: app-census assertion — THE check that would have caught the stale-file
@@ -1595,7 +1606,10 @@ EOF
 
   # (2) CERT PROFILE — snap set tls.cert-profile=ecdsa-p256 → DELETE the cert files → restart nginx
   # (regeneration only fires when no cert is on disk) → served leaf is EC / P-256. Then reset
-  # (unset → rsa-4096 default) → delete → restart → RSA-4096 regenerates. Runs LAST of the TLS items
+  # (unset → rsa-4096 default) → delete → restart → RSA-4096 regenerates. Each set/unset fires the
+  # configure hook's own nginx restart, so the delete waits for that nginx to load the certs first
+  # (nginx_settle, tests/lib/nginx-settle.sh: a delete inside its startup made nginx [emerg] and hit the
+  # start limit in the M7c amd64 gate run 1, 2026-11-14 03:20:38). Runs LAST of the TLS items
   # so the block ends on the clean RSA-4096 default. Gen-time comparison measured directly on scratch
   # (restart-to-served latency also folds in nginx boot, so it is not a clean gen figure).
   M7_ECT=$(mktemp -d)
@@ -1604,9 +1618,14 @@ EOF
   M7_ECGEN=$(awk -v a="$M7_T0" -v b="$M7_T1" 'BEGIN{printf "%.2f", b-a}')
   M7_RSGEN=$(awk -v a="$M7_T2" -v b="$M7_T3" 'BEGIN{printf "%.2f", b-a}')
   rm -rf "$M7_ECT"
+  M7_NGX0=$(systemctl show -p MainPID --value "snap.$SNAP_NAME.nginx.service" 2>/dev/null)
   snap set $SNAP_NAME tls.cert-profile=ecdsa-p256 2>/dev/null || fail_ "tls.cert-profile=ecdsa-p256: snap set (valid) should succeed"
   if [ -d "$M7_CERT_DIR" ]; then
+    if M7_NGX=$(nginx_settle "${M7_NGX0:-0}"); then echo "  cert-profile: hook nginx restart settled after set ecdsa-p256 (MainPID ${M7_NGX0:-?} -> $M7_NGX)"
+    else echo "  cert-profile: hook nginx restart NOT settled after set ecdsa-p256 (MainPID ${M7_NGX0:-?}); deleting anyway"; fi
     rm -f "$M7_CERT_DIR/privkey.pem" "$M7_CERT_DIR/fullchain.pem"
+    # This block restarts nginx several times inside systemd's 5-starts-per-10-s default window; reset-failed also clears the start-rate counter (no checked state changes).
+    systemctl reset-failed "snap.$SNAP_NAME.nginx.service" 2>/dev/null || true
     snap restart $SNAP_NAME.nginx 2>/dev/null || true
     M7_EC_SERVED=""
     for _i in $(seq 1 12); do
@@ -1617,8 +1636,13 @@ EOF
     check "cert-profile ecdsa-p256: served leaf is EC (id-ecPublicKey)" test "$M7_EC_SERVED" = yes
     check "cert-profile ecdsa-p256: served leaf curve is P-256" grep -q 'NIST CURVE: P-256' "$EVIDENCE/m7-ecdsa-cert.txt"
     # reset to the RSA-4096 default and force regeneration the same way
+    M7_NGX0=$(systemctl show -p MainPID --value "snap.$SNAP_NAME.nginx.service" 2>/dev/null)
     snap unset $SNAP_NAME tls.cert-profile 2>/dev/null || true
+    if M7_NGX=$(nginx_settle "${M7_NGX0:-0}"); then echo "  cert-profile: hook nginx restart settled after unset (MainPID ${M7_NGX0:-?} -> $M7_NGX)"
+    else echo "  cert-profile: hook nginx restart NOT settled after unset (MainPID ${M7_NGX0:-?}); deleting anyway"; fi
     rm -f "$M7_CERT_DIR/privkey.pem" "$M7_CERT_DIR/fullchain.pem"
+    # This block restarts nginx several times inside systemd's 5-starts-per-10-s default window; reset-failed also clears the start-rate counter (no checked state changes).
+    systemctl reset-failed "snap.$SNAP_NAME.nginx.service" 2>/dev/null || true
     snap restart $SNAP_NAME.nginx 2>/dev/null || true
     M7_RS_SERVED=""
     for _i in $(seq 1 12); do

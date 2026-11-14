@@ -27,13 +27,23 @@ wait_for_url() {
 # in the wrappers that source this file. The guard collapses that to the empty-default path.
 cfg_get() { v=$(snapctl get "$1" 2>/dev/null) || v=""; [ -n "$v" ] && printf '%s' "$v" || printf '%s' "$2"; }
 
+# M7c (D9, D10): the single arch guard. OpenVINO's GPU plugin ships only on amd64, so
+# arm64 never auto-selects ov and an explicit/unknown ov renders cpu with a stderr WARN.
+# DETECTOR_SYSFS_ROOT (test hook) prefixes /dev/dri and /sys. stdout stays a pure sed script.
+_arch_has_ov() { [ "${SNAP_ARCH:-amd64}" = amd64 ]; }
+
+# M7c (D10): 0 iff the config declares an openvino detector (uncommented `type: openvino`,
+# bare or in matching double/single quotes).
+config_uses_openvino() { [ -f "$1" ] && grep -Eq "^[[:space:]]+type:[[:space:]]*(openvino|\"openvino\"|'openvino')[[:space:]]*(#.*)?\$" "$1"; }
+
 # M7: emit the sed script that renders the ONE active detector block from frigate-config.yml
 # and deletes the other two. `detector` is snap-set (ov|coral|cpu); unset => auto-detect:
 # an Intel/AMD GPU render node present => ov (OpenVINO GPU), else cpu. RENDER-TIME ONLY —
 # config.yml is render-once (operator-owned after first boot), so this fixes the detector at
 # first render. The chosen block keeps its contents (markers stripped); the other two marker
 # regions are range-deleted (same idiom as the LIVECAM block). Callers: frigate-run,
-# validate-config (identical logic via this shared helper). Unknown values fall back to ov.
+# validate-config (identical logic via this shared helper). Unknown values fall back to ov;
+# then, on non-amd64, ov renders cpu with the D10 WARN line on stderr.
 detector_sed() {
     _det=$(cfg_get detector "")
     if [ -z "$_det" ]; then
@@ -46,13 +56,23 @@ detector_sed() {
         # guarded (vendor absent for non-PCI nodes; glob may stay literal) to keep the
         # set -e/-u wrappers safe. Default cpu; explicit `snap set detector=ov` still wins.
         _det=cpu
-        for _rnode in /dev/dri/renderD*; do
+        # M7c (D9): arm64 never auto-selects ov (no OpenVINO GPU plugin), so skip the probe.
+        for _rnode in "${DETECTOR_SYSFS_ROOT:-}"/dev/dri/renderD*; do
+            _arch_has_ov || break
             [ -e "$_rnode" ] || continue
-            _vendor=$(cat "/sys/class/drm/${_rnode##*/}/device/vendor" 2>/dev/null || true)
+            _vendor=$(cat "${DETECTOR_SYSFS_ROOT:-}/sys/class/drm/${_rnode##*/}/device/vendor" 2>/dev/null || true)
             case "$_vendor" in
                 0x8086|0x1002) _det=ov; break ;;
             esac
         done
+    fi
+    case "$_det" in
+        cpu|coral|ov) ;;
+        *) _det=ov ;;   # unknown values normalise to ov first
+    esac
+    if [ "$_det" = ov ] && ! _arch_has_ov; then
+        echo "frigate-run: WARN detector=ov is not available on arm64 (no OpenVINO GPU plugin); rendering the cpu detector" >&2
+        _det=cpu
     fi
     case "$_det" in
         cpu)
@@ -74,4 +94,31 @@ detector_sed() {
                 '/# DETECTOR-OV-BEGIN/d' \
                 '/# DETECTOR-OV-END/d' ;;
     esac
+}
+
+# M7c (D8): map the snap build arch ($SNAP_ARCH: amd64|arm64) to its GNU multiarch triplet.
+# Any other arch fails loud (rc 1, names the value) rather than guessing a library path.
+arch_triplet() {
+    case "${SNAP_ARCH:-}" in
+        amd64) printf '%s\n' x86_64-linux-gnu ;;
+        arm64) printf '%s\n' aarch64-linux-gnu ;;
+        *) echo "lib-wait: unsupported SNAP_ARCH '${SNAP_ARCH:-}'" >&2; return 1 ;;
+    esac
+}
+
+# M7c (D13a): SHM_MAX_FRAMES, default 50. Harness-only override: $SNAP_COMMON/shm-max-frames
+# accepted when, after stripping all whitespace, it is 1..200 digits; anything else -> 50.
+# The 4+ char pattern rejects overlong input before the numeric test, so it cannot overflow.
+shm_max_frames() {
+    _smf_f="${SNAP_COMMON:-}/shm-max-frames"
+    _smf_v=""
+    [ -r "$_smf_f" ] && _smf_v=$(tr -d '[:space:]' < "$_smf_f") || _smf_v=""
+    case "$_smf_v" in
+        ''|*[!0-9]*|????*) printf '%s\n' 50; return 0 ;;
+    esac
+    if [ "$_smf_v" -ge 1 ] && [ "$_smf_v" -le 200 ]; then
+        printf '%s\n' "$_smf_v"
+    else
+        printf '%s\n' 50
+    fi
 }

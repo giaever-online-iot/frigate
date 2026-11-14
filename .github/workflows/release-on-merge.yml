@@ -59,6 +59,7 @@ jobs:
       - name: Promote PR revisions to latest/edge
         run: |
           set -euo pipefail
+          set -a; . .github/release-archs.env; set +a
           SR=.github/scripts/snap-release.sh
           SNAP="$SNAP_NAME"
           V="${{ steps.meta.outputs.version }}"
@@ -67,10 +68,10 @@ jobs:
 
           # First-release tolerance (CI shakedown finding): an UNAUTHENTICATED `snap info`
           # cannot see a never-released snap and exits non-zero ("error: no snap found"),
-          # which under set -e would kill the promote before it ever runs. When the info
+          # which under set -e would kill the release before it ever runs. When the info
           # fetch fails there is no public channel map to guard against, so skip the
-          # branch-has-revisions guard and promote unconditionally — `snapcraft promote`
-          # below is authed, CAN see the branch channel, and its own failure still fails
+          # branch-has-revisions guard and release unconditionally — `snapcraft revisions`
+          # below (inside release-arch.sh) is authed, CAN see the branch channel, and its own failure still fails
           # the job. The guard stays intact for every normal (already-released) merge.
           if INFO="$(snap info "$SNAP")"; then
             # branch-has-revisions joins its two args as "<track>/edge/<arg2>"; passing
@@ -85,7 +86,7 @@ jobs:
           fi
 
           echo "Merged $V; promoting $CHAN -> latest/edge"
-          snapcraft promote "$SNAP" --from-channel "$CHAN" --to-channel latest/edge --yes
+          .github/scripts/release-arch.sh "$CHAN" latest/edge "$EDGE_ARCHS"
 
           echo ">> closing $CHAN"
           snapcraft close "$SNAP" "$CHAN" --yes || echo "close failed (already gone?); ignoring"
