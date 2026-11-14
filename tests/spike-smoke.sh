@@ -1624,6 +1624,8 @@ EOF
     if M7_NGX=$(nginx_settle "${M7_NGX0:-0}"); then echo "  cert-profile: hook nginx restart settled after set ecdsa-p256 (MainPID ${M7_NGX0:-?} -> $M7_NGX)"
     else echo "  cert-profile: hook nginx restart NOT settled after set ecdsa-p256 (MainPID ${M7_NGX0:-?}); deleting anyway"; fi
     rm -f "$M7_CERT_DIR/privkey.pem" "$M7_CERT_DIR/fullchain.pem"
+    # This block restarts nginx several times inside systemd's 5-starts-per-10-s default window; reset-failed also clears the start-rate counter (no checked state changes).
+    systemctl reset-failed "snap.$SNAP_NAME.nginx.service" 2>/dev/null || true
     snap restart $SNAP_NAME.nginx 2>/dev/null || true
     M7_EC_SERVED=""
     for _i in $(seq 1 12); do
@@ -1639,6 +1641,8 @@ EOF
     if M7_NGX=$(nginx_settle "${M7_NGX0:-0}"); then echo "  cert-profile: hook nginx restart settled after unset (MainPID ${M7_NGX0:-?} -> $M7_NGX)"
     else echo "  cert-profile: hook nginx restart NOT settled after unset (MainPID ${M7_NGX0:-?}); deleting anyway"; fi
     rm -f "$M7_CERT_DIR/privkey.pem" "$M7_CERT_DIR/fullchain.pem"
+    # This block restarts nginx several times inside systemd's 5-starts-per-10-s default window; reset-failed also clears the start-rate counter (no checked state changes).
+    systemctl reset-failed "snap.$SNAP_NAME.nginx.service" 2>/dev/null || true
     snap restart $SNAP_NAME.nginx 2>/dev/null || true
     M7_RS_SERVED=""
     for _i in $(seq 1 12); do
