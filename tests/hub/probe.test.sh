@@ -31,7 +31,10 @@ has   "layout PASS" "PASS: V5 layout: /etc/OpenCL/vendors and intel-opencl each 
 has   "V6 PASS" "PASS: V6 runtime: 18 imports ok (sqlite_vec incl.); hevc decoders=4; ffprobe version n8" "$(RES h1)"
 has   "V18 PASS (the delegate loads and infers)" "PASS: V18 edgetpu (hub, Coral present): dlopen ok from /snap/frigate/x1/usr/lib/aarch64-linux-gnu/libedgetpu.so.1; load_delegate ok; inference ok" "$(RES h1)"
 has   "V18 USB id INFO" "INFO: V18 Coral USB id before: 1a6e:089a; after: 18d1:9302" "$(RES h1)"
-has   "summary line" "probe: 6 PASS, 0 FAIL" "$T/h1.out"
+has   "V-OV (stopped) PASS" "PASS: V-OV (stopped): on arm64 detector=ov renders the cpu detector with the D10 WARN; _arch_has_ov false; an openvino config is recognised (stopped-state guard check only; the start-time behaviour of an openvino config on arm64 is NOT PROVEN)" "$(RES h1)"
+has   "V-OV (stopped) uses no snap set" "snap run --shell frigate.validate-config -c" "$(C h1)"
+hasnt "V-OV (stopped): no snap set" "snap set" "$(C h1)"
+has   "summary line" "probe: 7 PASS, 0 FAIL" "$T/h1.out"
 has   "tensorflow import runs under nice -n 19" "nice -n 19 snap run frigate.imports-probe" "$(C h1)"
 hasnt "no unexpected hub command" "unexpected command" "$T/h1.out"
 run h2 --
@@ -66,6 +69,17 @@ run f5 P_CORAL=noinfer --
 check "inference fails: exit 1" 1 "$(rc f5)"; has "V18 FAIL inference" "inference failed: RuntimeError: boom" "$(RES f5)"
 run f6 P_CORAL=absent --
 check "no Coral on the bus: exit 1" 1 "$(rc f6)"; has "V18 FAIL no Coral id" "FAIL: V18 edgetpu (hub, Coral present): no Coral USB id (1a6e:089a or 18d1:9302) before the probe" "$(RES f6)"
+
+run o1 P_ARCH=amd64 --
+check "V-OV on a non-arm64 SNAP_ARCH: exit 1" 1 "$(rc o1)"
+has   "V-OV FAIL names what is wrong" "FAIL: V-OV (stopped): SNAP_ARCH is not arm64; no D10 render WARN line;" "$(RES o1)"
+run o3 P_FLIP=arch --
+check "V-OV: _arch_has_ov true on arm64: exit 1" 1 "$(rc o3)"; has "names the arch guard" "FAIL: V-OV (stopped): _arch_has_ov is not false;" "$(RES o3)"
+run o4 P_FLIP=ovcfg --
+check "V-OV: openvino config not recognised: exit 1" 1 "$(rc o4)"; has "names the config predicate" "FAIL: V-OV (stopped): config_uses_openvino did not recognise an openvino config;" "$(RES o4)"
+run o2 P_SHELL_FAIL=1 --
+check "snap run --shell refused: exit 1 (FAIL, not skip)" 1 "$(rc o2)"
+has   "snap run --shell refused: loud" "FAIL: V-OV (stopped): snap run --shell exited non-zero (error: unknown flag" "$(RES o2)"
 
 # --- scrub: no password line, no URL credential, in any output or evidence file ---
 run k1 P_LEAK=1 --

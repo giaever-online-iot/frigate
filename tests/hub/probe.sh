@@ -2,7 +2,10 @@
 # M7c hub probe (NOT the battery): run once after §8 H3 on the installed snap, with frigate STOPPED.
 # Runs on the laptop; every hub step goes through tests/hub/ssh-exec.sh (the operator's existing ssh master only).
 # Checks: V5 version (+ the installed .snap's sha256 with --sha), V5 plugs, V5 layout (D7), V6 runtime (the
-# tensorflow import under nice -n 19), V18 on the hub (Coral present: the delegate must load and infer).
+# tensorflow import under nice -n 19), V18 on the hub (Coral present: the delegate must load and infer), and
+# V-OV (stopped): the D10 guard functions of the shipped lib-wait.sh run in the snap's own shell on the real arch,
+# with `snapctl get detector` stubbed to "ov" (no snap set, no config change, no configure hook). This is a
+# stopped-state guard check only: the start-time behaviour of an openvino config on arm64 is NOT PROVEN by it.
 # It starts no daemon, changes no config, and writes only the probes' own $SNAP_COMMON/spike-results/*.json.
 # The hub has no jq or curl: JSON is read back with cat and parsed here.
 # Precondition: frigate.frigate and frigate.go2rtc stopped (nginx/certsync may run: the configure hook starts them).
@@ -129,6 +132,21 @@ if [ -z "$why" ]; then
 fi
 if [ -z "$why" ]; then pass "V18 edgetpu (hub, Coral present): dlopen ok from $path; load_delegate ok; inference ok"
 else fail "V18 edgetpu (hub, Coral present):$why"; fi
+
+# --- V-OV (stopped): D10 guard functions, read-only, in the snap's shell on the real arch ----------
+# The inner script has no single quote, so it sits in one single-quoted -c argument on the hub.
+D10_WARN='frigate-run: WARN detector=ov is not available on arm64 (no OpenVINO GPU plugin); rendering the cpu detector'
+# shellcheck disable=SC2016  # expands in the snap's shell on the hub, not here
+D10='snapctl() { [ "$1 $2" = "get detector" ] && echo ov; }; . "$SNAP/bin/lib-wait.sh"; echo "SNAP_ARCH=$SNAP_ARCH"; echo "cpu_block=$(detector_sed | grep -c "DETECTOR-CPU-BEGIN/d")"; if _arch_has_ov; then echo arch=has-ov; else echo arch=no-ov; fi; printf "detectors:\n  ov:\n    type: openvino\n" > /tmp/m7c-d10.yml; if config_uses_openvino /tmp/m7c-d10.yml; then echo ovcfg=uses-ov; else echo ovcfg=no; fi; rm -f /tmp/m7c-d10.yml'
+why=""
+g v-ov-stopped "snap run --shell frigate.validate-config -c '$D10' 2>&1" || why="$why snap run --shell exited non-zero ($(F v-ov-stopped | one_line));"
+grep -qx 'SNAP_ARCH=arm64' "$OUT/v-ov-stopped.txt" || why="$why SNAP_ARCH is not arm64;"
+grep -qxF -- "$D10_WARN" "$OUT/v-ov-stopped.txt" || why="$why no D10 render WARN line;"
+grep -qx 'cpu_block=1' "$OUT/v-ov-stopped.txt" || why="$why detector=ov did not render the cpu block;"
+grep -qx 'arch=no-ov' "$OUT/v-ov-stopped.txt" || why="$why _arch_has_ov is not false;"
+grep -qx 'ovcfg=uses-ov' "$OUT/v-ov-stopped.txt" || why="$why config_uses_openvino did not recognise an openvino config;"
+if [ -z "$why" ]; then pass "V-OV (stopped): on arm64 detector=ov renders the cpu detector with the D10 WARN; _arch_has_ov false; an openvino config is recognised (stopped-state guard check only; the start-time behaviour of an openvino config on arm64 is NOT PROVEN)"
+else fail "V-OV (stopped):$why"; fi
 
 echo "probe: $(grep -c '^PASS' "$RESULTS") PASS, $FAILS FAIL, $(grep -c '^INFO' "$RESULTS") INFO (evidence: $OUT)"
 [ "$FAILS" = 0 ]

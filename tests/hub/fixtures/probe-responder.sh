@@ -6,6 +6,8 @@
 #   P_REV=x1            installed revision             P_SNAPSHA=<hex>          sha256 of the installed .snap file
 #   P_UNCON=raw-usb     that plug has no slot          P_IMPORT_BAD=cv2         that import fails
 #   P_CORAL=ok|nodev|noinfer|absent                    P_LEAK=1                 probe output carries a password line
+#   P_ARCH=amd64        the snap shell's SNAP_ARCH     P_SHELL_FAIL=1           `snap run --shell` is refused
+#   P_FLIP=arch|ovcfg   one V-OV result line flipped
 set -u
 st="${STUB_ST:?}"
 eval "set -- $1"
@@ -61,5 +63,12 @@ case "$cmd" in
       noinfer) echo '{"status":"complete","load_delegate":{"ok":true},"inference":{"ok":false,"error":"RuntimeError: boom"}}' ;;
       *)       printf '%s\n' '{"status":"complete","load_delegate":{"ok":false,"error":"ValueError: Failed to load delegate from /snap/frigate/x1/usr/lib/aarch64-linux-gnu/libedgetpu.so.1\n"}}' ;;
     esac ;;
+  'snap run --shell frigate.validate-config -c '*)
+    # Run the inner script for real against the repo's lib-wait.sh, as the snap's shell would ($SNAP/bin).
+    [ "${P_SHELL_FAIL:-0}" = 1 ] && { echo "error: unknown flag \`shell'"; exit 1; }
+    eval "set -- $cmd"; fs="$st/fakesnap"; mkdir -p "$fs/bin"; cp "$(dirname "$0")/../../../spike/bin/lib-wait.sh" "$fs/bin/"
+    # P_FLIP=arch|ovcfg flips one result line, as a broken guard function would, with everything else intact.
+    SNAP="$fs" SNAP_ARCH="${P_ARCH:-arm64}" bash -c "$6" 2>&1 \
+      | case "${P_FLIP:-}" in arch) sed 's/^arch=no-ov$/arch=has-ov/' ;; ovcfg) sed 's/^ovcfg=uses-ov$/ovcfg=no/' ;; *) cat ;; esac ;;
   *) echo "responder: unexpected command: $cmd" >&2; exit 98 ;;
 esac
