@@ -20,11 +20,11 @@ mkdir -p "$T/www"
 PORT=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 python3 -I -m http.server "$PORT" --bind 127.0.0.1 --directory "$T/www" > "$T/srv.log" 2>&1 & SRV=$!
 for _ in $(seq 1 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-stats() {  # stats NAME [cam1_fps] [cam1_skipped] [inference]: /stats JSON for run NAME
+stats() {  # stats NAME [cam1_fps] [cam1_skipped] [inference]: /stats JSON for run NAME (camera_fps = detect output, 5)
   mkdir -p "$T/www/$1"
   cat > "$T/www/$1/stats" <<EOF
-{"cameras": {"cam1": {"camera_fps": ${2:-25.1}, "process_fps": 5.0, "skipped_fps": ${3:-0.0}, "detection_fps": 1.2, "pid": 1010, "capture_pid": 1011, "ffmpeg_pid": 1002, "ffmpeg_cmd": "rtsp://admin:$CAN@192.0.2.50/x"},
-             "cam2": {"camera_fps": 15.0, "process_fps": 5.0, "skipped_fps": 0.0, "detection_fps": 0.4, "pid": 1012, "capture_pid": 1013, "ffmpeg_pid": 1004},
+{"cameras": {"cam1": {"camera_fps": ${2:-5.1}, "process_fps": 5.0, "skipped_fps": ${3:-0.0}, "detection_fps": 1.2, "pid": 1010, "capture_pid": 1011, "ffmpeg_pid": 1002, "ffmpeg_cmd": "rtsp://admin:$CAN@192.0.2.50/x"},
+             "cam2": {"camera_fps": 5.0, "process_fps": 5.0, "skipped_fps": 0.0, "detection_fps": 0.4, "pid": 1012, "capture_pid": 1013, "ffmpeg_pid": 1004},
              "bad name;x": {"camera_fps": 1}},
  "detectors": {"coral": {"inference_speed": ${4:-8.5}, "pid": 1005, "detection_start": 0.0}},
  "cpu_usages": {"1002": {"cpu": "48.0", "mem": "1.2", "cmdline": "ffmpeg -i rtsp://admin:$CAN@192.0.2.50/x"}, "1005": {"cpu": "3.0", "mem": "2.0"}},
@@ -100,7 +100,7 @@ PRE='touch "$T/$n/st/gone"' run g1 --; check "master gone: exit 3" 3 "$(rc g1)";
 # --- happy ---
 run h1 --
 check "happy: exit 0" 0 "$(rc h1)"
-has   "happy: summary" "observe: 7 PASS, 0 FAIL, 11 INFO" "$(O h1)"
+has   "happy: summary" "observe: 7 PASS, 0 FAIL, 12 INFO" "$(O h1)"
 has   "units PASS" "PASS: units: frigate go2rtc nginx certsync active; NRestarts frigate=0 go2rtc=0 nginx=0 certsync=0" "$(O h1)"
 has   "memory INFO" "INFO: memory: slice MemoryCurrent 1024 MB, MemoryPeak 1126 MB, MemoryMax 4096 MB; memory.stat anon 700 MB, shmem 140 MB, file 200 MB" "$(O h1)"
 has   "memory per unit, go2rtc included" "frigate 858/906 go2rtc 57/67 nginx 19/24 certsync 3/4" "$(O h1)"
@@ -114,8 +114,9 @@ has   "exec age from the start time" "running 1000 s" "$(O h1)"
 has   "shm frames cam1" "cam1=50" "$(O h1)"; has "shm frames cam2" "cam2=50" "$(O h1)"
 has   "shm Frigate's own storage numbers" "used 140.5 of 7972.1" "$(O h1)"
 has   "stats PASS" "PASS: stats: /stats read (Frigate uptime 1800 s)" "$(O h1)"
-has   "camera cam1 PASS with Frigate's %CPU" "PASS: camera cam1: camera_fps 25.1 (native 25), process_fps 5, skipped_fps 0, detection_fps 1.2; ffmpeg %CPU 48" "$(O h1)"
-has   "camera cam2 PASS" "PASS: camera cam2: camera_fps 15 (native 15)" "$(O h1)"
+has   "camera cam1 PASS against detect fps 5 by default" "PASS: camera cam1: camera_fps 5.1 (detect fps 5), process_fps 5, skipped_fps 0, detection_fps 1.2; ffmpeg %CPU 48" "$(O h1)"
+has   "camera cam2 PASS against detect fps 5 by default" "PASS: camera cam2: camera_fps 5 (detect fps 5)" "$(O h1)"
+has   "decode headroom: each detect ffmpeg's %CPU, by stream (record-only and exec ffmpegs left out)" "INFO: decode headroom (detect ffmpeg %CPU over the window; 100 = one core; a decode slower than real time also lowers camera_fps): cam1 50.0, cam2_sub 3.0" "$(O h1)"
 has   "detector PASS" "PASS: detector coral: inference_speed 8.5 ms, %CPU 3" "$(O h1)"
 has   "coral usb id" "INFO: coral usb: 18d1:9302" "$(O h1)"
 has   "host line" "INFO: host: load 1.20 1.10 0.90; MemAvailable 11718 MB; swap used 0 MB; PSI some avg60 memory 0.50 cpu 2.50; Home Assistant HTTP 200 in 0 ms" "$(O h1)"
@@ -143,11 +144,11 @@ check "--prev, cam2's exec ffmpeg restarted: exit 1" 1 "$(rc p3)"; has "names th
 # --- failures ---
 PRE='sed -i "s/^ActiveState=active/ActiveState=failed/" "$T/$n/tree/units/snap.frigate.go2rtc.service"' run f1 --
 check "go2rtc failed: exit 1" 1 "$(rc f1)"; has "units FAIL names it" "FAIL: units: go2rtc is failed;" "$(O f1)"
-PRE='stats "$n" 20.0' run f2 --;          check "cam1 at 20 of 25 fps: exit 1" 1 "$(rc f2)"; has "camera FAIL" "FAIL: camera cam1: camera_fps 20 (native 25)" "$(O f2)"
-run f2b -- --fps cam1=20,cam2=15;          check "--fps cam1=20: 25.1 passes" 0 "$(rc f2b)"
-PRE='stats "$n" 25.0 1.5' run f3 --;      check "cam1 skipped_fps 1.5: exit 1" 1 "$(rc f3)"; has "skipped FAIL" "skipped_fps 1.5" "$(O f3)"
+PRE='stats "$n" 4.0' run f2 --;           check "cam1 at 4 of 5 fps: exit 1" 1 "$(rc f2)"; has "camera FAIL" "FAIL: camera cam1: camera_fps 4 (detect fps 5)" "$(O f2)"
+PRE='stats "$n" 4.0' run f2b -- --fps cam1=4,cam2=5; check "--fps cam1=4: 4 passes" 0 "$(rc f2b)"
+PRE='stats "$n" 5.0 1.5' run f3 --;      check "cam1 skipped_fps 1.5: exit 1" 1 "$(rc f3)"; has "skipped FAIL" "skipped_fps 1.5" "$(O f3)"
 run f4 OBS_URL="http://127.0.0.1:1/none" --; check "/stats unreachable: exit 1" 1 "$(rc f4)"; has "stats FAIL" "FAIL: stats: /stats not readable" "$(O f4)"
-PRE='stats "$n" 25.0 0.0 0' run f5 --;    check "inference_speed 0: exit 1" 1 "$(rc f5)"; has "detector FAIL" "FAIL: detector coral: inference_speed '0'" "$(O f5)"
+PRE='stats "$n" 5.0 0.0 0' run f5 --;    check "inference_speed 0: exit 1" 1 "$(rc f5)"; has "detector FAIL" "FAIL: detector coral: inference_speed '0'" "$(O f5)"
 PRE='printf "2001\n2002\n2003\n" > "$T/$n/tree/root/sys/fs/cgroup/$SL/snap.frigate.go2rtc.service/cgroup.procs"' run f6 --
 check "2 exec ffmpegs: exit 1" 1 "$(rc f6)"; has "exec FAIL" "FAIL: go2rtc exec: 2 exec ffmpegs, want 3;" "$(O f6)"
 run f7 OBS_LEAK="$CAN" --; check "a credential-like line from the hub: exit 1" 1 "$(rc f7)"; has "hygiene FAIL, count only" "FAIL: hygiene: 11 credential-like line(s)" "$(O f7)"; noleak f7
@@ -156,6 +157,9 @@ PRE='sed -i "s#^ControlGroup=.*#ControlGroup=/nope.slice#" "$T/$n/tree/units/$SL
 check "slice cgroup unreadable: exit 1" 1 "$(rc f9)"; has "sample FAIL" "FAIL: sample: incomplete" "$(O f9)"
 run w1 -- --window 3; check "--window 3: exit 0" 0 "$(rc w1)"; check "--window 3 is the hub sleep" 3 "$(cat "$T/w1/tree/slept")"
 has "--window 3: the window is 10 s of fake clock" "over the 10.000 s window" "$(O w1)"
+
+# every tests/hub script runs directly (git mode 100755), as the orchestrator calls them
+for f in tests/hub/*.sh; do check "$f is executable in git" 100755 "$(git ls-files -s "$f" | awk '{ print $1 }')"; done
 
 [ "$fail" = 0 ] && echo "observe.test: all ok" || echo "observe.test: FAILURES"
 exit "$fail"

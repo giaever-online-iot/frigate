@@ -14,19 +14,23 @@
 #      or m7c-clips/<file>); a whole command line is never printed.
 #   2. Frigate's /stats through the snap's own python (`snap run --shell frigate.frigate`, the script on stdin,
 #      urllib to 127.0.0.1:5001 with the Remote-User/Remote-Role headers): numbers only, for known keys only.
-# PASS/FAIL: the 4 units active (and NRestarts unchanged since --prev); per camera camera_fps >= 0.9 x the input's
-# native fps (--fps, default cam1=25,cam2=15) and skipped_fps 0; the detector's inference_speed > 0; go2rtc runs
+# PASS/FAIL: the 4 units active (and NRestarts unchanged since --prev); per camera camera_fps >= 0.9 x the camera's
+# DETECT fps (--fps, default cam1=5,cam2=5: make-config's detect.fps) and skipped_fps 0. Frigate's camera_fps is the
+# rate of the detect ffmpeg's OUTPUT after its fps filter, so it equals detect.fps, not the input's 25 or 15 fps; the
+# decode still runs at the input's native rate. A decode slower than real time lowers camera_fps (the live input is
+# paced), and the detect ffmpeg's %CPU over the window is printed as INFO "decode headroom" (100 = one core; a
+# decode that cannot keep up pins its threads). The detector's inference_speed > 0; go2rtc runs
 # --execs exec ffmpegs (default 3: cam1, cam2, cam2_sub; 0 skips) and none restarted since --prev (same PID and
 # start time); /stats readable; no credential-like text in what the hub sent. Everything else is INFO, numeric.
 # Evidence: <out>/sample.txt, stats.txt (scrubbed), results.txt, counters.txt (the next run's --prev).
 # Usage: M7C_HUB_SOCK=<socket> M7C_HUB_TARGET=<target> tests/hub/observe.sh [--prev <evidence dir>] [--out <dir>]
-#          [--window S] [--fps cam1=25,cam2=15] [--execs N] [--ha-port 8123]
+#          [--window S] [--fps cam1=5,cam2=5] [--execs N] [--ha-port 8123]
 # Exit: 0 all PASS; 1 any FAIL; 2 usage; 3 the ssh master is gone (LOUD). Test hook: M7C_OBSERVE_ROOT (a path
 # prefix for /proc, /sys and /dev/shm on the hub; empty in real use).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); EXEC="$HERE/ssh-exec.sh"
 usage() { echo "usage: observe.sh [--prev DIR] [--out DIR] [--window S] [--fps cam=N,...] [--execs N] [--ha-port N]" >&2; exit 2; }
-PREV=""; OUT=""; WIN=10; FPS="cam1=25,cam2=15"; NEX=3; PORT=8123
+PREV=""; OUT=""; WIN=10; FPS="cam1=5,cam2=5"; NEX=3; PORT=8123
 while [ $# -gt 0 ]; do
   case "$1" in
     --prev) [ $# -ge 2 ] || usage; PREV=$2; shift 2 ;;
@@ -229,6 +233,16 @@ for k in "${!V[@]}"; do
   read -r u c r s _ <<<"${V[$k]}"
   PROCS+="$(calc "printf \"%.1f\", ($b_t - $a_t) / $CLK / $DT * 100") $u:$c:$r:$s"$'\n'
 done
+HEAD=""
+for k in "${!V[@]}"; do   # decode headroom: frigate's detect ffmpegs (role d), by stream
+  case "$k" in label.*) ;; *) continue ;; esac
+  pid=${k#label.}; read -r u c r s _ <<<"${V[$k]}"
+  if [ "$u" != frigate ] || [ "$c" != ffmpeg ] || [[ "$r" != *d* ]]; then continue; fi
+  read -r a_t a_s <<<"${V[a.proc.$pid]:-}"; read -r b_t b_s <<<"${V[b.proc.$pid]:-}"
+  { num "${a_t:-}" && num "${b_t:-}" && [ "${a_s:-}" = "${b_s:-}" ] && calc "exit !($DT > 0)"; } || continue
+  HEAD+="$s $(calc "printf \"%.1f\", ($b_t - $a_t) / $CLK / $DT * 100")"$'\n'
+done
+info "decode headroom (detect ffmpeg %CPU over the window; 100 = one core; a decode slower than real time also lowers camera_fps): $(printf '%s' "$HEAD" | sort | awk 'NF { printf "%s%s %s", (n++ ? ", " : ""), $1, $2 }')"
 info "processes %CPU over the window (unit:comm:role:stream): $(printf '%s' "$PROCS" | sort -rn | head -n 12 | awk '{ printf "%s %s%%; ", $2, $1 }' | sed 's/; $//')"
 
 # --- go2rtc exec ffmpegs ---------------------------------------------------------------------------------------
@@ -266,7 +280,7 @@ else
   IFS=',' read -r -a FA <<<"$FPS"
   for cf in "${FA[@]}"; do
     c=${cf%%=*}; want=${cf#*=}; cfps=${V[cam.$c.camera_fps]:-}; sk=${V[cam.$c.skipped_fps]:-}
-    line="camera_fps ${cfps:-?} (native $want), process_fps ${V[cam.$c.process_fps]:-?}, skipped_fps ${sk:-?}, detection_fps ${V[cam.$c.detection_fps]:-?}"
+    line="camera_fps ${cfps:-?} (detect fps $want), process_fps ${V[cam.$c.process_fps]:-?}, skipped_fps ${sk:-?}, detection_fps ${V[cam.$c.detection_fps]:-?}"
     cp=${V[cam.$c.ffmpeg_pid]:-}; [ -n "$cp" ] && line="$line; ffmpeg %CPU ${V[cpu.$cp.cpu]:-?}, capture %CPU ${V[cpu.${V[cam.$c.capture_pid]:-x}.cpu]:-?}, process %CPU ${V[cpu.${V[cam.$c.pid]:-x}.cpu]:-?} (Frigate's own)"
     if num "$cfps" && num "$sk" && calc "exit !($cfps >= $want * 0.9 && $sk == 0)"; then pass "camera $c: $line"
     else fail "camera $c: $line"; fi
