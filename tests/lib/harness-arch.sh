@@ -6,9 +6,10 @@ HOST_ARCH="${HARNESS_ARCH:-$(dpkg --print-architecture)}"
 # Artifact glob for an arch: frigate_<ver>_<arch>.snap and frigate-remote_<arch>.snap.
 artifact_glob() { echo "frigate*_$1.snap"; }
 
-# Size floors in bytes. amd64 is the M8 harness literal (802 MiB); arm64 is recorded in M7c T14.
+# Size floors in bytes. amd64 is the M8 harness literal (802 MiB); arm64 is floor(0.85 x the first
+# real arm64 artifact, 916746240 B) to a whole MiB = 743 MiB (M7c T14).
 AMD64_SIZE_FLOOR=840957952
-ARM64_SIZE_FLOOR=""
+ARM64_SIZE_FLOOR=779091968
 
 # Prints the floor for an arch (empty = none recorded yet). Unknown arch: return 1.
 size_floor_for_arch() {

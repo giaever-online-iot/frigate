@@ -8,7 +8,10 @@ check "artifact_glob arm64"              "frigate*_arm64.snap" "$(bash -c ". $L;
 F=$(bash -c ". $L; size_floor_for_arch amd64")
 check "amd64 floor is a positive MiB multiple" 0 "$( [ -n "$F" ] && [ "$F" -gt 0 ] && [ $((F % 1048576)) -eq 0 ]; echo $?)"
 check "amd64 floor equals AMD64_SIZE_FLOOR"    "$F" "$(bash -c ". $L; echo \$AMD64_SIZE_FLOOR")"
-check "arm64 floor empty until T14"      ""    "$(bash -c ". $L; size_floor_for_arch arm64")"
+G=$(bash -c ". $L; size_floor_for_arch arm64")
+check "arm64 floor is a positive MiB multiple" 0 "$( [ -n "$G" ] && [ "$G" -gt 0 ] && [ $((G % 1048576)) -eq 0 ]; echo $?)"
+check "arm64 floor equals ARM64_SIZE_FLOOR"    "$G" "$(bash -c ". $L; echo \$ARM64_SIZE_FLOOR")"
+check "arm64 floor = floor(0.85 x 916746240 B) to MiB (T14)" 779091968 "$G"
 bash -c ". $L; size_floor_for_arch riscv64" >/dev/null 2>&1; check "unknown arch -> exit 1" 1 $?
 check "scaled default x1"                30    "$(bash -c ". $L; scaled 30")"
 check "scaled x6"                        180   "$(SPIKE_TIME_SCALE=6 bash -c ". $L; scaled 30")"
