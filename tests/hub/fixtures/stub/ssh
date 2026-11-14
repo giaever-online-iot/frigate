@@ -20,7 +20,8 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$target" ] || { echo "stub ssh: no target" >&2; exit 255; }
 [ -e "$st/gone" ] && { echo "Connection closed by UNKNOWN port 65535" >&2; exit 255; }
-if [ "$check" = 1 ]; then echo "Master running (pid=4242)" >&2; exit 0; fi
+# A check that reads stdin would swallow what the caller meant for the session: model a greedy ssh.
+if [ "$check" = 1 ]; then [ -n "${STUB_GREEDY_CHECK:-}" ] && cat > /dev/null; echo "Master running (pid=4242)" >&2; exit 0; fi
 n=$(( $(cat "$st/sessions" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$st/sessions"
 if [ -f "$st/die-after" ] && [ "$n" -gt "$(cat "$st/die-after")" ]; then
   : > "$st/gone"; echo "mux_client_request_session: read from master failed: Broken pipe" >&2; exit 255

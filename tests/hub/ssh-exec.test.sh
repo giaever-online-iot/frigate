@@ -71,6 +71,9 @@ PRE='touch "$T/$n/corrupt"' IN="$T/src.bin" run p2 -- put "$T/src.bin" "$D/g.sna
 check "put, damaged copy: exit 1" 1 "$(rc p2)"
 has   "put, damaged copy: SHA MISMATCH" "SHA MISMATCH" "$T/p2.err"
 check "put, damaged copy: the bad file is removed" 1 "$([ -e "$D/g.snap" ]; echo $?)"
+printf 'piped\n' > "$T/pipe.in"
+IN="$T/pipe.in" run p7 STUB_GREEDY_CHECK=1 -- exec 'cat'
+check "exec: stdin reaches the session even if the master check would read stdin" "piped" "$(cat "$T/p7.out")"
 run p3 -- put "$T/src.bin" relative/f;          check "put: relative hub path: exit 2" 2 "$(rc p3)"
 run p4 -- put "$T/src.bin" "$T/a b";            check "put: hub path with a space: exit 2" 2 "$(rc p4)"
 run p5 -- put "$T/src.bin" "$T/x/../y";         check "put: hub path with ..: exit 2" 2 "$(rc p5)"

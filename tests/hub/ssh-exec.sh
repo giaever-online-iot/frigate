@@ -22,7 +22,8 @@ case "$TO" in ''|*[!0-9]*) echo "ssh-exec: M7C_HUB_TIMEOUT must be whole seconds
 OPTS=(-F /dev/null -S "$M7C_HUB_SOCK" -o ControlMaster=no -o ProxyCommand=/bin/false -o BatchMode=yes)
 
 gone() { echo "ssh-exec: MASTER GONE: no live ssh master at \$M7C_HUB_SOCK; NOT opening a new connection (exit 3)" >&2; exit 3; }
-master_ok() { "$SSH" "${OPTS[@]}" -O check "$M7C_HUB_TARGET" >/dev/null 2>&1; }
+# </dev/null: the check must never eat the stdin meant for the session (put, or a config piped to exec).
+master_ok() { "$SSH" "${OPTS[@]}" -O check "$M7C_HUB_TARGET" >/dev/null 2>&1 </dev/null; }
 # sq STR: STR as one POSIX single-quoted word (safe for any remote login shell, not only bash).
 sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # run CMD: CMD as root on the hub through the master; stdin passes through. rc 255 + no master => exit 3.
