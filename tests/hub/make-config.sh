@@ -16,6 +16,8 @@ set +x +o xtrace   # first: no trace of any value, even under `bash -x` or an in
 #   fps 5 (the template's value). Record: the main stream. Cameras reach Frigate via go2rtc at
 #   rtsp://127.0.0.1:8554/<stream> (the snap's go2rtc-config-gen.py convention: a `go2rtc:` block in config.yml).
 # D21 edits: the testclip camera removed, mqtt.enabled false, ffmpeg.hwaccel_args "", record.continuous.days 1.
+# Also record.alerts.retain.days 1 and record.detections.retain.days 1 (0.18.2 frigate/config/camera/record.py:
+#   ReviewRetainConfig.days, default 10): bounds the trial's disk use on the shared NVMe, not only continuous.
 # go2rtc listeners: the snap's baseline (config/go2rtc.yaml.in) binds RTSP :8554 and WebRTC :8555 on every address,
 #   and its RTSP restream has no login (W-16), so the cameras would be on the hub's LAN. go2rtc-config-gen.py
 #   deep-merges this config's `go2rtc:` block over the baseline (only api.listen is forced), so the block sets
@@ -104,6 +106,7 @@ BASE=$(printf '%s\n' "$SRC" | yq '
   .mqtt.enabled = false |
   .ffmpeg.hwaccel_args = "" |
   .record.enabled = true | .record.continuous.days = 1 |
+  .record.alerts.retain.days = 1 | .record.detections.retain.days = 1 |
   .cameras.cam1 = {"ffmpeg": {"inputs": [
       {"path": "rtsp://127.0.0.1:8554/cam1", "input_args": "preset-rtsp-restream", "roles": ["record"]},
       {"path": "rtsp://127.0.0.1:8554/cam1_sub", "input_args": "preset-rtsp-restream", "roles": ["detect"]}]},
@@ -116,10 +119,10 @@ LST=""; [ -n "$RL" ] && LST+=$'  rtsp:\n    listen: "'"$RL"$'"\n'; [ -n "$WL" ] 
 printf -v G2 'go2rtc:\n%s  streams:\n    cam1:\n      - "rtsp://admin:%s@%s%s"\n    cam1_sub:\n      - "rtsp://admin:%s@%s%s"\n    cam2:\n      - "rtsp://admin:%s@%s%s"\n    cam2_sub:\n      - "rtsp://admin:%s@%s%s"\n' \
   "$LST" "${PW[0]}" "${IPS[0]}" "$MAIN" "${PW[0]}" "${IPS[0]}" "$SUB" "${PW[1]}" "${IPS[1]}" "$MAIN" "${PW[1]}" "${IPS[1]}" "$SUB"
 printf -v CFG '%s\n%s\n%s' "# M7c hub config (spec D21), written by tests/hub/make-config.sh; the rendered copy is config.yml.pre-h4." "$BASE" "$G2"
-got=$(printf '%s' "$CFG" | yq -r '[(.cameras | keys | join(",")), (.go2rtc.streams | keys | length), (.ffmpeg.hwaccel_args == ""), .mqtt.enabled, .record.continuous.days, (.detectors | has("coral")), (.go2rtc.rtsp.listen // ""), (.go2rtc.webrtc.listen // "")] | map(tostring) | join(" ")' - 2>/dev/null)
+got=$(printf '%s' "$CFG" | yq -r '[(.cameras | keys | join(",")), (.go2rtc.streams | keys | length), (.ffmpeg.hwaccel_args == ""), .mqtt.enabled, .record.continuous.days, .record.alerts.retain.days, .record.detections.retain.days, (.detectors | has("coral")), (.go2rtc.rtsp.listen // ""), (.go2rtc.webrtc.listen // "")] | map(tostring) | join(" ")' - 2>/dev/null)
 tc=$(printf '%s' "$CFG" | grep -c testclip)
-if [ "$got" != "cam1,cam2 4 true false 1 true $RL $WL" ] || [ "$tc" != 0 ]; then die 5 "the built config failed its own check"; fi
-say "built: 2 cameras, 4 go2rtc streams, testclip 0, hwaccel_args empty, mqtt off, continuous.days 1, detector coral, go2rtc rtsp ${RL:-baseline :8554} webrtc ${WL:-baseline :8555}"
+if [ "$got" != "cam1,cam2 4 true false 1 1 1 true $RL $WL" ] || [ "$tc" != 0 ]; then die 5 "the built config failed its own check"; fi
+say "built: 2 cameras, 4 go2rtc streams, testclip 0, hwaccel_args empty, mqtt off, continuous.days 1, alerts/detections retain.days 1, detector coral, go2rtc rtsp ${RL:-baseline :8554} webrtc ${WL:-baseline :8555}"
 
 # --- write: backup once, new file, sha compare, move ----------------------------------------------------
 hub BK "if [ -f $C/config.yml.pre-h4 ]; then echo kept; else cp $C/config.yml $C/config.yml.pre-h4.m7c-part && chown root:root $C/config.yml.pre-h4.m7c-part && chmod 0600 $C/config.yml.pre-h4.m7c-part && mv -f $C/config.yml.pre-h4.m7c-part $C/config.yml.pre-h4 && echo created; fi" \
