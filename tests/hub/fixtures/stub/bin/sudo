@@ -1,0 +1,4 @@
+#!/bin/sh
+# Fake sudo for the hub stubs: requires -n (never prompt), then runs the rest as the current user.
+[ "${1:-}" = -n ] || { echo "stub sudo: called without -n" >&2; exit 1; }
+shift; exec "$@"
