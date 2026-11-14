@@ -25,6 +25,18 @@ set +x +o xtrace   # first: no trace of any value, even under `bash -x` or an in
 #   127.0.0.1:8555); an empty value leaves the baseline's LAN bind. Frigate's own ffmpeg reads rtsp://127.0.0.1:8554.
 #   With WebRTC on loopback a LAN browser's live view cannot use WebRTC and uses MSE through nginx instead.
 #
+# M7C_SOURCE=clip (W-7 Q7 answer 1, the synthetic H.265 stand-in for cameras that refuse RTSP): NOTHING in
+#   M7C_ENV_DIR is read (no cameras.pairs, no env, no key file, no camera login at all). The cameras are go2rtc
+#   exec sources that loop the clips from tests/hub/make-clips.sh with the snap's own ffmpeg and `-c copy` (no
+#   re-encode on the hub): `exec:<ffmpeg> -hide_banner -loglevel warning -re -stream_loop -1 -i <clip> -c copy -an
+#   -metadata title=m7c-<stream> -f rtsp {output}`. The title only makes the lines distinct: go2rtc 1.9.14 keys an
+#   exec source by its line, and cam1 and cam2 loop the same clip (identical lines collide: DESCRIBE 404). Clips in M7C_CLIP_DIR (default /var/snap/frigate/common/m7c-clips, readable by the snap's
+#   apps): main-1080p25.mp4 (1080p25) and sub-360p15.mp4 (360p15). ffmpeg: M7C_CLIP_FFMPEG (default
+#   /snap/frigate/current/usr/lib/ffmpeg/8.0/bin/ffmpeg; config.yml gets no __SNAP__ replacement, only the
+#   baseline does). Streams: cam1 = main (ONE input, roles detect+record: detect decodes 1080p25 at its native
+#   size, the worst case), cam2 = main (record) + cam2_sub = sub (detect). Before the build the hub must have
+#   both clips non-empty and the ffmpeg executable (else exit 9); their hub sha256 are printed. Every other D21
+#   edit, the binds, the backup, the sha compare and validate-config are the same as in the camera mode.
 # Secret hygiene: umask 077; xtrace off; the codes and addresses live only in shell variables and travel only on
 # stdin (to yq for the final self-check, to the hub for the write), never on a command line or in a child's
 # environment; no file on the laptop; output is counts, rc and "ok" or an error code. The hub copy is written to
@@ -33,7 +45,8 @@ set +x +o xtrace   # first: no trace of any value, even under `bash -x` or an in
 # Restore: sudo -n cp -p <config dir>/config.yml.pre-h4 <config dir>/config.yml
 # Exit: 0 ok; 2 inputs or usage; 3 the ssh master is gone; 4 frigate.frigate is running; 5 the source is not the
 # rendered H4 config (or the built config failed its own check); 6 key file codes; 7 the hub write failed;
-# 8 validate-config says invalid.
+# 8 validate-config says invalid; 9 (clip mode) a clip is missing or empty on the hub, or its ffmpeg is not
+# executable there.
 set -uo pipefail
 umask 077
 unset BASH_XTRACEFD
@@ -43,8 +56,16 @@ say() { echo "make-config: $*"; }
 die() { echo "make-config: error E$1: $2" >&2; exit "$1"; }
 [ $# -eq 0 ] || die 2 "usage: make-config.sh (no arguments; inputs come from M7C_ENV_DIR)"
 command -v yq >/dev/null || die 2 "yq is required on the laptop"
+SOURCE="${M7C_SOURCE:-cameras}"
+case "$SOURCE" in cameras|clip) ;; *) die 2 "M7C_SOURCE must be cameras (default) or clip" ;; esac
+RL="${M7C_GO2RTC_RTSP_LISTEN-127.0.0.1:8554}"; WL="${M7C_GO2RTC_WEBRTC_LISTEN-127.0.0.1:8555}"
+for l in "$RL" "$WL"; do [ -z "$l" ] || [[ "$l" =~ ^[0-9.]*:[0-9]{1,5}$ ]] || die 2 "M7C_GO2RTC_RTSP_LISTEN/M7C_GO2RTC_WEBRTC_LISTEN must be like 127.0.0.1:8554, :8554 or empty"; done
+IDS=(); IPS=(); PW=()
+CLIPD="${M7C_CLIP_DIR:-/var/snap/frigate/common/m7c-clips}"; CFF="${M7C_CLIP_FFMPEG:-/snap/frigate/current/usr/lib/ffmpeg/8.0/bin/ffmpeg}"
+CLIP_MAIN=main-1080p25.mp4; CLIP_SUB=sub-360p15.mp4
 
-# --- inputs ----------------------------------------------------------------------------------------
+# --- inputs (camera mode only: clip mode reads nothing in M7C_ENV_DIR) ---------------------------------
+read_cameras() {
 ENVD="${M7C_ENV_DIR:-$HOME/.local/state/m7c-hub}"; PAIRS="$ENVD/cameras.pairs"; ENVF="$ENVD/env"
 private() { [ -f "$1" ] && [ -r "$1" ] && [ $(( 0$(stat -c %a "$1") & 077 )) = 0 ]; }
 private "$PAIRS" || die 2 "cameras.pairs in M7C_ENV_DIR is missing, unreadable, or not private (must be 0600)"
@@ -55,14 +76,11 @@ case "$KEYFILE" in '~/'*) KEYFILE="$HOME/${KEYFILE#\~/}" ;; esac
 [ -n "$KEYFILE" ] || die 2 "env has no M7C_KEYFILE= line"
 if [ ! -f "$KEYFILE" ] || [ ! -r "$KEYFILE" ]; then die 2 "the key file named by M7C_KEYFILE is missing or unreadable"; fi
 MAIN="${M7C_RTSP_MAIN:-/Streaming/Channels/101}"; SUB="${M7C_RTSP_SUB:-/Streaming/Channels/102}"
-RL="${M7C_GO2RTC_RTSP_LISTEN-127.0.0.1:8554}"; WL="${M7C_GO2RTC_WEBRTC_LISTEN-127.0.0.1:8555}"
-for l in "$RL" "$WL"; do [ -z "$l" ] || [[ "$l" =~ ^[0-9.]*:[0-9]{1,5}$ ]] || die 2 "M7C_GO2RTC_RTSP_LISTEN/M7C_GO2RTC_WEBRTC_LISTEN must be like 127.0.0.1:8554, :8554 or empty"; done
 for p in "$MAIN" "$SUB"; do [[ "$p" =~ ^/[A-Za-z0-9/_.=-]*$ ]] || die 2 "M7C_RTSP_MAIN/M7C_RTSP_SUB must be a path like /Streaming/Channels/101"; done
 ipv4() {   # pattern match only: no here-string (bash may back one with a temp file)
   local o; [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
   for o in "${BASH_REMATCH[@]:1}"; do [[ "$o" =~ ^(0|[1-9][0-9]*)$ ]] || return 1; [ "$o" -le 255 ] || return 1; done
 }
-IDS=(); IPS=()
 while read -r id ip extra; do
   case "$id" in ''|'#'*) continue ;; esac
   [ -z "${extra:-}" ] || die 2 "cameras.pairs line $(( ${#IDS[@]} + 1 )): want '<camera id> <ipv4>'"
@@ -82,6 +100,14 @@ done < <(tr -d '\r' < "$KEYFILE" | yq -r '.["original QR Code keys"] | to_entrie
 [ "$found" = 2 ] || die 6 "$found of 2 camera codes found in the key file"
 for i in 0 1; do [[ "${PW[$i]}" =~ ^[A-Za-z0-9]{4,32}$ ]] || die 6 "the code for cam$((i + 1)) has an unexpected shape"; done
 say "2 of 2 camera codes found"
+}
+if [ "$SOURCE" = cameras ]; then read_cameras
+else
+  for p in "$CLIPD" "$CFF"; do
+    if ! [[ "$p" =~ ^/[A-Za-z0-9/_.-]+$ ]] || [[ "$p" == *..* ]]; then die 2 "M7C_CLIP_DIR/M7C_CLIP_FFMPEG must be absolute paths of [A-Za-z0-9/_.-], no '..'"; fi
+  done
+  say "clip mode: no camera login is read"
+fi
 
 # --- hub: master, stopped NVR, pristine source -------------------------------------------------------
 hub() {  # hub VAR CMD: run CMD on the hub, its output into VAR; a lost master ends everything here
@@ -98,8 +124,36 @@ hub SRC "if [ -f $C/config.yml.pre-h4 ]; then cat $C/config.yml.pre-h4; else cat
   || die 5 "cannot read the rendered config on the hub"
 shape=$(printf '%s\n' "$SRC" | yq -r '[(.cameras | keys | join(",")), (has("go2rtc") | tostring), (.detectors | keys | join(","))] | join(" ")' - 2>/dev/null)
 [ "$shape" = "testclip false coral" ] || die 5 "the source is not the rendered H4 config (want cameras=testclip, no go2rtc, detector coral)"
+if [ "$SOURCE" = clip ]; then
+  hub CL "for f in $CLIP_MAIN $CLIP_SUB; do if [ -s $CLIPD/\$f ]; then sha256sum $CLIPD/\$f; else echo \"missing \$f\"; fi; done; if [ -x $CFF ]; then echo ffmpeg-ok; else echo ffmpeg-missing; fi" \
+    || die 9 "cannot check the clips on the hub"
+  for f in "$CLIP_MAIN" "$CLIP_SUB"; do
+    h=$(printf '%s\n' "$CL" | awk -v p="$CLIPD/$f" '$2 == p && $1 ~ /^[0-9a-f]{64}$/ { print $1 }')
+    [ -n "$h" ] || die 9 "$CLIPD/$f is missing or empty on the hub; put it there first (tests/hub/ssh-exec.sh put)"
+    say "clip $f sha256 $h"
+  done
+  printf '%s\n' "$CL" | grep -qx ffmpeg-ok || die 9 "$CFF is not executable on the hub"
+fi
 
 # --- build ------------------------------------------------------------------------------------------
+if [ "$SOURCE" = clip ]; then
+  CAMS='.cameras.cam1 = {"ffmpeg": {"inputs": [
+      {"path": "rtsp://127.0.0.1:8554/cam1", "input_args": "preset-rtsp-restream", "roles": ["detect", "record"]}]},
+    "detect": {"enabled": true, "fps": 5}} |
+  .cameras.cam2 = {"ffmpeg": {"inputs": [
+      {"path": "rtsp://127.0.0.1:8554/cam2", "input_args": "preset-rtsp-restream", "roles": ["record"]},
+      {"path": "rtsp://127.0.0.1:8554/cam2_sub", "input_args": "preset-rtsp-restream", "roles": ["detect"]}]},
+    "detect": {"enabled": true, "fps": 5}}'
+else
+  CAMS='.cameras.cam1 = {"ffmpeg": {"inputs": [
+      {"path": "rtsp://127.0.0.1:8554/cam1", "input_args": "preset-rtsp-restream", "roles": ["record"]},
+      {"path": "rtsp://127.0.0.1:8554/cam1_sub", "input_args": "preset-rtsp-restream", "roles": ["detect"]}]},
+    "detect": {"enabled": true, "fps": 5}} |
+  .cameras.cam2 = {"ffmpeg": {"inputs": [
+      {"path": "rtsp://127.0.0.1:8554/cam2", "input_args": "preset-rtsp-restream", "roles": ["record"]},
+      {"path": "rtsp://127.0.0.1:8554/cam2_sub", "input_args": "preset-rtsp-restream", "roles": ["detect"]}]},
+    "detect": {"enabled": true, "fps": 5}}'
+fi
 BASE=$(printf '%s\n' "$SRC" | yq '
   ... comments = "" |
   del(.cameras.testclip) |
@@ -107,22 +161,26 @@ BASE=$(printf '%s\n' "$SRC" | yq '
   .ffmpeg.hwaccel_args = "" |
   .record.enabled = true | .record.continuous.days = 1 |
   .record.alerts.retain.days = 1 | .record.detections.retain.days = 1 |
-  .cameras.cam1 = {"ffmpeg": {"inputs": [
-      {"path": "rtsp://127.0.0.1:8554/cam1", "input_args": "preset-rtsp-restream", "roles": ["record"]},
-      {"path": "rtsp://127.0.0.1:8554/cam1_sub", "input_args": "preset-rtsp-restream", "roles": ["detect"]}]},
-    "detect": {"enabled": true, "fps": 5}} |
-  .cameras.cam2 = {"ffmpeg": {"inputs": [
-      {"path": "rtsp://127.0.0.1:8554/cam2", "input_args": "preset-rtsp-restream", "roles": ["record"]},
-      {"path": "rtsp://127.0.0.1:8554/cam2_sub", "input_args": "preset-rtsp-restream", "roles": ["detect"]}]},
-    "detect": {"enabled": true, "fps": 5}}' - 2>/dev/null) || die 5 "yq could not transform the source"
+  '"$CAMS" - 2>/dev/null) || die 5 "yq could not transform the source"
 LST=""; [ -n "$RL" ] && LST+=$'  rtsp:\n    listen: "'"$RL"$'"\n'; [ -n "$WL" ] && LST+=$'  webrtc:\n    listen: "'"$WL"$'"\n'
-printf -v G2 'go2rtc:\n%s  streams:\n    cam1:\n      - "rtsp://admin:%s@%s%s"\n    cam1_sub:\n      - "rtsp://admin:%s@%s%s"\n    cam2:\n      - "rtsp://admin:%s@%s%s"\n    cam2_sub:\n      - "rtsp://admin:%s@%s%s"\n' \
-  "$LST" "${PW[0]}" "${IPS[0]}" "$MAIN" "${PW[0]}" "${IPS[0]}" "$SUB" "${PW[1]}" "${IPS[1]}" "$MAIN" "${PW[1]}" "${IPS[1]}" "$SUB"
+if [ "$SOURCE" = clip ]; then
+  # -metadata title=m7c-<stream> (only the SDP session name) makes the three lines distinct: go2rtc 1.9.14 keys an
+  # exec source by its line, and two identical lines started at once collide (one consumer gets DESCRIBE 404).
+  X="exec:$CFF -hide_banner -loglevel warning -re -stream_loop -1 -i $CLIPD"; Y="-c copy -an -metadata title=m7c-"; Z="-f rtsp {output}"
+  printf -v G2 'go2rtc:\n%s  streams:\n    cam1:\n      - "%s/%s %scam1 %s"\n    cam2:\n      - "%s/%s %scam2 %s"\n    cam2_sub:\n      - "%s/%s %scam2_sub %s"\n' \
+    "$LST" "$X" "$CLIP_MAIN" "$Y" "$Z" "$X" "$CLIP_MAIN" "$Y" "$Z" "$X" "$CLIP_SUB" "$Y" "$Z"
+  NS=3; KIND=" (clip)"
+else
+  printf -v G2 'go2rtc:\n%s  streams:\n    cam1:\n      - "rtsp://admin:%s@%s%s"\n    cam1_sub:\n      - "rtsp://admin:%s@%s%s"\n    cam2:\n      - "rtsp://admin:%s@%s%s"\n    cam2_sub:\n      - "rtsp://admin:%s@%s%s"\n' \
+    "$LST" "${PW[0]}" "${IPS[0]}" "$MAIN" "${PW[0]}" "${IPS[0]}" "$SUB" "${PW[1]}" "${IPS[1]}" "$MAIN" "${PW[1]}" "${IPS[1]}" "$SUB"
+  NS=4; KIND=""
+fi
 printf -v CFG '%s\n%s\n%s' "# M7c hub config (spec D21), written by tests/hub/make-config.sh; the rendered copy is config.yml.pre-h4." "$BASE" "$G2"
 got=$(printf '%s' "$CFG" | yq -r '[(.cameras | keys | join(",")), (.go2rtc.streams | keys | length), (.ffmpeg.hwaccel_args == ""), .mqtt.enabled, .record.continuous.days, .record.alerts.retain.days, .record.detections.retain.days, (.detectors | has("coral")), (.go2rtc.rtsp.listen // ""), (.go2rtc.webrtc.listen // "")] | map(tostring) | join(" ")' - 2>/dev/null)
 tc=$(printf '%s' "$CFG" | grep -c testclip)
-if [ "$got" != "cam1,cam2 4 true false 1 1 1 true $RL $WL" ] || [ "$tc" != 0 ]; then die 5 "the built config failed its own check"; fi
-say "built: 2 cameras, 4 go2rtc streams, testclip 0, hwaccel_args empty, mqtt off, continuous.days 1, alerts/detections retain.days 1, detector coral, go2rtc rtsp ${RL:-baseline :8554} webrtc ${WL:-baseline :8555}"
+if [ "$got" != "cam1,cam2 $NS true false 1 1 1 true $RL $WL" ] || [ "$tc" != 0 ]; then die 5 "the built config failed its own check"; fi
+if [ "$SOURCE" = clip ] && printf '%s' "$CFG" | grep -q '://[^ "]*@'; then die 5 "the built clip config has a URL with a login"; fi
+say "built: 2 cameras$KIND, $NS go2rtc streams, testclip 0, hwaccel_args empty, mqtt off, continuous.days 1, alerts/detections retain.days 1, detector coral, go2rtc rtsp ${RL:-baseline :8554} webrtc ${WL:-baseline :8555}"
 
 # --- write: backup once, new file, sha compare, move ----------------------------------------------------
 hub BK "if [ -f $C/config.yml.pre-h4 ]; then echo kept; else cp $C/config.yml $C/config.yml.pre-h4.m7c-part && chown root:root $C/config.yml.pre-h4.m7c-part && chmod 0600 $C/config.yml.pre-h4.m7c-part && mv -f $C/config.yml.pre-h4.m7c-part $C/config.yml.pre-h4 && echo created; fi" \
@@ -147,7 +205,7 @@ say "validate-config rc=$vrc invalid; its error lines, masked:"
 n=0
 while IFS= read -r line; do
   case "$line" in *[Pp][Aa][Ss][Ss][Ww]*) continue ;; esac
-  for i in 0 1; do line=${line//"${PW[$i]}"/<cam$((i + 1))-code>}; line=${line//"${IPS[$i]}"/<cam$((i + 1))-ip>}; done
+  for i in "${!PW[@]}"; do line=${line//"${PW[$i]}"/<cam$((i + 1))-code>}; line=${line//"${IPS[$i]}"/<cam$((i + 1))-ip>}; done
   line=$(printf '%s\n' "$line" | sed -E 's#://[^@/[:space:]]+@#://<redacted>@#g')
   printf '  %s\n' "$line"; n=$((n + 1)); [ "$n" -ge 20 ] && break
 done < <(printf '%s\n' "$VOUT" | grep -iE 'error|invalid|fail|exception|cameras' )
