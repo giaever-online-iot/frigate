@@ -24,7 +24,7 @@ check "usage sends no hub command" 0 "$(cat "$T"/u?/st/cmds | wc -l)"
 # --- happy path: every check PASSes ---
 run h1 -- --sha "$SHA"
 check "all good: exit 0" 0 "$(rc h1)"
-has   "version PASS" "PASS: V5 version: frigate 0.18.2 rx1 installed" "$(RES h1)"
+has   "version PASS" "PASS: V5 version: frigate 0.18.2 rx1 installed; frigate.frigate and frigate.go2rtc stopped" "$(RES h1)"
 has   "bytes PASS" "PASS: V5 bytes: /var/lib/snapd/snaps/frigate_x1.snap has sha256 $SHA" "$(RES h1)"
 has   "plugs PASS" "PASS: V5 plugs: raw-usb hardware-observe mount-observe shm-private connected" "$(RES h1)"
 has   "layout PASS" "PASS: V5 layout: /etc/OpenCL/vendors and intel-opencl each list exactly .keep (D7)" "$(RES h1)"
@@ -39,10 +39,15 @@ check "no --sha: exit 0" 0 "$(rc h2)"
 has   "no --sha: bytes INFO not checked" "INFO: V5 bytes: not checked (no --sha given)" "$(RES h2)"
 
 # --- precondition: installed and STOPPED, else nothing runs ---
-run s1 P_ACTIVE=frigate.nginx --
-check "a frigate service active: exit 1" 1 "$(rc s1)"
-has   "says which service" "FAIL: precondition: frigate services must be stopped; active: frigate.nginx" "$(RES s1)"
+run s1 P_ACTIVE=frigate.frigate --
+check "frigate.frigate active: exit 1" 1 "$(rc s1)"
+has   "says which service" "FAIL: precondition: frigate.frigate and frigate.go2rtc must be stopped; active: frigate.frigate" "$(RES s1)"
 hasnt "no probe ran" "imports-probe" "$(C s1)"; hasnt "no coral probe ran" "coral-probe" "$(C s1)"
+run s3 P_ACTIVE=frigate.go2rtc --
+check "frigate.go2rtc active: exit 1" 1 "$(rc s3)"; hasnt "go2rtc active: no probe ran" "imports-probe" "$(C s3)"
+run s4 P_ACTIVE=frigate.nginx --
+check "only nginx active (configure hook): probes run, exit 0" 0 "$(rc s4)"
+has   "nginx active: INFO" "INFO: precondition: also active (allowed, the configure hook starts them): frigate.nginx" "$(RES s4)"
 run s2 P_INSTALLED=0 --
 check "not installed: exit 1" 1 "$(rc s2)"
 has   "not installed: says so" "FAIL: precondition: frigate is not installed" "$(RES s2)"

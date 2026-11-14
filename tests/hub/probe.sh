@@ -5,6 +5,7 @@
 # tensorflow import under nice -n 19), V18 on the hub (Coral present: the delegate must load and infer).
 # It starts no daemon, changes no config, and writes only the probes' own $SNAP_COMMON/spike-results/*.json.
 # The hub has no jq or curl: JSON is read back with cat and parsed here.
+# Precondition: frigate.frigate and frigate.go2rtc stopped (nginx/certsync may run: the configure hook starts them).
 # Usage: M7C_HUB_SOCK=<socket> M7C_HUB_TARGET=<target> tests/hub/probe.sh [--sha <sha256>] [--out <dir>]
 # Prints PASS/FAIL/INFO lines in the battery's style; evidence in <dir> (default
 # ~/.cache/frigate-m7c-evidence/hub/probe-<time>). Every saved or printed line drops password lines and URL
@@ -54,12 +55,16 @@ if ! g snap-list 'snap list frigate'; then fail "precondition: frigate is not in
 ROW=$(awk '$1 == "Name" && $3 == "Rev" { h = 1; next } h && $1 == "frigate" { print; exit }' "$OUT/snap-list.txt")
 VER=$(awk '{ print $2 }' <<<"$ROW"); REV=$(awk '{ print $3 }' <<<"$ROW")
 g services 'snap services frigate' || true
-ACTIVE=$(awk '$1 ~ /^frigate\./ && $3 == "active" { printf "%s ", $1 }' "$OUT/services.txt" | sed 's/ $//')
-if [ -n "$ACTIVE" ]; then fail "precondition: frigate services must be stopped; active: $ACTIVE (nothing probed)"; exit 1; fi
+# frigate.frigate and frigate.go2rtc must be stopped. nginx and certsync may be active: the configure hook starts
+# them on every `snap set` (H4), and they serve nothing without the API; reported as INFO.
+ACTIVE=$(awk '($1 == "frigate.frigate" || $1 == "frigate.go2rtc") && $3 == "active" { printf "%s ", $1 }' "$OUT/services.txt" | sed 's/ $//')
+if [ -n "$ACTIVE" ]; then fail "precondition: frigate.frigate and frigate.go2rtc must be stopped; active: $ACTIVE (nothing probed)"; exit 1; fi
+OTHER=$(awk '$1 ~ /^frigate\./ && $1 != "frigate.frigate" && $1 != "frigate.go2rtc" && $3 == "active" { printf "%s ", $1 }' "$OUT/services.txt" | sed 's/ $//')
+[ -n "$OTHER" ] && info "precondition: also active (allowed, the configure hook starts them): $OTHER"
 if [ -z "$VER" ] || [ -z "$REV" ]; then fail "precondition: cannot read the frigate row of snap list ($(F snap-list | one_line))"; exit 1; fi
 
 # --- V5 version, bytes, plugs ---------------------------------------------------------------------
-pass "V5 version: frigate $VER r$REV installed; all frigate services stopped"
+pass "V5 version: frigate $VER r$REV installed; frigate.frigate and frigate.go2rtc stopped"
 if [ -z "$WANT_SHA" ]; then info "V5 bytes: not checked (no --sha given)"
 else
   case "$REV" in *[!A-Za-z0-9]*) fail "V5 bytes: odd revision '$REV'" ;; *)
