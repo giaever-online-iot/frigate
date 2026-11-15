@@ -258,6 +258,7 @@ What it does **not** exercise:
 - **The reset.** The hub's journal for that boot ends at 22:12:47 (21:12:47 UTC) `[HUB: journal-excerpts.txt]`, mid-stream, with no shutdown sequence, no panic and no under-voltage line. It was the maintainer's own reboot, not a fault `[REPORT: orchestrator, W-7 decision 11]`.
 - **Snapshots.** observe.sh ran at Frigate uptimes of 282 s and 1,973 s (5 min and 33 min), 7 PASS and 0 FAIL each `[HUB: run2/observe-start, run2/observe-30min]`. The exec ffmpegs kept the same PIDs, 1,972 s at the second snapshot.
 - **After the reset.** Frigate started by itself at boot; the reason is under finding b below. One snapshot at uptime 221 s (about 4 min) printed 7 PASS and 0 FAIL, with NRestarts frigate=1 and the others 0 `[HUB: run2/observe-after-reset/results.txt]`.
+- **A second reboot.** The maintainer rebooted the hub a second time at about 22:22: that boot's journal ends at 21:22:07 UTC `[HUB: journal-excerpts.txt]`. Frigate had already been stopped at 22:18 (journal) and disabled `[REPORT: orchestrator]`, so this did not affect the run. The next boot, today's, began at about 22:23 CET on 14 Nov `[REPORT: orchestrator]`.
 - **Watcher** (367 samples at 30 s): 0 TRIP lines, Frigate NRestarts 0 until the reset, and the Home Assistant unit and container untouched `[HUB: run2/watch-act-run2-19h08-to-22h13.log]`.
 
 Later runs get their own subsection after this one.
@@ -312,30 +313,37 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
   - At 22:14:14 (21:14:14 UTC) the first start raised `ValueError: Failed to load delegate from libedgetpu.so.1.0` `[HUB: journal-excerpts.txt]`.
   - The post-stop hook ran on that exit too (`db=15077376 wal_before=absent ... result=ok`). At 22:14:36 systemd logged `Scheduled restart job, restart counter is at 1` and started the unit again `[HUB: journal-excerpts.txt]`.
   - The second start was healthy: 7 PASS, NRestarts frigate=1 `[HUB: run2/observe-after-reset/results.txt]`.
-  - **The likely cause, not proven:** the Coral was not yet ready after the power loss. The kernel log shows USB resets of the Coral between 22:14:12 and 22:14:49 (21:14:12 to 21:14:49 UTC) `[REPORT: orchestrator, kernel journal; those lines are not in the excerpt]`.
-  - If that is the cause, a boot-time wait for the Coral would avoid the failed first start. That is a snap change and is not made here.
+  - **The likely cause, not proven: a race between the first delegate load and the Coral's re-enumeration.** The kernel's Coral USB lines (usb 3-1) `[HUB: journal-excerpts.txt]` show the following:
+    - **After every boot**, the Coral re-enumerates at the first load: resets, `USB disconnect`, then `new ... device number 3`.
+    - **On the normal boots** this took about 2 s and the first load worked: 14:05:04 to 14:05:06 during the probe (13:05 UTC, the boot before the reset), and 11:49:21 to 11:49:23 today (10:49 UTC), when Frigate's first start worked first time.
+    - **On the cold boot after the reset**, the first start's detector attempts came at 22:14:12 and 22:14:14 (frigate.detecto `net_admin` capability lines and Coral resets at the same seconds). The start failed at 22:14:14. The disconnect and `device number 3` came only at 22:14:49, during the second start.
+  - If that is the cause, a boot-time wait for the Coral (or a retry of the first delegate load) would avoid the failed first start. That is a snap change and is not made here.
 - **c. The hub has no RTC.** Right after a boot, journal timestamps are stale until time sync steps the clock `[HUB: journal-excerpts.txt]`:
   - every boot's first entry carries the same stamp, 2026-11-04 20:01:48 UTC;
+  - every boot's first kernel lines, before time sync, are stamped `1970-01-01T00:00:2x`;
   - the first Frigate start after the reset is stamped 21:12:31 UTC, 16 s before the previous boot's last entry (21:12:47 UTC).
 
   The first start's real time is therefore later than its stamp. The restart at 21:14:36 UTC agrees with the laptop clock: the after-reset snapshot at about 22:18 CET saw an uptime of 221 s. This is cosmetic, but it matters when reading a journal across a reset.
 - **d. Leftovers after a stop.** `/dev/shm/snap.frigate` (165 MiB) stays after Frigate stops, until the snap is removed (H9) `[REPORT: orchestrator]`.
-- **e. AppArmor denials on the hub: one capability line has no amd64 allowlist arm.** There were 11,752 denial lines on the `snap.frigate.*` profiles over all boots since 14 Nov `[HUB: journal-excerpts.txt]`:
-  - **ptrace:** 9,673 (comm `frigate.recordi` 9,164, `python3.11` 509).
-  - **open:** 2,058. These are `/proc/PID/cmdline` 2,041, `/proc/sys/vm/nr_hugepages` 7, `cpu.max` 9 (8 on the `snap.frigate\x2dmem.slice`, 1 on `system.slice`) and `/usr/share/fonts/` 1.
-  - **exec:** `/usr/bin/lscpu` 2.
-  - **mknod:** 1. The excerpt does not name it; the orchestrator reports it as imports-probe's `/dev/shm/sem.*`.
-  - **capable:** 18, by profile:
-    - frigate: net_admin 8, dac_override 3;
-    - coral-probe: net_admin 3;
-    - imports-probe: dac_override 1, dac_read_search 1;
-    - nginx: setgid 2.
+- **e. AppArmor denials on the hub: every daemon-profile denial matches the amd64 allowlist; two imports-probe capability lines have no arm.** The orchestrator applied the harness's own allowlist to the hub's journal `[HUB: journal-excerpts.txt]`. The allowlist is the regex of the `UNEXPECTED=` grep at `tests/spike-smoke.sh` line 2090, extracted verbatim from the tree of `758e992`, with sha256 `335df6b66a49b6032d5147e87477a640ae7ac389e53ae75edcc5d00072701b06` as a file with its trailing newline. It was run with `grep -cvE -f` over every `apparmor="DENIED"` kernel line on a `snap.frigate*` profile, over all boots since 14 Nov. The sha256 of that regex, extracted from `758e992`, was recomputed while writing this, as were the two non-matching lines and four matching lines rebuilt from the excerpt `[VERIFIED: sha256 equal; grep -cvE -f on the rebuilt lines]`.
+  - **Lines checked:** 11,885 at about 12:05 CET on 15 Nov, with run 3 about 15 minutes in. The class counts below are from an earlier pull of 11,752 lines, so they differ slightly from the 11,885.
+  - **Not matching: exactly 2 lines.** Both are on the imports-probe profile at 13:04:58 UTC on 14 Nov, during the stopped-state probe, with comm `python3.11`: capname `dac_read_search`, and capname `dac_override`.
+    - `dac_read_search` appears nowhere in `tests/spike-smoke.sh` `[VERIFIED: grep -c dac_read_search tests/spike-smoke.sh = 0]`.
+    - The `dac_override` arms are pinned to comm `frigate-run` and `go2rtc-run`. Frigate's own three `dac_override` lines are comm `frigate-run` and match.
+    - Whether amd64's imports-probe prints these two lines is **not checked**.
+  - **No line from the frigate, nginx, go2rtc, coral-probe or validate-config profiles falls outside the allowlist.**
+  - **The classes, from the 11,752-line pull:**
+    - **ptrace:** 9,673 (comm `frigate.recordi` 9,164, `python3.11` 509).
+    - **open:** 2,058. These are `/proc/PID/cmdline` 2,041 on the frigate profile; `/proc/sys/vm/nr_hugepages` 7 (frigate 6, validate-config 1); `cpu.max` 9 (frigate 8 on `snap.frigate\x2dmem.slice`, validate-config 1 on `system.slice`); and `/usr/share/fonts/` 1 (imports-probe).
+    - **exec:** `/usr/bin/lscpu` 2 (imports-probe).
+    - **mknod:** 1, imports-probe `/dev/shm/sem.*` at 13:04:59 UTC.
+    - **capable:** 18, by profile:
+      - frigate: net_admin 8, all comm `frigate.detecto`; dac_override 3, all comm `frigate-run`;
+      - coral-probe: net_admin 3;
+      - imports-probe: the two lines above;
+      - nginx: setgid 2.
 
-  **The arms.** `tests/spike-smoke.sh` (the amd64 denial allowlist, the `UNEXPECTED=` regex near line 2090) has an arm for every one of these classes except one. That one is the capability line `dac_read_search` on the imports-probe profile: 1 line, and `dac_read_search` appears 0 times in that file `[VERIFIED: grep -c dac_read_search tests/spike-smoke.sh = 0]`. The excerpt gives no time for it; the orchestrator places it in the 13:04 UTC probe run `[REPORT: orchestrator]`. Whether amd64 prints it too is not checked.
-
-  **The match is only class by class.** Several arms are pinned to a profile and a comm: the dac_override arms to `frigate-run` and `go2rtc-run`, frigate's net_admin arm to `frigate.detecto`, and the lscpu and fonts arms to imports-probe. The excerpt does not give the profile and comm of every line, so a line-by-line match is not shown. The imports-probe dac_override line, for one, is covered only if its comm is one of those two.
-
-  None of the denials caused a failure. recording_manager's ptrace denials are the loudest. This is a reading of the journal, not the V8 harness.
+  None of the denials caused a failure. recording_manager's ptrace denials are the loudest. This is the harness's regex applied to the hub's journal, not a V8 harness run.
 - **f. The first observe's fps expectation was wrong, and is fixed** in `77d4169` (previous section).
 
 ### NOT PROVEN on the hub, with the reason
@@ -348,7 +356,7 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
 - **V17** refresh-under-hold and `snap download`, and **F11** Store auto-connect: the snap is private on the Store, and the hub has no Store account.
 - **A Store-installed (asserted) arm64 revision:** the same reason. The hub runs the `--dangerous` install `x1`.
 - **The amd64 stop path** (finding a): not compared.
-- **AppArmor line by line** (finding e): only class by class against the amd64 arms, and one line (`dac_read_search`) has no arm.
+- **The two imports-probe capability denials on amd64** (finding e): whether amd64 prints them was not checked. The hub's lines were checked against the harness allowlist, but no V8 harness ran on arm64.
 
 ## Open at the time of writing
 
@@ -357,5 +365,5 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
 - The D13b number. It needs anon + shmem under real detection load.
 - Finding a: 3 of 3 stops of a running Frigate were killed after the 30 s SIGTERM timeout on arm64. Is that also so on amd64, and should the stop timeout or Frigate's shutdown change?
 - Finding b: confirm the cause (Coral not ready after a power loss) and then decide on a boot-time wait for the Coral. That is a snap change; it was not made here.
-- Finding e: the imports-probe `dac_read_search` line has no allowlist arm. Check whether amd64 prints it too, then add an arm or explain it.
+- Finding e: two imports-probe capability lines (`dac_read_search`, and `dac_override` with comm `python3.11`) have no allowlist arm. Check whether amd64's imports-probe prints them too, then add arms or explain them.
 - C1 (the arm64 Store upload) and follow-ups F1 to F7 on the W-7 card.
