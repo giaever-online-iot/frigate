@@ -5,6 +5,8 @@ import importlib.metadata
 import os
 import sys
 
+from probe_common import edgetpu_lib
+
 
 def runtime_probe() -> dict:
     return {
@@ -57,8 +59,7 @@ def imports_probe() -> dict:
 
 def edgetpu_dlopen_probe() -> dict:
     out: dict = {"status": "complete"}
-    lib = os.path.join(os.environ.get("SNAP", ""),
-                       "usr/lib/x86_64-linux-gnu/libedgetpu.so.1")
+    lib = edgetpu_lib()
     out["lib_path"] = lib
     out["lib_exists"] = os.path.exists(lib)
     try:

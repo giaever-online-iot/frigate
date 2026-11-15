@@ -1,0 +1,56 @@
+# M7c T12: the D21 config shape for the arm64 VM battery (spec D21, D11). battery.sh renders
+# __SNAP_COMMON__ with sed and installs the result as config.yml (0600). Blocks below are copied
+# from spike/config/frigate-config.yml: auth/tls/database and version verbatim, and the
+# DETECTOR-CPU region verbatim with its markers (the battery swaps that region for DETECTOR-OV in v_ov_config).
+mqtt:
+  enabled: false
+auth:
+  enabled: true
+  cookie_secure: true
+tls:
+  enabled: true
+database:
+  path: __SNAP_COMMON__/db/frigate.db
+ffmpeg:
+  hwaccel_args: ""
+# DETECTOR-CPU-BEGIN
+detectors:
+  cpu:
+    type: cpu
+model:
+  # CPU fallback: ssdlite_mobiledet_coco_qat_postprocess tflite (c21de44); same COCO 90-class
+  # labelmap.txt and 320x320 nhwc/rgb/ssd geometry as the Coral EdgeTPU sibling below.
+  path: /opt/frigate/models/cpu/cpu_model.tflite
+  labelmap_path: /opt/frigate/models/labelmap.txt
+  width: 320
+  height: 320
+  input_tensor: nhwc
+  input_pixel_format: rgb
+  model_type: ssd
+# DETECTOR-CPU-END
+record:
+  enabled: false
+cameras:
+  m7c_a:
+    ffmpeg:
+      inputs:
+        - path: /var/snap/frigate/common/m7c/h265.mp4
+          input_args: "-re -stream_loop -1 -fflags +genpts"
+          roles: [detect]
+    detect:
+      enabled: true
+      width: 640
+      height: 360
+      fps: 5
+  m7c_b:
+    ffmpeg:
+      inputs:
+        - path: /var/snap/frigate/common/m7c/h265.mp4
+          input_args: "-re -stream_loop -1 -fflags +genpts"
+          roles: [detect]
+    detect:
+      enabled: true
+      width: 640
+      height: 360
+      fps: 5
+version: "0.18-0"

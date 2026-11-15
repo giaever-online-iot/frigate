@@ -1,0 +1,64 @@
+# M3 Task 3: Frigate daemon real config. Rendered at FIRST start ONLY, by frigate-run
+# (or validate-config) — (sed replaces /var/snap/frigate/common and /snap/frigate/x1 tokens). Once
+# config.yml exists, the OPERATOR owns it: delete the file and restart frigate to
+# regenerate from this template (edits are never clobbered on subsequent starts).
+# version pinned to CURRENT_CONFIG_VERSION (0.18-0) so migrate_frigate_config() does not rewrite.
+mqtt:
+  enabled: false
+# M5 Task 4: real auth — enabled: true + cookie_secure: true (TLS on :8971; Secure cookie correct).
+# Placed OUTSIDE the LIVECAM-BEGIN/END cameras block so both render branches keep it.
+# Fresh bootstrap: purge cycle (snap remove --purge) empties DB → init_auth logs admin password once:
+#   journal pattern: ***    Password: <32-hex>   ***  (frigate/app.py init_auth)
+# cookie_secure: true — Secure flag on frigate_token: browsers only send token over HTTPS.
+auth:
+  enabled: true
+  cookie_secure: true
+# M5 Task 4: explicit tls: enabled: true (certsync's disabled-branch grep reads this block).
+# Frigate Python app TLS awareness; nginx TLS is configured in listen.conf (Task 2 plumbing).
+tls:
+  enabled: true
+database:
+  path: /var/snap/frigate/common/db/frigate.db
+# M7 detector render: frigate-run/validate-config keep ONE of the three marker-wrapped blocks
+# below (snap-set `detector` = ov|coral|cpu; unset => auto-detect: renderD* present => ov, else
+# cpu) and delete the other two regions at render time. Markers are stripped from the kept block,
+# leaving a plain `detectors:` -> `model:` -> `cameras:` shape (the M6 coral phase awk transform
+# anchors on ^detectors:/^cameras: in the RENDERED file and depends on that shape). Upstream
+# Frigate (v0.17.2 and v0.18.2) supports ONE model geometry across all detectors (each detector takes
+# the root-level model:), so each block carries its own model:.
+detectors:
+  coral:
+    type: edgetpu
+    device: usb
+model:
+  # M6 Coral phase: EdgeTPU compilation of the CPU-fallback network (c21de44)
+  path: /opt/frigate/models/edgetpu/edgetpu_model.tflite
+  labelmap_path: /opt/frigate/models/labelmap.txt
+  width: 320
+  height: 320
+  input_tensor: nhwc
+  input_pixel_format: rgb
+  model_type: ssd
+cameras:
+  testclip:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/testclip
+          roles: [detect, record]
+    detect:
+      enabled: true
+      # The testclip go2rtc stream is 1920x1080 (testclip.mp4 re-encoded without scaling). Declaring
+      # detect at 1280x720 is a DELIBERATE downscale: Frigate's detect ffmpeg applies the scale filter
+      # (`-vf ...,scale=1280:720`, ffmpeg_presets.py), cutting /dev/shm frame memory + scaling load
+      # during the spike. Inference then resizes each detect frame to the ACTIVE detector's model input
+      # (OV 300x300, CPU/coral 320x320) — geometry set per detector block above.
+      width: 1280
+      height: 720
+      fps: 5
+    objects:
+      track: [person, car]
+record:
+  enabled: true
+  continuous:
+    days: 1
+version: "0.18-0"

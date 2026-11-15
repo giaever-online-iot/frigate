@@ -1,0 +1,7 @@
+#!/bin/bash
+# Fake ls: only `ls -d PATH...` under $STUB_ST, printing the guest name (the stub maps /dev/shm/snap.frigate).
+echo "ls $*" >> "$STUB_ST/log"; [ "${1:-}" = -d ] || exit 2; shift; rc=0
+for p in "$@"; do
+  case "$p" in "$STUB_ST"/*) ;; *) rc=2; continue ;; esac
+  if [ -e "$p" ]; then echo "${p/#$STUB_ST\/shm\//\/dev\/shm\/}"; else rc=2; fi
+done; exit "$rc"

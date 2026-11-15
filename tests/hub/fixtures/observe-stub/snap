@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fake snap for observe.test.sh: `snap run --shell frigate.frigate -c '"$SNAP/usr/bin/python3.11" -I -'` runs the
+# laptop's python3 on the script from stdin against the test's /stats server ($OBS_URL). Anything else fails.
+if [ "$1 $2 $3 $4" = "run --shell frigate.frigate -c" ]; then
+  case "$5" in *'python3.11" -I -'*) exec python3 -I - "$OBS_URL" ;; esac
+fi
+echo "fake snap: unexpected: $*" >&2; exit 97

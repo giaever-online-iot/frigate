@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake rm: logs; really removes only paths under $STUB_ST.
+echo "rm $*" >> "$STUB_ST/log"
+for p in "$@"; do case "$p" in "$STUB_ST"/*) /usr/bin/rm -rf -- "$p" ;; esac; done; exit 0

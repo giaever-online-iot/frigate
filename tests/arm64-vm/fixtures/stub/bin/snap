@@ -1,0 +1,40 @@
+#!/bin/bash
+# Fake snap for battery.test.sh: a tiny revision state machine in $STUB_ST (cur, revs, connected, hold).
+# Like F10 on a real host, $STUB_ST/shm/snap.frigate survives `remove --purge`.
+S=$STUB_ST; echo "snap $*" >> "$S/log"
+cur() { /usr/bin/cat "$S/cur" 2>/dev/null; }
+case "$1 ${2:-}" in
+  "install --dangerous")
+    [ "${STUB_INSTALL_RC:-0}" = 0 ] || { echo "error: cannot install" >&2; exit "$STUB_INSTALL_RC"; }
+    n=$(( $(/usr/bin/cat "$S/n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/n"
+    echo "x$n" > "$S/cur"; echo "x$n" >> "$S/revs"; echo "frigate 0.18.2 installed" ;;
+  "install frigate")
+    [ "${STUB_INSTALL_RC:-0}" = 0 ] || { echo "error: snap not found" >&2; exit "$STUB_INSTALL_RC"; }
+    echo 8 > "$S/cur"; echo 8 >> "$S/revs"; echo "frigate (edge) 0.18.2 installed" ;;
+  "list frigate")
+    [ -n "$(cur)" ] || { echo "error: no matching snaps installed" >&2; exit 1; }
+    echo "Name     Version  Rev  Tracking     Publisher  Notes"
+    echo "frigate  0.18.2   $(cur)  latest/edge  -          -" ;;
+  "refresh --hold") /usr/bin/touch "$S/hold" ;;
+  "refresh frigate") echo "snap \"frigate\" has no updates available" ;;
+  "revert frigate")
+    if [ -z "${STUB_REVERT_NOOP:-}" ]; then
+      p=$(/usr/bin/tail -n 2 "$S/revs" | /usr/bin/head -n 1); echo "$p" > "$S/cur"; echo "$p" >> "$S/revs"
+    fi; echo "frigate reverted to 0.18.2" ;;
+  "remove frigate"|"remove --purge") /usr/bin/rm -f "$S/cur" "$S/revs" "$S/connected"; echo "frigate removed" ;;
+  "connections frigate")
+    echo "Interface  Plug  Slot  Notes"
+    for p in raw-usb hardware-observe mount-observe shm-private; do
+      if [ -e "$S/connected" ]; then echo "$p  frigate:$p  :$p  manual"; else echo "$p  frigate:$p  -  -"; fi
+    done ;;
+  "connect frigate:"*) /usr/bin/touch "$S/connected" ;;
+  "services frigate")
+    echo "Service            Startup  Current   Notes"
+    for s in go2rtc frigate nginx certsync; do echo "frigate.$s  enabled  active  -"; done
+    echo "frigate.logrotate  enabled  inactive  timer-activated" ;;
+  "quota "*) exit 1 ;;
+  "info frigate") echo "name: frigate"; echo "channels:"; echo "  latest/edge/pr9: 0.18.2 2026-11-14 (8) 900MB -" ;;
+  "run --shell")   # building the namespace with shm-private connected creates the private shm dir
+    [ -e "$S/connected" ] && /usr/bin/mkdir -p "$S/shm/snap.frigate" ;;
+  *) : ;;   # restart, remove-quota, run --shell, download, ...: succeed silently
+esac

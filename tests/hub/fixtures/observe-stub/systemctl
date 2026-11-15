@@ -1,0 +1,14 @@
+#!/bin/sh
+# Fake `systemctl show [-p P]... [--value] UNIT` for observe.test.sh: answers from $OBS_TREE/units/<UNIT> (key=value
+# lines); in phase b ($OBS_TREE/phase) a "K.b=" line overrides K. OBS_LEAK=<code>: also print a line with a
+# credential-bearing URL (a hub that leaks), to test the hygiene count.
+[ "$1" = show ] || exit 1; shift
+props=""; value=0; unit=""
+while [ $# -gt 0 ]; do case "$1" in -p) props="$props $2"; shift 2 ;; --value) value=1; shift ;; *) unit=$1; shift ;; esac; done
+f="$OBS_TREE/units/$unit"; ph=$(cat "$OBS_TREE/phase")
+for p in $props; do
+  v=$(sed -n "s/^$p\.$ph=//p" "$f" 2>/dev/null | head -n 1); [ -n "$v" ] || v=$(sed -n "s/^$p=//p" "$f" 2>/dev/null | head -n 1)
+  if [ "$value" = 1 ]; then printf '%s\n' "$v"; else printf '%s=%s\n' "$p" "$v"; fi
+done
+if [ -n "${OBS_LEAK:-}" ] && [ "$value" = 0 ]; then printf 'Description=rtsp://admin:%s@192.0.2.50/live\n' "$OBS_LEAK"; fi
+exit 0

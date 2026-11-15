@@ -10,6 +10,9 @@ description: |
   alternative detector, or plain CPU inference as a no-accelerator
   fallback.
 
+  On arm64 the snap is experimental: it runs with the CPU detector or a
+  Coral USB Accelerator, and OpenVINO is not available there.
+
   Under the hood the snap runs four cooperating services — go2rtc (camera
   stream restreaming), frigate (the NVR core and detection engine), nginx
   (the HTTPS web UI and API proxy), and certsync (keeps nginx in sync with
@@ -68,14 +71,16 @@ plugs:
   # Task 5 finding: glibc sem_open(O_CREAT) mknods a RANDOM /dev/shm/sem.XXXXXX tempfile,
   # so the sem.snap.<name>.* AppArmor rule can never match (python multiprocessing SemLock
   # -> PermissionError). private:true gives the snap its own /dev/shm tmpfs — the canonical fix.
-  # SIZING NOTE: the private /dev/shm tmpfs uses the system default sizing (~50% RAM);
-  # flag for M3 frame-buffer capacity planning (see task-5-report.md Fix round 1).
+  # SIZING NOTE (F8): private:true bind-mounts the host's /dev/shm/snap.frigate/ directory, so
+  # its size is the host's /dev/shm tmpfs, not a per-snap allocation. Frigate caps its frame
+  # buffers explicitly via SHM_MAX_FRAMES (D13a).
   shm-private:
     interface: shared-memory
     private: true
 
 platforms:
   amd64:
+  arm64:
 
 apps:
   go2rtc:
@@ -213,7 +218,7 @@ parts:
     #   - distutils-precedence.pth .................. removes the shim activation (stdlib distutils stays)
     prime:
       - -usr/lib/python3.11/test
-      - -usr/lib/python3.11/config-3.11-x86_64-linux-gnu/libpython3.11.a
+      - -usr/lib/python3.11/config-3.11-*/libpython3.11.a
       - -usr/include
       - -usr/share/man                     # python3.11.1 man page (import-neutral)
       - -usr/lib/python3.11/site-packages/pip
@@ -265,9 +270,21 @@ parts:
     build-packages: [wget]
     stage-packages: [libusb-1.0-0]
     override-build: |
-      wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
-      echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
-      dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+      # Per-arch (M7c D5): fail loud off amd64/arm64.
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64)
+          wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_amd64.deb"
+          echo "63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
+          dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+          ;;
+        arm64)
+          wget -O "$CRAFT_PART_BUILD/libedgetpu.deb" "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_arm64.deb"
+          echo "eab8aa4576b4dbf738135d8094f32270b24117f77147d25cbe0f49d0144d85f2  $CRAFT_PART_BUILD/libedgetpu.deb" | sha256sum -c -
+          dpkg-deb -x "$CRAFT_PART_BUILD/libedgetpu.deb" "$CRAFT_PART_INSTALL"
+          ;;
+        *)
+          echo "libedgetpu: unsupported arch $CRAFT_ARCH_BUILD_FOR" >&2; exit 1 ;;
+      esac
     # M8 Task 6: drop this part's stage-package docs (libusb-1.0-0 + libedgetpu1-max = 8,052 B) —
     # never needed at runtime. (doc/man are cross-part; excluded per owning part.)
     prime:
@@ -277,8 +294,19 @@ parts:
     stage-packages:
       - vainfo
       - ocl-icd-libopencl1   # ICD loader: provides libOpenCL.so.1 for OpenVINO GPU plugin
-      - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
-      - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
+      - on amd64:
+          - intel-opencl-icd     # Intel compute runtime: provides libigdrcl.so + /etc/OpenCL/vendors/intel.icd
+          - libigdgmm12           # libigdrcl.so runtime dependency (Intel Graphics Memory Manager)
+    # M7c D7: on arm64 the Intel stack is absent, but the snap layout bind-mounts need their source
+    # dirs to exist; stage empty .keep markers there.
+    override-build: |
+      craftctl default
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        arm64)
+          install -D -m 0644 /dev/null "$CRAFT_PART_INSTALL/etc/OpenCL/vendors/.keep"
+          install -D -m 0644 /dev/null "$CRAFT_PART_INSTALL/usr/lib/x86_64-linux-gnu/intel-opencl/.keep"
+          ;;
+      esac
     # M8 Task 6: drop this part's stage-package docs (Intel OpenCL stack + vainfo = 63,458 B) and
     # man pages (vainfo.1 + libOpenCL.7). None needed at runtime.
     prime:
@@ -328,6 +356,26 @@ parts:
           install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
           install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
           ;;
+        arm64)
+          # --- 5.0 tree (tag-exact, v0.18.2 install_deps.sh) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linuxarm64-gpl-5.1.tar.xz"
+          echo "57ee475407bad49910ba9b946428396e30cf075ea28a7912fbe1aa2578085af0  $CRAFT_PART_BUILD/ffmpeg-5.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f5" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-5.tar.xz" -C "$CRAFT_PART_BUILD/f5" --strip-components=1 arm64/bin/ffmpeg arm64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f5/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/5.0/bin/ffprobe"
+          # --- 7.0 tree (tag-exact; tarball is bzip2 despite .xz name — use tar -xf for auto-detect) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linuxarm64-gpl-7.0.tar.xz"
+          echo "16c8b04e9d0ea9c769ad964c4c453fcf05121a1947237329d2e9d8a5e43e2a3c  $CRAFT_PART_BUILD/ffmpeg-7.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f7" && tar -xf "$CRAFT_PART_BUILD/ffmpeg-7.tar.xz" -C "$CRAFT_PART_BUILD/f7" --strip-components=1 arm64/bin/ffmpeg arm64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f7/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/7.0/bin/ffprobe"
+          # --- 8.0 tree (tag-exact default; real xz, verified) ---
+          wget -O "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2026-06-02-14-20/ffmpeg-n8.1.1-9-g58d4114d36-linuxarm64-gpl-8.1.tar.xz"
+          echo "cd91948468d0f11ce795a2cdaa0c69911bd1db313b49bb19c22512beb88cde69  $CRAFT_PART_BUILD/ffmpeg-8.tar.xz" | sha256sum -c -
+          mkdir -p "$CRAFT_PART_BUILD/f8" && tar -xJf "$CRAFT_PART_BUILD/ffmpeg-8.tar.xz" -C "$CRAFT_PART_BUILD/f8" --strip-components=1 arm64/bin/ffmpeg arm64/bin/ffprobe
+          install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffmpeg"  "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffmpeg"
+          install -D -m 0755 "$CRAFT_PART_BUILD/f8/bin/ffprobe" "$CRAFT_PART_INSTALL/usr/lib/ffmpeg/8.0/bin/ffprobe"
+          ;;
         *)
           echo "ffmpeg: unsupported arch $CRAFT_ARCH_BUILD_FOR (W-7 adds arm64)" >&2; exit 1 ;;
       esac
@@ -340,6 +388,11 @@ parts:
         amd64)
           wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_amd64"
           echo "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
+          install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
+          ;;
+        arm64)
+          wget -O "$CRAFT_PART_BUILD/go2rtc" "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_arm64"
+          echo "359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50  $CRAFT_PART_BUILD/go2rtc" | sha256sum -c -
           install -D -m 0755 "$CRAFT_PART_BUILD/go2rtc" "$CRAFT_PART_INSTALL/usr/local/go2rtc/bin/go2rtc"
           ;;
         *)

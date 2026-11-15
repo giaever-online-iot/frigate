@@ -3,6 +3,9 @@
 set -e
 . "$SNAP/bin/lib-wait.sh"
 . "$SNAP/bin/lib-db-restore.sh"
+# D13a/F9: explicit frame cap for Frigate's shm sizing (default 50; harness override 1..200).
+SHM_MAX_FRAMES=$(shm_max_frames)
+export SHM_MAX_FRAMES
 
 export FRIGATE_CONFIG_DIR="$SNAP_DATA/config"
 export FRIGATE_BASE_DIR="$SNAP_COMMON/media/frigate"
@@ -96,6 +99,11 @@ EOF
             "$SNAP/config/frigate-config.yml" > "$CONFIG_FILE"
     fi
     umask 022
+fi
+
+# D10: an operator-kept config.yml may still name the openvino detector, which cannot run on arm64.
+if ! _arch_has_ov && config_uses_openvino "$CONFIG_FILE"; then
+    echo "frigate-run: ERROR config.yml uses the openvino detector, which cannot run on arm64; set it to cpu or coral (or delete config.yml to re-render)" >&2
 fi
 
 # Readiness gate on go2rtc (provider-answered, not just unit-started)
