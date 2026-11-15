@@ -23,6 +23,16 @@ The maintainer's answer to "What should PR #10 do?" was option 1: start a fresh 
 
 When Launchpad built an arch but its artifact did not arrive whole, start a NEW remote build for that arch. Never use `--recover`. Use at most 3 attempts in total, and finish inside GitHub's 6 h job limit so that the upload step and the completeness gate still run.
 
+### Beyond the maintainer's option 1
+
+The maintainer chose "start a fresh full remote build when a fetch fails, up to 3 times". The design adds the following. Each needs the maintainer's explicit approval:
+
+1. **D5:** an arch that Launchpad did not report `Succeeded` (a build failure or a timeout) is never rebuilt. Only cut downloads are.
+2. **D6:** a 5 h budget for all attempts. Every attempt, **attempt 1 included**, passes `--launchpad-timeout=<budget left>`, and a retry starts only if the previous attempt's duration still fits.
+3. **D6, the cutoff:** an attempt still running at the 5 h mark now stops there with nothing fetched. Before, it could still have finished and uploaded between about 5 h and 5 h 40 min.
+4. **D8:** `snaps=` now counts the requested archs that have a valid snap, not distinct `.snap` files.
+5. **D3:** attempts 2 and 3 write their number into `.git/remote-build-attempt`, so each gets a fresh Launchpad build id. Each failed attempt leaves its repository and recipe on Launchpad.
+
 ## 3. snapcraft 9.2.1 facts (read in the installed source; §3.7 also ran part of it)
 
 ### 3.1 Build id (brief question a)
@@ -46,9 +56,12 @@ The only repository checks are "is a git repo" and "is not shallow" (`ca/remote/
 ### 3.6 Cleanup, fetch and timeouts (question a)
 - `cleanup()` (delete the recipe and the repository, `ca/services/remotebuild.py:241-246`) runs only after a normal return (`ca/commands/remote.py:181`) or a confirmed Ctrl-C (`:171`). A broken download raises out of `_monitor_and_complete` (`:224`) as an internal error, so nothing is cleaned up. The repository and recipe of every failed attempt stay on Launchpad. That is true today and was true before bea5564.
 - Artifacts and build logs are written to the **current directory**, i.e. the project dir (`:224`, `:227`). Logs are fetched only after every artifact arrived, so an attempt with a cut download writes no log files.
-- Downloads run one file at a time, in set order (`ca/services/request.py:79-113`). A cut on one file leaves the files already finished intact (PR #10: arm64 arrived whole) and the files not yet started missing.
+- **Every download is opened up front, then drained one file after another.** `download_files_with_progress` (`ca/services/request.py:79-113`) first calls `next(dl)` on every download (`:103`). Each such call has already done the GET with `stream=True` and opened the destination file for writing (`:68-70`). Only then are the files drained one after another, in set order (`:107-111`). So while the first ~1 GB file downloads, the connection for the second sits open and idle. A cut leaves the files already drained intact (PR #10: arm64 arrived whole). Files not yet drained exist as empty or partial files, and `prune_corrupt` already drops those.
 - The fetch starts only once **every** build has stopped. The state line printed just before it is `Succeeded: amd64, arm64`, or for example `Stopped: amd64; Succeeded: arm64` (`ca/commands/remote.py:200-221`; order Stopped, Building, Uploading, Succeeded, Pending).
-- `--launchpad-timeout=<s>` (default 0 = none, `:81-86`) sets a local deadline (`:150-152`). When it passes, snapcraft prints `Timed out waiting for build`, returns 75 without fetching anything (`:173-178`), and the Launchpad builds continue.
+- `--launchpad-timeout=<s>` (default 0, `:81-86`) sets a local deadline only when the value is truthy (`:150` `if parsed_args.launchpad_timeout:`). **`0` therefore means no timeout at all.**
+  - A **negative** value sets a deadline in the past. `start_builds` then raises `TimeoutError` from `_check_timeout` (`ca/services/remotebuild.py:150`, `:428-431`). That happens outside the `try` (`ca/commands/remote.py:162` vs `:164`), so it becomes an internal error, not exit 75.
+  - When the deadline passes while monitoring, `monitor_builds` yields the states **once more** (`ca/services/remotebuild.py:183`) before raising (`:184`). A `Succeeded: …` line can therefore be printed with nothing fetched. snapcraft then prints `Timed out waiting for build` and returns 75 (`ca/commands/remote.py:173-178`), and the Launchpad builds continue.
+  - The `except TimeoutError` at `:173` wraps the whole of `_monitor_and_complete`, fetch included. A socket timeout during the download (Python's `socket.timeout` is `TimeoutError`) also exits 75 with that message.
 
 ### 3.7 Offline probe (run, not just read)
 Run with snapcraft's own bundled Python (`/snap/snapcraft/current/bin/python3 -I`) against a throwaway git repo. No network.
@@ -70,6 +83,7 @@ Reason: recovery cannot find snapcraft's own project-housed repository (§3.4, P
 
 **D2 (confirms the controller's proposal). A retry builds only the archs still missing (`--build-for=<missing>`). The valid snaps already fetched stay in the project dir.**
 Reason: `--build-for` is a filter on the platforms (§3.5) and the fetch covers only the builds this invocation started, so a subset works. Nothing in snapcraft makes a subset worse (the recipe is created per invocation with the subset's archs, `ca/services/remotebuild.py:144-149`). Rebuilding an arch whose file is already good costs Launchpad time and adds one more large download that could be cut. Two of two two-arch runs so far had one cut download.
+A further reason (hypothesis, not proven): a one-arch retry opens **one** connection, so the idle-second-connection mechanism of §3.6 cannot repeat on it (see §10).
 
 **D3 (keeps the controller's goal, changes its mechanism). Every attempt gets a build id of its own. Attempts 2 and later write their attempt number into `.git/remote-build-attempt` before calling snapcraft. The file is removed at exit (and any stale copy at start).**
 Reasons:
@@ -94,6 +108,13 @@ Reasons:
 - If GitHub kills the job at 6 h, the upload step and the gate never run, and even the valid arch is lost. Today's outcome (upload what is valid, gate red) is better than that.
 - This keeps the script's existing promise: "a genuine single-arch BUILD failure stays tolerated".
 
+**D5a. snapcraft's output, which D5 parses, is captured outside the project dir.** Three rules:
+- (i) The output file is created with `mktemp` under `TMPDIR` (`/tmp` on the runner), never in the project dir.
+- (ii) stderr is captured with stdout (`2>&1`), because snapcraft prints its state lines on stderr.
+- (iii) The file is truncated at each attempt (`tee` without `-a`), so D5 parses only the attempt just finished.
+
+Reason: snapcraft copies the whole project dir (`worktree.py:54`) and auto-commits every file that is not ignored (`:62-64`). An output file in the tree would be pushed to a public Launchpad repository, and it would change the build id. The test's stub therefore fails when the project dir holds an untracked, non-ignored file at call time.
+
 **D6 (new). A time budget, `BUILD_BUDGET` (default 18000 s = 5 h) for all attempts together.**
 - Every attempt passes `--launchpad-timeout=<budget left>`.
 - A retry starts only if `time used + RETRY_DELAY + the last attempt's duration ≤ BUILD_BUDGET`.
@@ -102,15 +123,16 @@ Reasons:
 - The previous attempt's duration is a conservative estimate: a retry builds a subset, and the archs build in parallel, so a retry should take no longer.
 - 5 h leaves 60 min for the steps before and after this one. The most observed is 18 min (§6).
 - `--launchpad-timeout` caps an attempt that runs longer than estimated. On timeout snapcraft exits 75 and fetches nothing (§3.6). The script then stops, because the time is used up.
-- Attempt 1 gets the timeout too. That only matters past 5 h, where the job used to be killed at 6 h before uploading anything.
+- Attempt 1 gets the timeout too. **This is an accepted trade, stated honestly.** Between about 5 h and 5 h 40 min, the old script could still have finished an attempt and uploaded it. With the timeout on attempt 1, it now exits 75 at 5 h and fetches nothing. That is accepted because it keeps the upload step and the gate reachable inside 6 h. Past about 5 h 40 min the old script lost the upload anyway, because GitHub killed the job.
+- **Invariant: `left` is always ≥ 1.** It is clamped, because `--launchpad-timeout=0` means no timeout and a negative value is an internal error (§3.6). `BUILD_BUDGET` must be a positive integer. Any other value gives a `::warning::` and the script uses the default 18000.
 
 **D7 (the controller's D5). The channel-close fix in ae00129 stays unchanged.** That covers dropping `--yes`, the fallback printing the real exit status as a `::warning::`, and `snapcraft-close.test.sh`. Neither W-24 task touches `release-on-merge.yml` or `snapcraft-close.test.sh`.
 
-**D8 (the controller's D6). Exit 0 always; `prune_corrupt` stays; the completeness gate downstream decides.** A truncated file never reaches `snapcraft upload`. One small change: `snaps=` now counts the **requested archs that have a valid snap** (`*_<arch>.snap`, as the upload step matches). Before, it counted distinct `*.snap` files. The two agree whenever only requested archs are fetched, which is always the case with `--build-for`.
+**D8 (the controller's D6). Exit 0 always; `prune_corrupt` stays; the completeness gate downstream decides.** A truncated file never reaches `snapcraft upload`. One small change: `snaps=` now counts the **requested archs that have a valid snap**. The match is the same suffix match the upload step uses, `*<arch>.snap` (`pr-build-snap.yml:126`: `"${SNAP_NAME}"*"${arch}".snap`, which fits `name_version_arch.snap`). No requested arch name is a suffix of another, so `amd64`, `arm64` and `armhf` cannot be confused. Before, it counted distinct `*.snap` files. The two agree whenever only requested archs are fetched, which is always the case with `--build-for`.
 
 **D9. Stop retrying, with a `::warning::` that names the reason, when:** every requested arch has a valid snap (success, no warning); or `MAX_ATTEMPTS` is reached; or no missing arch was `Succeeded` (D5); or the budget does not fit (D6). The script never loops on anything except its own attempt counter.
 
-**D10. The test stub models snapcraft 9.2.1 as read and probed.** It reproduces `_compute_hash` with the same algorithm: md5 of each file's contents, sorted paths, `.git` included, then md5 of the concatenated hex. Its `--recover` fails with the text from PR #10's log. It prints the state lines and the `IncompleteRead` error as snapcraft does. A stub `date +%s` and a fake clock (each snapcraft call advances it by `STUB_COST`) make the time budget testable without sleeping. Known limit: the stub sorts paths with `LC_ALL=C sort -z`, where Python sorts `PosixPath` parts. The orders can differ for unusual names, which does not matter for the "same tree ⇔ same id" property the tests use.
+**D10. The test stub models snapcraft 9.2.1 as read and probed.** It reproduces `_compute_hash` with the same algorithm: md5 of each file's contents, sorted paths, `.git` included, then md5 of the concatenated hex. Its `--recover` fails with the text from PR #10's log. It prints the state lines and the `IncompleteRead` error as snapcraft does, and in its timeout mode one more `Succeeded:` line followed by exit 75 (§3.6). It refuses to run, as a stand-in for snapcraft pushing the file, when the project dir holds an untracked file that `.gitignore` would not ignore (D5a). A stub `date +%s` and a fake clock (each snapcraft call advances it by `STUB_COST`) make the time budget testable without sleeping. Known limit: the stub sorts paths with `LC_ALL=C sort -z`, where Python sorts `PosixPath` parts. The orders can differ for unusual names, which does not matter for the "same tree ⇔ same id" property the tests use.
 
 **D11. History is corrected forward, not rewritten.** bea5564 and ae00129 are already on `origin/fix/remote-build-fetch-recover`: PR #10's CI ran on ae00129. The W-24 card's remark that nothing is pushed yet is therefore not right, and amending bea5564 would rewrite pushed history. The implementation commit's message states what bea5564 got wrong. The PR #10 body is replaced (§8).
 
@@ -161,6 +183,10 @@ Arithmetic, 6 h = 21600 s:
 | `buildfail`, amd64+arm64+armhf (amd64 `Stopped`) | 1 call; snaps=2; exit 0; `::warning::not rebuilding amd64: Launchpad did not report it Succeeded` |
 | `cut`, STUB_COST=15022 (PR #9's attempt length) | 1 call; snaps=1; `::warning::not rebuilding amd64: attempt 1 took 15022s` |
 | GITHUB_OUTPUT | receives `snaps=2` |
+| `cut` with the stub's tree check (every case) | the stub exits non-zero, with a message, when the project dir holds an untracked file that is not ignored when it is called. Only `snapcraft.yaml` and `frigate_*.snap` are allowed outside `.git`. This keeps the output file out of the tree (D5a) |
+| `BUILD_BUDGET=0` | `::warning::` and the default is used: call 1 gets `--launchpad-timeout=18000` |
+| `timeout` stub: prints `Succeeded: amd64`, then exits 75 with `Timed out waiting for build` and nothing fetched; the budget is used up | exactly 1 call; no rebuild; snaps=0 |
+| `left` clamp (budget almost used) | no call ever gets `--launchpad-timeout` below 1 |
 
 The suite must be **red on the current script** (ae00129) and green after. Each mutation below, applied to the new script, must turn it red (checked by a mutation runner in the plan):
 
@@ -174,6 +200,9 @@ The suite must be **red on the current script** (ae00129) and green after. Each 
 | M6 rebuild arches that failed to build | `buildfail`: 1 call and the warning |
 | M7 drop the budget guard | the budget case: 1 call and the warning |
 | M8 drop `--launchpad-timeout` | the `cut` timeout checks |
+| M9 keep a stale marker from an earlier run | the stale-marker check |
+| M10 write snapcraft's output into the project dir (`./`) | the stub's tree check |
+| M11 drop the `left ≥ 1` clamp or the `BUILD_BUDGET` validation | the `BUILD_BUDGET=0` and clamp cases |
 
 Also: every `.github/scripts/*.test.sh` and both shellcheck steps of `lint-test.yml` pass. The baseline is green on ae00129 (checked 2026-11-15: all six suites passed, shellcheck 0.9.0 clean).
 
@@ -194,9 +223,13 @@ ae00129's channel-close fix and `snapcraft-close.test.sh` (D7); `prune_corrupt` 
 ## 10. NOT PROVEN (and what would prove it)
 
 - **The real rebuild against Launchpad.** It runs only when a download is cut. The one push of this branch starts a two-arch build, so PR #10's own CI run is the first real test. If no download is cut there, the rebuild path stays unproven. Report it faithfully either way.
-- **A rebuild is not guaranteed to avoid another cut download.** It is a bet that the cut is transient. Both two-arch runs so far had one large-file download cut, and neither had both cut. If all attempts end incomplete, the pipeline does what it does today: upload the valid snaps to `latest/edge/PR<N>`, then `Fail if build/upload incomplete` goes red when a required arch (`REQUIRED_ARCHS=amd64`) is missing. That is kept.
+- **A rebuild is not guaranteed to avoid another cut download.** The cut may be the idle second connection (§3.6) being dropped while the first ~1 GB file downloads. Both cuts hit under 1 MB into a file: 578594 and 763316 bytes read. **This is NOT PROVEN.**
+  - If it is true, two-arch first attempts will often take the rebuild path, at about +25–30 min of Launchpad time per such run, and the single-arch retry (one connection) is likely to succeed.
+  - If it is false, the cut is network luck and a retry may be cut again.
+  - Either way, if all attempts end incomplete, the pipeline does what it does today. It uploads the valid snaps to `latest/edge/PR<N>`, and `Fail if build/upload incomplete` goes red when a required arch (`REQUIRED_ARCHS=amd64`) is missing. That is kept.
+- **Follow-up, not in this PR:** fetch the artifacts without an idle second connection, for example by fetching one file at a time ourselves. That needs a way to reach a finished build again, which is the maintainer's option 2 from the PR #10 question.
 - **The same-id reuse path (§3.2) is not exercised.** D3 avoids depending on it, except when `.git` is not a directory.
-- **`--launchpad-timeout` was read in the source, not run.** Its behaviour on Launchpad (exit 75, builds continue) is unproven.
+- **`--launchpad-timeout` was read in the source, not run** (0 means none, a negative value is an internal error, one more state line is printed after the deadline; §3.6). Its behaviour on Launchpad (exit 75, builds continue) is unproven.
 - **The `Succeeded:` line format** was read in the source (`ca/commands/remote.py:218`) and seen in three 9.2.1 CI logs. A future snapcraft could change it. The failure mode is safe: D5 then rebuilds nothing, which is today's outcome.
 - **Why Launchpad's `Uploading` state took about 3 h 44 min on PR #9** (and why 43377971262 ended with `Timed out waiting for build` without a timeout set) was not determined. A plausible explanation for the latter is a socket timeout, since Python's `socket.timeout` is `TimeoutError` and is caught at `:173`. That is not proven.
 - **Launchpad clean-up of the per-attempt repositories and recipes** (D3 cost) is not addressed.
