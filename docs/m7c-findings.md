@@ -1,15 +1,16 @@
-# M7c Findings: arm64 port, Part 2 (census, emulated battery, hand-over to the hub)
+# M7c Findings: arm64 port, Part 2 (census, emulated battery, Pi hub trial)
 
-**Date:** 2026-11-14  **Snap:** `frigate` 0.18.2 (core26, strict), arm64 and amd64  **PR:** #9, branch `feat/m7c-arm64`, CI-built at head `9a2e833` (later commits on the branch touch only `tests/**` and `docs/**`)  **Spec:** `docs/superpowers/specs/2026-11-13-m7c-arm64-design.md`  **Plan:** `docs/superpowers/plans/2026-11-13-m7c-arm64.md`, Part 2 (T14, T15), both on branch `spec/m7c-arm64-research`.
+**Date:** 2026-11-14, hub results added 2026-11-15  **Snap:** `frigate` 0.18.2 (core26, strict), arm64 and amd64  **PR:** #9, branch `feat/m7c-arm64`, CI-built at head `9a2e833` (later commits on the branch touch only `tests/**` and `docs/**`)  **Spec:** `docs/superpowers/specs/2026-11-13-m7c-arm64-design.md`  **Plan:** `docs/superpowers/plans/2026-11-13-m7c-arm64.md`, Part 2 (T14, T15), both on branch `spec/m7c-arm64-research`.
 
-**Status in one paragraph.** T14 is complete. The arm64 artifact is clean of foreign ELF (V2), its wheel set is the amd64 set with arm64 tags and one justified name difference (V3b), and the amd64 non-regression census against the released revision is fully explained (V1). The arm64 size floor is set from the first real artifact. T15 ran in an emulated Cortex-A76 VM on the local Launchpad arm64 file. It was **stopped by the maintainer's decision** after about 7 hours, because emulation ran about 19× slower than real hardware and tied up the laptop. Before the stop, V5 (bytes, install, layout), V6, V18, V7, V9 and the V9 mutation **PASSED**. V10, V11, V-OV, V-restore, V17 and the V8 full harness were **NOT RUN in the VM**. They are not claimed here. Verification moved to the hub (last section). This document holds no hub results.
+**Status in one paragraph.** T14 is complete. The arm64 artifact is clean of foreign ELF (V2), its wheel set is the amd64 set with arm64 tags and one justified name difference (V3b), and the amd64 non-regression census against the released revision is fully explained (V1). The arm64 size floor is set from the first real artifact. T15 ran in an emulated Cortex-A76 VM on the local Launchpad arm64 file. It was **stopped by the maintainer's decision** after about 7 hours, because emulation ran about 19× slower than real hardware and tied up the laptop. Before the stop, V5 (bytes, install, layout), V6, V18, V7, V9 and the V9 mutation **PASSED**. V10, V11, V-OV, V-restore, V17 and the V8 full harness were **NOT RUN in the VM**. They are not claimed here. Verification moved to the hub. **On the Pi hub** (Raspberry Pi 5, aarch64, Ubuntu Core, snapd 2.78) the exact arm64 file installs, starts, runs the synthetic camera stand-in stably for 3 h 05 min and loads the Coral. Real-camera and long-run behaviour are **NOT PROVEN**: the cameras refuse RTSP, and the longest run ended after 3 h 05 min when the maintainer rebooted the hub (section "Results on the Pi hub"). This is not a production verdict on the arm64 file.
 
 **Evidence classes.**
 
 - **`[EVIDENCE: name]`**: a file under the laptop's `~/.cache/frigate-m7c-evidence/part2/` (not committed). Numbers were copied from those files.
 - **`[REPORT: …]`**: another worker's or the orchestrator's report on the W-7 card. Not recounted here.
 - **`[VERIFIED: …]`**: a command run while writing this document.
-- **`[LIVE]`**: none. Nothing here ran on the hub or on a production host.
+- **`[HUB: name]`**: a file under the laptop's `~/.cache/frigate-m7c-evidence/hub/` (not committed). These are the orchestrator's copies of what the hub's probe, observe and watcher runs printed, with no private data. Numbers were copied from those files.
+- **`[LIVE]`**: none on a production host. The hub runs the maintainer's Home Assistant, but the Frigate trial on it used only the synthetic stand-in.
 
 ---
 
@@ -42,12 +43,20 @@ The snap is **private** on the Store. `snap download` answers "snap not found" e
 | V7 | CPU detection pipeline on an H.265 clip, `hwaccel_args: ""` | **PASS**: camera_fps 5.2 and 4.9; no `-hwaccel` in the detect cmdlines; 0 error/exited journal lines | `[EVIDENCE: battery/v7-*.txt, battery/v7-stats.json]` |
 | V9 | shm bound (D13a): 2 cameras × 50 frames of 640×360 | **PASS**: 50 frames per camera of 345,600 B; `du -sb` 35,183,600 within +10 MiB of 34,560,000 | `[EVIDENCE: battery/v9.txt, battery/v9-sizes.txt]` |
 | V9 mut | `shm-max-frames=10` | **PASS**: 10 frame files per camera, back to 50 when removed | `[EVIDENCE: battery/v9-mutation.txt, battery/v9-shm-*.txt]` |
-| V10 | memory after 30 min steady state | **NOT RUN in the VM** (stopped during its wait) | `[EVIDENCE: b-stop-record.txt]` |
+| V10 | memory after 30 min steady state | **NOT RUN in the VM** (stopped during its wait). Measured on the hub instead: row V10 (hub) | `[EVIDENCE: b-stop-record.txt]` |
 | V11 | quota rehearsal below the V10 peak, swap enabled | **NOT RUN in the VM** | ditto |
-| V-OV | the D10 openvino guard at start | **NOT RUN in the VM** | ditto. A stopped-state check exists for the hub (last section) |
+| V-OV | the D10 openvino guard at start | **NOT RUN in the VM** | ditto. The stopped-state check passed on the hub: row V-OV (hub) |
 | V-restore | fixture config back, frigate active | **NOT RUN in the VM** | ditto |
 | V17 | hold, revert, remove, purge, F10 residue | **NOT RUN in the VM**. The refresh-under-hold and `snap download` parts could not have run anyway (private snap, no Store in the VM) | ditto |
 | V8 | full `spike-smoke.sh` harness in the VM (denials, arm64-only arms) | **NOT RUN** (step C cancelled) | ditto |
+| V5 (hub) | exact bytes, version, plugs, D7 layout on the Pi | **PASS** | `[HUB: probe-20261114T140443/results.txt, snap-sha256.txt, snap-list.txt, connections.txt, layout.txt]` |
+| V6 (hub) | 18 imports incl. sqlite_vec, 4 HEVC decoders, ffprobe | **PASS** | `[HUB: probe-20261114T140443/results.txt, hevc.txt, ffprobe.txt]` |
+| V18 (hub) | EdgeTPU with the Coral USB present: dlopen, `load_delegate`, one inference | **PASS** | `[HUB: probe-20261114T140443/coral-json.txt, dlopen-json.txt, usb-before.txt, usb-after.txt]` |
+| V-OV (hub) | the D10 guard functions in the snap's shell on arm64, stopped | **PASS, stopped-state only**. The start-time behaviour is NOT PROVEN | `[HUB: probe-20261114T140443/v-ov-stopped.txt]` |
+| V7 (hub, stand-in) | CPU decode of H.265 into the detect pipeline, `hwaccel_args: ""`, Coral detector | **PASS for the stand-in**: camera_fps 5 or 5.1 against detect fps 5, skipped_fps 0, in all 6 snapshots. The Coral ran no detections (detection_fps 0) | `[HUB: observe-*/results.txt, run2/observe-*/results.txt]` |
+| V9 (hub, stand-in) | shm bound (D13a) with a 1920x1080 and a 640x360 detect stream | **PASS**: 50 frame files per camera, `/dev/shm/snap.frigate` 173,422,202 to 173,427,663 B | ditto |
+| V10 (hub, stand-in) | memory in steady state | **MEASURED, no verdict**: anon 1,008 to 1,044 MiB, shmem 172 to 198 MiB; page cache fills the 4 GB group to its cap without a restart | ditto, and section "Results on the Pi hub" |
+| V11, V17, V8, F11 (hub) | quota squeeze, hold/revert/purge, the full harness, Store auto-connect | **NOT RUN on the hub** (dropped for the hub, or impossible with a private snap) | section "Verification moved to the hub" |
 
 ### Battery lines as printed (file mode, SPIKE_TIME_SCALE=20)
 
@@ -115,14 +124,16 @@ INFO: `tensorboard-data-server 0.7.2` is `py3-none-any` on arm64 and `py3-none-m
 
 ---
 
-## The D13b memory cap: no VM number, and a caveat
+## The D13b memory cap: no number yet, and caveats
 
-D13b sets the hub's quota from V10: 1.5 × the V10 peak, rounded up to 0.5 GB, floor 2 GB. **V10 did not run in the VM, so this document cannot give that number.** The hub's quota group was set from the spec's H3 value (4 GB) instead.
+D13b sets the hub's quota from V10: 1.5 × the V10 peak, rounded up to 0.5 GB, floor 2 GB. **V10 did not run in the VM, and the hub's stand-in measurement is not a basis for the number either (below), so this document does not set it.** The hub's quota group was set from the spec's H3 value (4 GB) and stays there.
 
 Caveats for whoever computes it from a hub measurement:
 
 - **The battery's V10 is narrower than the spec.** It reads `MemoryPeak` of `snap.frigate.frigate.service` only, while spec §9 V10 asks for `MemoryPeak` per `snap.frigate.*` unit. A cap for the whole group should sum the units (or read the quota group's own current memory) and use `anon + shmem` for the unreclaimable part (§7.2). `MemoryCurrent` includes reclaimable page cache from recording writes.
-- **The workload differs.** The VM fixture ran the CPU detector on two 640×360 test cameras. The hub runs the Coral with real cameras, so a VM number would not have carried over unchanged anyway.
+- **The workload differs.** The VM fixture ran the CPU detector on two 640×360 test cameras. The hub was meant to run the Coral with real cameras, so a VM number would not have carried over unchanged anyway.
+- **What the hub showed** (stand-in, section "Results on the Pi hub"): over 3 h the group's `MemoryPeak` reached 3,814 MiB against a `MemoryMax` of 3,815 MiB, which is the 4 GB cap itself, while anon stayed at 1,008 to 1,044 MiB and shmem at 172 to 198 MiB `[HUB: observe-*/results.txt, run2/observe-*/results.txt]`. The rest was page cache from recording writes, which the kernel reclaims at the cap. So the rule must use **anon + shmem**, not raw `MemoryPeak`: a cap computed from `MemoryPeak` would only reproduce whatever cap was set.
+- **Why the stand-in is not the basis.** The largest sampled anon + shmem is 1,225 MiB (run 1 at 1 h 38 min). The rule applied to that would give the 2 GB floor. That is **not adopted**: the samples are six point readings (cgroup v2 records no anon peak), the stand-in had no detection load (detection_fps 0), and no run lasted 24 h. The measurement shows only that nothing in 3 h came near an OOM under a 4 GB cap.
 
 ---
 
@@ -145,7 +156,7 @@ Caveats for whoever computes it from a hub measurement:
 
 ## Verification moved to the hub (maintainer's decision, 2026-11-14)
 
-The maintainer stopped the emulated run ("Run it on the Pi"). The hub replaces the VM as the arm64 verification. The full battery is **not** run on the hub: the real trial steps (spec §8 H4 to H6, real cameras, the Coral) replace the synthetic V7, V9 and V10 natively. V11 as written (a quota below the peak, to provoke OOM or swap on the NVMe it shares with Home Assistant), V-OV at start, and V17 are dropped for the hub. Every hub step needs the maintainer's go (D14). No worker connects to the hub.
+The maintainer stopped the emulated run ("Run it on the Pi"). The hub replaces the VM as the arm64 verification. The full battery is **not** run on the hub: the trial steps (spec §8 H4 to H6, the Coral) replace the synthetic V7, V9 and V10 natively. They were planned with the real cameras; because the cameras refuse RTSP, they ran on the synthetic stand-in (next section). V11 as written (a quota below the peak, to provoke OOM or swap on the NVMe it shares with Home Assistant), V-OV at start, and V17 are dropped for the hub. Every hub step needs the maintainer's go (D14). No worker connects to the hub.
 
 Tooling prepared for it (tests only, run by the orchestrator through its existing ssh master):
 
@@ -161,9 +172,9 @@ Tooling prepared for it (tests only, run by the orchestrator through its existin
   It writes the file over the master by stdin and validates it without starting the NVR. Camera logins never appear on a command line, in output, or on disk.
 - `tests/hub/watch.sh`: the read-only §8 stop-rule watcher. It is detect-only by default; `--act` stops frigate.
 
-**Results:** none in this document. The orchestrator adds the hub results.
+**Results:** section "Results on the Pi hub" below.
 
-**Still NOT PROVEN by anything here:** Store auto-connect (F11) and refresh-under-hold on arm64; the D13b number; V11's swap-or-OOM behaviour; V17 and the F10 purge residue on arm64; arm64-only AppArmor or seccomp denial arms (V8); and the start-time D10 behaviour.
+**Still NOT PROVEN, after the hub runs as well:** Store auto-connect (F11) and refresh-under-hold on arm64; the D13b number; V11's swap-or-OOM behaviour; V17 and the F10 purge residue on arm64; the full V8 denial harness on arm64 (the hub's denials were only read, not tested arm by arm); and the start-time D10 behaviour.
 
 ## Synthetic H.265 stand-in for the Pi trial (W-7 Q7, answer 1)
 
@@ -191,11 +202,131 @@ At the first H5 start both cameras refused RTSP (connection refused on port 554)
 
 On all three, pts were strictly increasing and there were 0 decode error lines, 3 exec ffmpegs and 0 go2rtc ERR lines.
 
+Since then shown on the hub: validate-config accepted the exec lines `[REPORT: orchestrator]`, and under the hub's confinement go2rtc ran all three exec ffmpegs, reading the clips, for up to 5,882 s without a restart `[HUB: observe-2h/results.txt]`. The first hub observe failed both cameras only because observe.sh compared camera_fps with the clips' native 25 and 15 fps. Frigate's camera_fps is the detect rate (5), so the check now uses the detect fps (commit `77d4169`) `[HUB: observe-start-first-wrong-fps-expectation/results.txt]`.
+
 **NOT PROVEN by the stand-in:**
-- the hub's AppArmor profile for the exec plus the clip read (the first start's go2rtc log shows it), and validate-config accepting exec lines in `config.yml`;
 - the real cameras' RTSP (they refuse it today), logins, reconnects, packet loss and timestamp jumps;
 - real keyframe intervals, VBR and I-frame bitrate spikes, and night/IR scene changes;
 - the cameras' real sub-stream size and fps (unknown, so cam2 is an assumption);
 - object load: there are no people or cars in the picture, so the Coral, the tracker and the review work see little.
 
 The synthetic motion is constant, which is pessimistic for motion detection and optimistic for object detection.
+
+## Results on the Pi hub (Raspberry Pi 5, aarch64, Ubuntu Core, snapd 2.78)
+
+**In one line:** the exact arm64 file installs, starts, runs the stand-in stably for 3 h 05 min and loads the Coral on aarch64. Real-camera and long-run behaviour are not proven. Every hub step ran on the maintainer's go and was run by the orchestrator; no worker connected to the hub (D14). Times are CET. MB and GB in the observe and watcher lines are 2^20 and 2^30 bytes (MiB and GiB); quota sizes set with `snap set-quota` are decimal (4 GB = 4,000,000,000 B, which the slice shows as `MemoryMax` 3,815 MiB).
+
+### Install and stopped-state probe (H1 to H4)
+
+- **The file.** The PR #9 Launchpad arm64 file (sha256 `26db6fb77d2214c030bfb9da0b533edb0935cd49d376b010347a607e9b6200f4`) was copied over the hub's SSH connection and installed with `snap install --dangerous`. The hub holds it as revision `x1` with publisher `-` and the note `held`, and the installed file hashes to the same sha256 `[HUB: probe-20261114T140443/snap-list.txt, snap-sha256.txt]`. A `--dangerous` install carries no Store assertions, so a Store refresh, `snap revert` to a Store revision and Store auto-connect do not apply to it.
+- **The quota group** `frigate-mem` holds only frigate, with memory 4.00 GB and CPU 2 × 100 % `[HUB: h5-idle-20261114T140829.txt]`. The slice shows it as `MemoryMax` 3,815 MiB and `CPUQuotaPerSecUSec=2s`, i.e. at most 2 of the 4 cores `[HUB: observe-*/results.txt]`.
+- **The probe** (`tests/hub/probe.sh`, Frigate stopped) printed 7 PASS lines and 0 FAIL `[HUB: probe-20261114T140443/results.txt]`:
+  - V5 version (0.18.2, frigate and go2rtc stopped), V5 bytes, V5 plugs (raw-usb, hardware-observe, mount-observe and shm-private connected) and V5 layout (D7: `/etc/OpenCL/vendors` and `intel-opencl` each list exactly `.keep`);
+  - V6: 18 imports including sqlite_vec, 4 HEVC decoders, ffprobe `n8.1.1-9-g58d4114d36-20260602`;
+  - V18 with the Coral present: dlopen of the aarch64 `libedgetpu.so.1`, `load_delegate` ok and one inference ok. The Coral's USB id changed from `1a6e:089a` to `18d1:9302` at the first load, which is the normal re-enumeration;
+  - V-OV (stopped): on arm64, `detector=ov` renders the cpu detector with the D10 WARN, and an openvino config is recognised. This is a stopped-state guard check only.
+
+  The imports probe also printed joblib's `[Errno 13] Permission denied. joblib will operate in serial mode` warning `[HUB: probe-20261114T140443/imports-probe.txt]`. It did not fail any import. Whether amd64 prints the same was not checked here.
+- **Network exposure.** At the first start only port 8971 (nginx, TLS) listened on a non-loopback address. go2rtc's RTSP and WebRTC listeners are bound to loopback by make-config, and its API to loopback by the generator `[REPORT: orchestrator, W-7 decision 4]`.
+- **First start, real-camera config (H5).** Frigate ran about 3 minutes with both cameras refusing RTSP and was then stopped. The quota group used 966 MB (snap's figure), with slice `MemoryCurrent` 965,820,416 B, `MemoryPeak` 980,598,784 B and `/dev/shm/snap.frigate` 139,102,669 B. The host showed load 0.44 and swap 0 `[HUB: h5-idle-20261114T140829.txt]`. Without camera input, this is an idle footprint, not a workload number.
+
+### The workload: the synthetic stand-in, and what it does not exercise
+
+The cameras refuse RTSP (connection refused on port 554 for all four stream URLs) `[REPORT: orchestrator]`, so **no real-camera run exists**. Both runs used the stand-in from the previous section:
+
+- two looped H.265 clips, 180 s each, played into go2rtc by exec ffmpeg sources;
+- cam1 detects and records the 1080p25 clip;
+- cam2 records the 1080p25 clip and detects a 640x360, 15 fps clip;
+- detect fps 5, MQTT off, `hwaccel_args: ""`, the Coral as the detector.
+
+What it does **not** exercise:
+
+- **The Coral is barely used.** detection_fps was 0 in every snapshot, because the picture has no objects to detect. The detector's `inference_speed` of 10 ms is **not a measurement**: it is the value Frigate gives the counter at start (`Value("d", 0.01)` in `frigate/object_detection/base.py` of the shipped tree), and no detection ever updated it.
+- **No real camera behaviour:** no reconnects, no real keyframe intervals or bitrate spikes, no audio, no night or IR changes.
+- **No motion or object load beyond the clip's moving box:** no tracking, review items or snapshots of real objects.
+
+### Run 1: 14 Nov, about 15:19 to 16:58 (1 h 39 min)
+
+- **Timeline.** The watcher started at 15:18:54 and its last sample was at 16:58:53, after the stop `[HUB: watch-act-final-before-reboot.log]`. That file is byte-identical to `watch-20261114T151854.log`. Run 1 was stopped before a planned laptop reboot `[REPORT: W-7 decision 5]`.
+- **Snapshots.** observe.sh ran three times, at Frigate uptimes of 192 s, 1,898 s and 5,884 s (3 min, 32 min and 1 h 38 min). Each printed 7 PASS lines and 0 FAIL `[HUB: observe-start, observe-30min, observe-2h]`. The very first observe at 3 min printed 2 FAIL lines; the two-line fix is described in the previous section.
+- **Stability.** The same three exec ffmpeg PIDs ran through all three snapshots, 5,882 s at the last one. NRestarts was 0 for all four units `[HUB: observe-2h/results.txt]`.
+- **Watcher** (stop rules, act mode, 199 samples at 30 s): 0 TRIP lines. Frigate's NRestarts stayed 0, and the Home Assistant unit kept the same MainPID with 0 restarts. Its container stayed running with RestartCount 0 `[HUB: watch-act-final-before-reboot.log]`.
+
+### Run 2: 14 Nov, 19:08 to the hub reset at 22:12:47 (3 h 05 min)
+
+- **Timeline.** The watcher started at 19:08:00 and logged its last sample at 22:12:49 (laptop clock). At 22:13:48 it logged `MASTER GONE ... the watcher is BLIND and cannot stop frigate (exit 3)` `[HUB: run2/watch-act-run2-19h08-to-22h13.log]`. That exit is the designed behaviour when the SSH master disappears.
+- **The reset.** The hub's journal ends mid-stream at 22:12:47 with no shutdown sequence, no panic and no under-voltage line. It was the maintainer's own reboot, not a fault `[REPORT: orchestrator, W-7 decision 11]`.
+- **Snapshots.** observe.sh ran at Frigate uptimes of 282 s and 1,973 s (5 min and 33 min), 7 PASS and 0 FAIL each `[HUB: run2/observe-start, run2/observe-30min]`. The exec ffmpegs kept the same PIDs, 1,972 s at the second snapshot.
+- **After the reset.** Frigate started by itself at boot; the reason is under finding b below. One snapshot at uptime 221 s (about 4 min) printed 7 PASS and 0 FAIL, with NRestarts frigate=1 and the others 0 `[HUB: run2/observe-after-reset/results.txt]`.
+- **Watcher** (367 samples at 30 s): 0 TRIP lines, Frigate NRestarts 0 until the reset, and the Home Assistant unit and container untouched `[HUB: run2/watch-act-run2-19h08-to-22h13.log]`.
+
+Later runs get their own subsection after this one.
+
+### Numbers
+
+Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one core) `[HUB: observe-*/results.txt, run2/observe-*/results.txt]`:
+
+| Snapshot (Frigate uptime) | slice MemoryCurrent / Peak MiB | anon MiB | shmem MiB | file MiB | slice cores | cam1 detect ffmpeg | cam2_sub detect ffmpeg | throttled periods | Home Assistant |
+|---|---|---|---|---|---|---|---|---|---|
+| run 1, 192 s | 1,329 / 1,351 | 1,008 | 172 | 280 | 0.89 | 52.7 % | 5.8 % | 0 of 101 | 15 ms |
+| run 1, 1,898 s | 2,033 / 2,049 | 1,016 | 185 | 953 | 0.89 | 51.9 % | 5.7 % | 1 of 101 | 13 ms |
+| run 1, 5,884 s | 3,653 / 3,673 | 1,027 | 198 | 2,511 | 0.90 | 53.1 % | 6.0 % | 0 of 102 | 12 ms |
+| run 2, 282 s | 3,736 / 3,750 | 1,018 | 176 | 2,604 | 0.94 | 52.1 % | 8.1 % | 0 of 101 | 12 ms |
+| run 2, 1,973 s | 3,244 / 3,814 | 1,024 | 188 | 2,114 | 0.94 | 52.4 % | 8.2 % | 0 of 101 | 16 ms |
+| after reset, 221 s | 2,011 / 2,027 | 1,044 | 172 | 909 | 0.69 | 42.6 % | 4.7 % | 1 of 101 | 24 ms |
+
+- **Memory.**
+  - The unreclaimable part (anon + shmem) stayed between 1,180 and 1,225 MiB in every snapshot.
+  - Page cache (`file`) grew from recording writes. It took the slice from 2,033 to 3,653 MiB between the 30-min and the 1 h 38 min snapshots of run 1 `[HUB: observe-2h/results.txt, "memory since --prev"]`.
+  - In run 2, `MemoryPeak` reached 3,814 MiB against `MemoryMax` 3,815 MiB, i.e. the cap, and `MemoryCurrent` was back at 3,244 MiB: the kernel reclaimed cache at the cap. No unit restarted.
+  - The page cache charged to the quota group survived the stop between the runs: run 2 began at 3,736 MiB for the slice while the frigate unit itself held 1,273 MiB.
+  - What this means for D13b is in the D13b section above.
+- **CPU.**
+  - Over the 3,985 s between run 1's second and third snapshots, the slice averaged 0.90 cores (frigate 0.86, go2rtc 0.04). The 2-core quota throttled 449 of 39,852 periods (1.1 %), 42.9 s in total `[HUB: observe-2h/results.txt, "cpu since --prev"]`.
+  - Decoding the 1920x1080 25 fps clip at its native size (cam1's detect ffmpeg, CPU decode) took 51.9 to 53.1 % of one core in steady state; the 640x360 15 fps clip took 5.7 to 8.2 %.
+  - The after-reset snapshot is lower (42.6 % and 4.7 %). Its cause was not investigated; it came 4 minutes after a cold boot.
+  - Run 2 has no long-window average, because no observe in run 2 was taken with `--prev`.
+- **Cameras.**
+  - camera_fps was 5 or 5.1 against detect fps 5 on both cameras in all six snapshots, with skipped_fps 0, so the decode kept up with real time.
+  - The 3 exec ffmpegs ran 5,882 s in run 1 without a restart.
+- **shm.** `/dev/shm/snap.frigate` was 173,422,202 to 173,427,663 B (165 MiB), with 50 frame files per camera in every snapshot.
+- **Host** (the watcher's 30 s samples, both runs) `[HUB: watch-act-final-before-reboot.log, run2/watch-act-run2-19h08-to-22h13.log]`:
+  - **MemAvailable** never below 13,016 MiB.
+  - **Swap** 0 in run 1. In run 2 it rose from 0 to 1 MiB at 20:55 and to 17 MiB by the last sample at 22:12:49. The after-reset snapshot shows 0.
+  - **Disk free** on the data filesystem went from 206 to 203 GiB in run 1 and from 203 to 199 GiB in run 2 (1 GiB resolution). That fits two recordings of the ~1.6 Mbit/s clip, about 1.3 GiB per hour.
+  - **Home Assistant** answered HTTP 200 in every sample, in 11 to 40 ms in run 1 and 11 to 37 ms in run 2.
+- **Load bursts.** The 1-minute load averaged 1.45 (run 1) and 1.47 (run 2), with bursts at or above 3.0 that peaked at 4.76 (run 1) and 5.48 (run 2). Each burst lasted 1.0 to 3.0 minutes. In run 2 they came every 16.2 to 17.2 minutes; in run 1 every 15.7 to 17.7 minutes, plus one extra 3.21 peak at 16:03. No burst came near the watcher's load stop rule (load above 3.5 for 10 minutes).
+  - **Cause unknown.** The interval does not match the 180 s clip loop. The load average is host-wide (Home Assistant included), and nothing here attributes the bursts to a process.
+
+### New findings
+
+- **a. A stop is not graceful.** Both observed stops (the end of run 1 at 16:58, and the stop after the post-reset snapshot at 22:18) hit `State 'stop-sigterm' timed out. Killing` after the 30 s `TimeoutStopUSec`. systemd sent SIGKILL to two python3.11 processes, and the unit was left `failed` (Result=timeout) until the next start.
+  - **The D24 WAL fix held after the SIGKILL on arm64.** The post-stop `frigate-db-quiesce` hook still ran both times:
+    - `db=5337088 wal_before=4202432 wal_after=absent shm_after=absent result=ok`;
+    - `db=15282176 wal_before=2266032 wal_after=absent shm_after=absent result=ok`.
+  - Whether amd64 stops the same way was **not checked** `[REPORT: orchestrator, hub journal]`.
+- **b. Cold boot after a hub reset.** The frigate unit was enabled, so Frigate started by itself at boot. The first start failed with `Failed to load delegate from libedgetpu.so.1.0`: the Coral had not yet re-enumerated after the power loss. systemd restarted the unit (NRestarts=1), and the second start was healthy (7 PASS) `[REPORT: orchestrator, hub journal; HUB: run2/observe-after-reset/results.txt]`. A boot-time wait for the Coral would avoid the failed first start. That is a snap change and is not made here.
+- **c. The hub has no RTC.** Right after a boot, journal timestamps are stale until time sync steps the clock. This is cosmetic, but it matters when reading a journal across a reset `[REPORT: orchestrator]`.
+- **d. Leftovers after a stop.** `/dev/shm/snap.frigate` (165 MiB) stays after Frigate stops, until the snap is removed (H9) `[REPORT: orchestrator]`.
+- **e. AppArmor denials on the hub are known classes only:** ptrace, `/proc/*/cmdline`, `cpu.max`, `nr_hugepages` and dac_override, all already in the amd64 allowlist. There is no new class. recording_manager's ptrace denials are the loudest, and none caused a failure `[REPORT: orchestrator]`. This is a reading of the journal, not the V8 harness.
+- **f. The first observe's fps expectation was wrong, and is fixed** in `77d4169` (previous section).
+
+### NOT PROVEN on the hub, with the reason
+
+- **A 24-hour soak.** The longest run is 3 h 05 min. The maintainer rebooted the hub, and a new hub SSH master needs a touch of the maintainer's security key.
+- **Real cameras:** they refuse RTSP.
+- **The Coral under real detection load:** the stand-in produced no detections.
+- **V11** (a deliberate OOM or swap squeeze): run on no host. It was dropped for the hub because the hub shares its disk with Home Assistant.
+- **V-OV start-time behaviour:** only the stopped-state guard check ran.
+- **V17** refresh-under-hold and `snap download`, and **F11** Store auto-connect: the snap is private on the Store, and the hub has no Store account.
+- **A Store-installed (asserted) arm64 revision:** the same reason. The hub runs the `--dangerous` install `x1`.
+- **The amd64 stop path** (finding a): not compared.
+
+## Open at the time of writing
+
+- The 24-hour soak (or a decision that the 3 h 05 min stand-in run suffices for an "experimental" arm64 label).
+- A real-camera run, once the cameras serve RTSP.
+- The D13b number. It needs anon + shmem under real detection load.
+- Finding a: is the 30 s SIGTERM timeout also hit on amd64, and should the stop timeout or Frigate's shutdown change?
+- Finding b: a boot-time wait for the Coral before Frigate starts. This is a snap change; it was not made here.
+- C1 (the arm64 Store upload) and follow-ups F1 to F7 on the W-7 card.
