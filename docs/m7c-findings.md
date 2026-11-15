@@ -228,7 +228,7 @@ The synthetic motion is constant, which is pessimistic for motion detection and 
 
   The imports probe also printed joblib's `[Errno 13] Permission denied. joblib will operate in serial mode` warning `[HUB: probe-20261114T140443/imports-probe.txt]`. It did not fail any import. Whether amd64 prints the same was not checked here.
 - **Network exposure.** At the first start only port 8971 (nginx, TLS) listened on a non-loopback address. go2rtc's RTSP and WebRTC listeners are bound to loopback by make-config, and its API to loopback by the generator `[REPORT: orchestrator, W-7 decision 4]`.
-- **First start, real-camera config (H5).** Frigate ran about 3 minutes with both cameras refusing RTSP and was then stopped. The quota group used 966 MB (snap's figure), with slice `MemoryCurrent` 965,820,416 B, `MemoryPeak` 980,598,784 B and `/dev/shm/snap.frigate` 139,102,669 B. The host showed load 0.44 and swap 0 `[HUB: h5-idle-20261114T140829.txt]`. Without camera input, this is an idle footprint, not a workload number.
+- **First start, real-camera config (H5).** Frigate ran 2 min 50 s with both cameras refusing RTSP and was then stopped `[HUB: journal-excerpts.txt]`. The quota group used 966 MB (snap's figure), with slice `MemoryCurrent` 965,820,416 B, `MemoryPeak` 980,598,784 B and `/dev/shm/snap.frigate` 139,102,669 B. The host showed load 0.44 and swap 0 `[HUB: h5-idle-20261114T140829.txt]`. Without camera input, this is an idle footprint, not a workload number.
 
 ### The workload: the synthetic stand-in, and what it does not exercise
 
@@ -255,7 +255,7 @@ What it does **not** exercise:
 ### Run 2: 14 Nov, 19:08 to the hub reset at 22:12:47 (3 h 05 min)
 
 - **Timeline.** The watcher started at 19:08:00 and logged its last sample at 22:12:49 (laptop clock). At 22:13:48 it logged `MASTER GONE ... the watcher is BLIND and cannot stop frigate (exit 3)` `[HUB: run2/watch-act-run2-19h08-to-22h13.log]`. That exit is the designed behaviour when the SSH master disappears.
-- **The reset.** The hub's journal ends mid-stream at 22:12:47 with no shutdown sequence, no panic and no under-voltage line. It was the maintainer's own reboot, not a fault `[REPORT: orchestrator, W-7 decision 11]`.
+- **The reset.** The hub's journal for that boot ends at 22:12:47 (21:12:47 UTC) `[HUB: journal-excerpts.txt]`, mid-stream, with no shutdown sequence, no panic and no under-voltage line. It was the maintainer's own reboot, not a fault `[REPORT: orchestrator, W-7 decision 11]`.
 - **Snapshots.** observe.sh ran at Frigate uptimes of 282 s and 1,973 s (5 min and 33 min), 7 PASS and 0 FAIL each `[HUB: run2/observe-start, run2/observe-30min]`. The exec ffmpegs kept the same PIDs, 1,972 s at the second snapshot.
 - **After the reset.** Frigate started by itself at boot; the reason is under finding b below. One snapshot at uptime 221 s (about 4 min) printed 7 PASS and 0 FAIL, with NRestarts frigate=1 and the others 0 `[HUB: run2/observe-after-reset/results.txt]`.
 - **Watcher** (367 samples at 30 s): 0 TRIP lines, Frigate NRestarts 0 until the reset, and the Home Assistant unit and container untouched `[HUB: run2/watch-act-run2-19h08-to-22h13.log]`.
@@ -300,15 +300,42 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
 
 ### New findings
 
-- **a. A stop is not graceful.** Both observed stops (the end of run 1 at 16:58, and the stop after the post-reset snapshot at 22:18) hit `State 'stop-sigterm' timed out. Killing` after the 30 s `TimeoutStopUSec`. systemd sent SIGKILL to two python3.11 processes, and the unit was left `failed` (Result=timeout) until the next start.
-  - **The D24 WAL fix held after the SIGKILL on arm64.** The post-stop `frigate-db-quiesce` hook still ran both times:
+- **a. A stop is not graceful: 3 of 3 stops of a running Frigate were killed.** The journal shows three such stops, at 14:08:37, 16:57:59 and 22:18:39 (13:08:37, 15:57:59 and 21:18:39 UTC as the journal stamps them) `[HUB: journal-excerpts.txt]`. They were the end of the 2 min 50 s first start (H5), the end of run 1, and the stop after the post-reset snapshot.
+  - Each hit `State 'stop-sigterm' timed out. Killing` 30 s after `Stopping`. systemd sent SIGKILL to two python3.11 processes, and the unit `Failed with result 'timeout'`, staying failed until the next start.
+  - One more stop, a 2 s start and stop at 13:09 (12:09 UTC), ended cleanly with `db=absent result=nodb`. It is not evidence against: nothing had started yet.
+  - **The D24 WAL fix held after each SIGKILL on arm64.** The post-stop `frigate-db-quiesce` hook ran all three times:
+    - `db=188416 wal_before=8272 wal_after=absent shm_after=absent result=ok`;
     - `db=5337088 wal_before=4202432 wal_after=absent shm_after=absent result=ok`;
     - `db=15282176 wal_before=2266032 wal_after=absent shm_after=absent result=ok`.
-  - Whether amd64 stops the same way was **not checked** `[REPORT: orchestrator, hub journal]`.
-- **b. Cold boot after a hub reset.** The frigate unit was enabled, so Frigate started by itself at boot. The first start failed with `Failed to load delegate from libedgetpu.so.1.0`: the Coral had not yet re-enumerated after the power loss. systemd restarted the unit (NRestarts=1), and the second start was healthy (7 PASS) `[REPORT: orchestrator, hub journal; HUB: run2/observe-after-reset/results.txt]`. A boot-time wait for the Coral would avoid the failed first start. That is a snap change and is not made here.
-- **c. The hub has no RTC.** Right after a boot, journal timestamps are stale until time sync steps the clock. This is cosmetic, but it matters when reading a journal across a reset `[REPORT: orchestrator]`.
+  - Whether amd64 stops the same way was **not checked**.
+- **b. Cold boot after a hub reset: the first start failed on the Coral delegate.** The frigate unit was enabled, so Frigate started by itself at boot.
+  - At 22:14:14 (21:14:14 UTC) the first start raised `ValueError: Failed to load delegate from libedgetpu.so.1.0` `[HUB: journal-excerpts.txt]`.
+  - The post-stop hook ran on that exit too (`db=15077376 wal_before=absent ... result=ok`). At 22:14:36 systemd logged `Scheduled restart job, restart counter is at 1` and started the unit again `[HUB: journal-excerpts.txt]`.
+  - The second start was healthy: 7 PASS, NRestarts frigate=1 `[HUB: run2/observe-after-reset/results.txt]`.
+  - **The likely cause, not proven:** the Coral was not yet ready after the power loss. The kernel log shows USB resets of the Coral between 22:14:12 and 22:14:49 (21:14:12 to 21:14:49 UTC) `[REPORT: orchestrator, kernel journal; those lines are not in the excerpt]`.
+  - If that is the cause, a boot-time wait for the Coral would avoid the failed first start. That is a snap change and is not made here.
+- **c. The hub has no RTC.** Right after a boot, journal timestamps are stale until time sync steps the clock `[HUB: journal-excerpts.txt]`:
+  - every boot's first entry carries the same stamp, 2026-11-04 20:01:48 UTC;
+  - the first Frigate start after the reset is stamped 21:12:31 UTC, 16 s before the previous boot's last entry (21:12:47 UTC).
+
+  The first start's real time is therefore later than its stamp. The restart at 21:14:36 UTC agrees with the laptop clock: the after-reset snapshot at about 22:18 CET saw an uptime of 221 s. This is cosmetic, but it matters when reading a journal across a reset.
 - **d. Leftovers after a stop.** `/dev/shm/snap.frigate` (165 MiB) stays after Frigate stops, until the snap is removed (H9) `[REPORT: orchestrator]`.
-- **e. AppArmor denials on the hub are known classes only:** ptrace, `/proc/*/cmdline`, `cpu.max`, `nr_hugepages` and dac_override, all already in the amd64 allowlist. There is no new class. recording_manager's ptrace denials are the loudest, and none caused a failure `[REPORT: orchestrator]`. This is a reading of the journal, not the V8 harness.
+- **e. AppArmor denials on the hub: one capability line has no amd64 allowlist arm.** There were 11,752 denial lines on the `snap.frigate.*` profiles over all boots since 14 Nov `[HUB: journal-excerpts.txt]`:
+  - **ptrace:** 9,673 (comm `frigate.recordi` 9,164, `python3.11` 509).
+  - **open:** 2,058. These are `/proc/PID/cmdline` 2,041, `/proc/sys/vm/nr_hugepages` 7, `cpu.max` 9 (8 on the `snap.frigate\x2dmem.slice`, 1 on `system.slice`) and `/usr/share/fonts/` 1.
+  - **exec:** `/usr/bin/lscpu` 2.
+  - **mknod:** 1. The excerpt does not name it; the orchestrator reports it as imports-probe's `/dev/shm/sem.*`.
+  - **capable:** 18, by profile:
+    - frigate: net_admin 8, dac_override 3;
+    - coral-probe: net_admin 3;
+    - imports-probe: dac_override 1, dac_read_search 1;
+    - nginx: setgid 2.
+
+  **The arms.** `tests/spike-smoke.sh` (the amd64 denial allowlist, the `UNEXPECTED=` regex near line 2090) has an arm for every one of these classes except one. That one is the capability line `dac_read_search` on the imports-probe profile: 1 line, and `dac_read_search` appears 0 times in that file `[VERIFIED: grep -c dac_read_search tests/spike-smoke.sh = 0]`. The excerpt gives no time for it; the orchestrator places it in the 13:04 UTC probe run `[REPORT: orchestrator]`. Whether amd64 prints it too is not checked.
+
+  **The match is only class by class.** Several arms are pinned to a profile and a comm: the dac_override arms to `frigate-run` and `go2rtc-run`, frigate's net_admin arm to `frigate.detecto`, and the lscpu and fonts arms to imports-probe. The excerpt does not give the profile and comm of every line, so a line-by-line match is not shown. The imports-probe dac_override line, for one, is covered only if its comm is one of those two.
+
+  None of the denials caused a failure. recording_manager's ptrace denials are the loudest. This is a reading of the journal, not the V8 harness.
 - **f. The first observe's fps expectation was wrong, and is fixed** in `77d4169` (previous section).
 
 ### NOT PROVEN on the hub, with the reason
@@ -321,12 +348,14 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
 - **V17** refresh-under-hold and `snap download`, and **F11** Store auto-connect: the snap is private on the Store, and the hub has no Store account.
 - **A Store-installed (asserted) arm64 revision:** the same reason. The hub runs the `--dangerous` install `x1`.
 - **The amd64 stop path** (finding a): not compared.
+- **AppArmor line by line** (finding e): only class by class against the amd64 arms, and one line (`dac_read_search`) has no arm.
 
 ## Open at the time of writing
 
 - The 24-hour soak (or a decision that the 3 h 05 min stand-in run suffices for an "experimental" arm64 label).
 - A real-camera run, once the cameras serve RTSP.
 - The D13b number. It needs anon + shmem under real detection load.
-- Finding a: is the 30 s SIGTERM timeout also hit on amd64, and should the stop timeout or Frigate's shutdown change?
-- Finding b: a boot-time wait for the Coral before Frigate starts. This is a snap change; it was not made here.
+- Finding a: 3 of 3 stops of a running Frigate were killed after the 30 s SIGTERM timeout on arm64. Is that also so on amd64, and should the stop timeout or Frigate's shutdown change?
+- Finding b: confirm the cause (Coral not ready after a power loss) and then decide on a boot-time wait for the Coral. That is a snap change; it was not made here.
+- Finding e: the imports-probe `dac_read_search` line has no allowlist arm. Check whether amd64 prints it too, then add an arm or explain it.
 - C1 (the arm64 Store upload) and follow-ups F1 to F7 on the W-7 card.
