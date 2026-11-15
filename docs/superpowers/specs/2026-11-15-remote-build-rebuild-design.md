@@ -132,7 +132,7 @@ Reasons:
 - `--launchpad-timeout` caps an attempt that runs longer than estimated. On timeout snapcraft exits 75 and fetches nothing (§3.6). The script then stops, because the time is used up.
 - Attempt 1 gets the timeout too. **This is an accepted trade, stated honestly.** Between about 5 h and 5 h 40 min, the old script could still have finished an attempt and uploaded it. With the timeout on attempt 1, it now exits 75 at 5 h and fetches nothing. That is accepted because it keeps the upload step and the gate reachable inside 6 h. Past about 5 h 40 min the old script lost the upload anyway, because GitHub killed the job.
 - **Invariant: no attempt starts with `left` < 1.** The script prints `::warning::not starting attempt <n>: the <budget>s budget is used up` and stops. `--launchpad-timeout=0` would mean no timeout, and a negative value is an internal error (§3.6). Clamping to 1 s was considered and dropped (plan review P3), because it would start a Launchpad build only to abandon it.
-- **Input validation:** `BUILD_BUDGET` and `MAX_ATTEMPTS` must be integers ≥ 1, and `RETRY_DELAY` an integer ≥ 0. Any other value (`0`, `-100`, `5h`, `x`) gives a `::warning::` and the default (18000, 3, 15).
+- **Input validation:** `BUILD_BUDGET` and `MAX_ATTEMPTS` must be integers ≥ 1, and `RETRY_DELAY` an integer ≥ 0. Any other value (`0`, `-100`, `5h`, `x`) gives a `::warning::` and the default (18000, 3, 15). The warning goes to stdout, where the Actions runner reads workflow commands.
 
 **D7 (the controller's D5). The channel-close fix in ae00129 stays unchanged.** That covers dropping `--yes`, the fallback printing the real exit status as a `::warning::`, and `snapcraft-close.test.sh`. Neither W-24 task touches `release-on-merge.yml` or `snapcraft-close.test.sh`.
 
@@ -140,7 +140,7 @@ Reasons:
 
 **D9. Stop retrying, with a `::warning::` that names the reason, when:** every requested arch has a valid snap (success, no warning); or `MAX_ATTEMPTS` is reached; or no missing arch was `Succeeded` (D5); or the budget does not fit (D6). The script never loops on anything except its own attempt counter.
 
-**D10. The test stub models snapcraft 9.2.1 as read and probed.** It reproduces `_compute_hash` with the same algorithm: md5 of each file's contents, sorted paths, `.git` included, then md5 of the concatenated hex. Its `--recover` fails with the text from PR #10's log. It prints the state lines and the `IncompleteRead` error as snapcraft does, and in its timeout mode one more `Succeeded:` line followed by exit 75 (§3.6). It refuses to run, as a stand-in for snapcraft pushing the file, when the project dir holds an untracked file that `.gitignore` would not ignore (D5a). A stub `date +%s` and a fake clock (each snapcraft call advances it by `STUB_COST`) make the time budget testable without sleeping. Known limit: the stub sorts paths with `LC_ALL=C sort -z`, where Python sorts `PosixPath` parts. The orders can differ for unusual names, which does not matter for the "same tree ⇔ same id" property the tests use.
+**D10. The test stub models snapcraft 9.2.1 as read and probed.** It reproduces `_compute_hash` with the same algorithm: md5 of each file's contents, sorted paths, `.git` included, then md5 of the concatenated hex. Its `--recover` fails with the text from PR #10's log. It prints the state lines **on stderr**, where snapcraft's verbose `emit.progress` puts them (`craft_cli/messages.py:645-648`), and the `IncompleteRead` error. In its timeout mode it prints one more `Succeeded:` line (stderr), then `Timed out waiting for build.` (stdout, `emit.message`, `:553`), and exits 75 (§3.6). For D5a it uses a name allowlist rather than `.gitignore`: when called, it records and fails on any file outside `.git` other than `snapcraft.yaml` and `frigate_*.snap`, as a stand-in for snapcraft committing and pushing that file. A `sleep` stub records the retry delay and returns at once. A stub `date +%s` and a fake clock (each snapcraft call advances it by `STUB_COST`) make the time budget testable without sleeping. Known limit: the stub sorts paths with `LC_ALL=C sort -z`, where Python sorts `PosixPath` parts. The orders can differ for unusual names, which does not matter for the "same tree ⇔ same id" property the tests use.
 
 **D11. History is corrected forward, not rewritten.** bea5564 and ae00129 are already on `origin/fix/remote-build-fetch-recover`: PR #10's CI ran on ae00129. The W-24 card's remark that nothing is pushed yet is therefore not right, and amending bea5564 would rewrite pushed history. The implementation commit's message states what bea5564 got wrong. The PR #10 body is replaced (§8).
 
@@ -194,6 +194,8 @@ Arithmetic, 6 h = 21600 s:
 | the stub's tree check (every case; asserted in `cut` and `alwayscut`) | when called, the stub records and fails on any untracked file in the project dir that is not ignored. Only `snapcraft.yaml` and `frigate_*.snap` are allowed outside `.git`. This keeps the output file out of the tree (D5a) |
 | `cutthenfail`: call 1 cut, call 2 fails before any state line | exactly 2 calls; `::warning::not rebuilding amd64: … in attempt 2` (the output is parsed per attempt) |
 | `BUILD_BUDGET` = `0`, `-100`, `5h`; `MAX_ATTEMPTS=x` | `::warning::` and the default: call 1 gets `--launchpad-timeout=18000`; at most 3 calls |
+| `RETRY_DELAY=x` | `::warning::` and the default: the `sleep` stub records `15`; snaps=2; exit 0 (unvalidated, the script dies on `x: unbound variable` with no `snaps=` line) |
+| state lines on stderr (every `cut` case) | the rebuild happens only if stderr is captured (D5a ii) |
 | `timeout` stub: prints `Succeeded: amd64`, then exits 75 with `Timed out waiting for build` and nothing fetched; the budget is used up | exactly 1 call; no rebuild; snaps=0 |
 | `no budget left` (the clock runs out between attempts) | 1 call; `::warning::not starting attempt 2 …`; no call gets `--launchpad-timeout` below 1 |
 | attempt 1's build id | equals the test's own hash of the clean tree (no marker on attempt 1; plan review P5) |
@@ -217,6 +219,8 @@ The suite must be **red on the current script** (ae00129) and green after. Each 
 | M12 `tee -a` (parse earlier attempts' output) | `cutthenfail` |
 | M13 parse the first state line instead of the last | the `cut` cases (the stub prints `Building: amd64; Succeeded: arm64` before the final line) |
 | M14 write the marker on attempt 1 too | attempt 1's id check |
+| M15 drop `2>&1` (stderr not captured) | every case that needs a rebuild (the state lines are on stderr) |
+| M16 leave `RETRY_DELAY` unvalidated | the `RETRY_DELAY=x` case |
 
 Two more mutants survive and are equivalent, according to the plan review, so they need no test. X4: a `./*"$1"*` glob, because no real arch name is a substring of another. X8: dropping the `[ -d .git ]` guard, which differs only when `.git` is a file.
 

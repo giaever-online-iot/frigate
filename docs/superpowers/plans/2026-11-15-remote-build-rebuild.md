@@ -10,7 +10,7 @@
 - the archs to rebuild come from the last `Succeeded:` state line of the attempt just finished. snapcraft's output is captured per attempt in a temp file **outside** the project dir (spec D5a);
 - a budget check and `--launchpad-timeout` bound the time. No attempt starts with less than 1 s left, and the numeric inputs are validated (spec D6).
 
-The stub-driven test models snapcraft 9.2.1 (build id hash, `--recover` failure, state lines, `--launchpad-timeout`, files it would push) and a fake clock. A committed mutation runner proves the test catches each decision.
+The stub-driven test models snapcraft 9.2.1 (build id hash, `--recover` failure, state lines on stderr, `--launchpad-timeout`, files it would push), plus a fake clock and a recording `sleep`. A committed mutation runner proves the test catches each decision.
 
 **Tech Stack:** bash, shellcheck 0.9.0, GitHub Actions; snapcraft 9.2.1 (modelled by the stub, never called).
 
@@ -21,9 +21,9 @@ The stub-driven test models snapcraft 9.2.1 (build id hash, `--recover` failure,
 - Scope: only `.github/**`. Files: `.github/scripts/remote-build.sh`, `.github/scripts/remote-build.test.sh`, `.github/scripts/remote-build.mutate.sh` (new) and the comment above the build step in `.github/workflows/pr-build-snap.yml`. No `snap/**` change. `release-on-merge.yml` and `snapcraft-close.test.sh` stay byte-identical (spec D7).
 - Defaults: `MAX_ATTEMPTS=3`, `RETRY_DELAY=15`, `BUILD_BUDGET=18000`. Marker path `.git/remote-build-attempt`; its content is the attempt number (2, 3, …). Attempt 1 writes no marker.
 - Never `--recover`. Exit 0 always. `prune_corrupt` stays. `snaps=` counts the requested archs that have a valid snap, matched by the upload step's suffix match `*<arch>.snap` (spec D8).
-- Input validation: `MAX_ATTEMPTS` and `BUILD_BUDGET` must be integers ≥ 1, and `RETRY_DELAY` an integer ≥ 0. Any other value gives `::warning::<NAME>='<value>' is not an integer >= <min>; using <default>`. No attempt starts with `left` < 1; instead the script prints `::warning::not starting attempt <n>: the <budget>s budget is used up` (spec D6, review P3).
+- Input validation: `MAX_ATTEMPTS` and `BUILD_BUDGET` must be integers ≥ 1, and `RETRY_DELAY` an integer ≥ 0. Any other value gives `::warning::<NAME>='<value>' is not an integer >= <min>; using <default>` on stdout, where the Actions runner reads workflow commands. No attempt starts with `left` < 1; instead the script prints `::warning::not starting attempt <n>: the <budget>s budget is used up` (spec D6, review P3).
 - snapcraft's output goes to `mktemp "${TMPDIR:-/tmp}/remote-build-out.XXXXXX"`, with `2>&1` and plain `tee` (truncated per attempt). It never goes into the project dir (spec D5a).
-- Mutant numbering is the spec's §7: M1–M14, with M11 split into M11a (validation) and M11b (the `left` < 1 guard).
+- Mutant numbering is the spec's §7: M1–M16, with M11 split into M11a (validation) and M11b (the `left` < 1 guard).
 - No camera or host addresses, hostnames, credentials, tokens, serials, Launchpad owner or project names (write `<owner>`/`<project>`), or the maintainer's name or pronouns in any file, commit message or PR text.
 - **Do not push.** A push starts a Launchpad build and a Store upload. The controller pushes, once.
 - Heavy suites go under `flock -w 3600 /tmp/claude-1000/chim-suites.lock <cmd>`. The `.github/scripts` suites take seconds and need no lock.
@@ -37,7 +37,7 @@ Conditions the spec implies that a reader could overlook. Each is pinned by a te
 2. **snapcraft's output written into the project dir:** it would be auto-committed into the public pushed source. Test: the stub's stray-file record, `no stray file … at any call` (mutant M10).
 3. **Bad numeric input** (`BUILD_BUDGET=0`, `-100`, `5h`; `MAX_ATTEMPTS=x`): with 0 snapcraft would wait without a timeout, with a negative value it would crash, and `5h` would make no call at all. Expect a warning and the default. Tests: `BUILD_BUDGET=…` and `MAX_ATTEMPTS=x` (M11a). The budget running out between attempts is covered by `no budget left` (M11b).
 4. **An attempt that hits `--launchpad-timeout`:** snapcraft prints one more `Succeeded:` line, fetches nothing and exits 75. Do not rebuild with the budget used up. Test: `timeout`.
-5. **snapcraft's intermediate state lines** (`Building: amd64; Succeeded: arm64`) come before the final one: parse the last. Test: every `cut` case (mutant M13); the stub prints both lines.
+5. **snapcraft's state lines arrive on stderr**, an intermediate one (`Building: amd64; Succeeded: arm64`) before the final one: capture stderr and parse the last line. Test: every `cut` case (mutants M13 and M15, `drop 2>&1`); the stub prints both lines on stderr, as snapcraft's verbose `emit.progress` does.
 
 ---
 
@@ -72,17 +72,20 @@ Work in the W-24 worktree (its path is in the W-24 brief), on branch `fix/remote
 # - `--recover` fails with the text CI got on PR 10 ("Could not find repository
 #   at path ~<owner>/+git/snapcraft-frigate-<id>"), because snapcraft looks the
 #   repository up without the project it created it under;
-# - before fetching, it prints build-state lines as snapcraft does, the last one
-#   listing every arch that built ("Building: amd64; Succeeded: arm64", then
+# - before fetching, it prints build-state lines on STDERR, where snapcraft's
+#   emit.progress puts them in verbose mode (craft_cli messages.py:645-648), the last
+#   one listing every arch that built ("Building: amd64; Succeeded: arm64", then
 #   "Succeeded: amd64, arm64"); a genuine build failure shows as "Stopped: amd64";
 # - `--launchpad-timeout=<s>`: an attempt that would take longer prints one last
-#   state line, "Timed out waiting for build.", fetches nothing and exits 75;
+#   state line (stderr), "Timed out waiting for build." (stdout: emit.message,
+#   messages.py:553), fetches nothing and exits 75;
 # - a file in the project dir that is neither the tracked snapcraft.yaml nor an
 #   ignored frigate_*.snap would be auto-committed and pushed: the stub records it
 #   in $work/stray and fails.
 # Every call appends "n|id|build-for|recover|launchpad-timeout" to $work/calls.
 # `date +%s` reads a fake clock; each snapcraft call advances it by STUB_COST
 # seconds (default 60), and each `date +%s` by STUB_DATE_TICK (default 0).
+# `sleep` records its argument in $work/sleeps and returns at once.
 set -uo pipefail  # no -e: keep all tests running even if one fails
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,7 +112,7 @@ tree_id() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r 
 # mode=authfail:    snapcraft fails before any build starts (no state line, no file).
 # mode=buildfail:   amd64 fails to BUILD on Launchpad (Stopped); the others build and
 #                   arrive whole; snapcraft exits 0 (_monitor_and_complete returns 0).
-# Layout: $work/bin (stubs), $work/calls + $work/n + $work/clock (+ $work/stray) (stub
+# Layout: $work/bin (stubs), $work/calls + $work/n + $work/clock (+ stray, sleeps) (stub
 # state), $work/proj (the project dir: one tracked file and a .git dir, as a checkout has).
 setup() {
   local mode="$1" work bin
@@ -130,6 +133,11 @@ EOF
 if [ "\${1:-}" = "+%s" ]; then
   c="\$(cat "$work/clock")"; echo "\$c"; echo \$(( c + \${STUB_DATE_TICK:-0} )) > "$work/clock"
 else exec /bin/date "\$@"; fi
+EOF
+  cat > "$bin/sleep" <<EOF
+#!/usr/bin/env bash
+# stub: record the delay, do not wait
+echo "\$*" >> "$work/sleeps"
 EOF
   cat > "$bin/snapcraft" <<EOF
 #!/usr/bin/env bash
@@ -162,7 +170,7 @@ IFS=',' read -ra req <<< "\$bf"
 first="\${req[0]}"
 if [ -n "\$to" ] && [ "\$to" -gt 0 ] && [ "\$cost" -gt "\$to" ]; then
   echo \$(( \$(cat "$work/clock") + to )) > "$work/clock"
-  echo "Succeeded: \$first"
+  echo "Succeeded: \$first" >&2
   echo "Timed out waiting for build."
   echo "To resume, run 'snapcraft remote-build --recover'"
   exit 75
@@ -170,15 +178,15 @@ fi
 echo \$(( \$(cat "$work/clock") + cost )) > "$work/clock"
 if [ "$mode" = buildfail ]; then
   ok=(); for a in "\${req[@]}"; do [ "\$a" = amd64 ] || ok+=("\$a"); done
-  echo "Stopped: amd64; Succeeded: \$(IFS=,; echo "\${ok[*]}" | sed 's/,/, /g')"
+  echo "Stopped: amd64; Succeeded: \$(IFS=,; echo "\${ok[*]}" | sed 's/,/, /g')" >&2
   for a in "\${ok[@]}"; do printf 'OK' > "frigate_0.18.2_\${a}.snap"; done
   exit 0
 fi
 if [ "\${#req[@]}" -gt 1 ]; then
-  echo "Building: \$first; Succeeded: \$(IFS=,; echo "\${req[*]:1}" | sed 's/,/, /g')"
+  echo "Building: \$first; Succeeded: \$(IFS=,; echo "\${req[*]:1}" | sed 's/,/, /g')" >&2
 fi
-echo "Succeeded: \$(echo "\$bf" | sed 's/,/, /g')"
-echo "Fetching build artifacts..."
+echo "Succeeded: \$(echo "\$bf" | sed 's/,/, /g')" >&2
+echo "Fetching build artifacts..." >&2
 for a in "\${req[@]}"; do printf 'OK' > "frigate_0.18.2_\${a}.snap"; done
 if [ "$mode" = alwayscut ] || [ "\$n" -eq 1 ]; then
   printf 'CORRUPT' > "frigate_0.18.2_\${first}.snap"
@@ -187,7 +195,7 @@ if [ "$mode" = alwayscut ] || [ "\$n" -eq 1 ]; then
 fi
 exit 0
 EOF
-  chmod +x "$bin/unsquashfs" "$bin/date" "$bin/snapcraft"
+  chmod +x "$bin/unsquashfs" "$bin/date" "$bin/sleep" "$bin/snapcraft"
   echo "$work"
 }
 
@@ -309,6 +317,13 @@ for bad in 0 -100 5h; do
   check "BUILD_BUDGET=$bad: still completes"     "snaps=2" "$(snaps_line "$out")"
   rm -rf "$work"
 done
+work="$(setup cut)"
+out="$(run "$work" amd64,arm64 RETRY_DELAY=x)"
+rc=$?
+check "RETRY_DELAY=x: warns"                    "1"       "$(warned "$out" "RETRY_DELAY='x' is not an integer >= 0; using 15")"
+check "RETRY_DELAY=x: waits the default 15 s"   "15"      "$(cat "$work/sleeps" 2>/dev/null)"
+check "RETRY_DELAY=x: completes, exit 0"        "snaps=2 0" "$(snaps_line "$out") $rc"
+rm -rf "$work"
 work="$(setup alwayscut)"
 out="$(run "$work" amd64,arm64 MAX_ATTEMPTS=x)"
 check "MAX_ATTEMPTS=x: warns and uses 3"        "1 3"     "$(warned "$out" "MAX_ATTEMPTS='x' is not an integer >= 1; using 3") $(calls "$work")"
@@ -336,7 +351,7 @@ exit "$fail"
 - [ ] **Step 2: Run it against the current script and see it fail**
 
 Run: `bash .github/scripts/remote-build.test.sh; echo "exit=$?"; bash .github/scripts/remote-build.test.sh | grep -c '^FAIL'`
-Expected: `Some remote-build tests FAILED.`, `exit=1`, and `40` FAIL lines (`16` ok). Among them must be: `cut: no call uses --recover` (actual `0 1`), `cut: call 2 rebuilds only amd64` (actual `amd64,arm64`), `alwayscut: 3 distinct build ids` (actual `1`), `buildfail: 1 snapcraft call` (actual `3`) and `budget: 1 snapcraft call` (actual `3`). A different count means the stub or the script differs from what this plan was checked against: stop and find out why before going on.
+Expected: `Some remote-build tests FAILED.`, `exit=1`, and `43` FAIL lines (`16` ok). Among them must be: `cut: no call uses --recover` (actual `0 1`), `cut: call 2 rebuilds only amd64` (actual `amd64,arm64`), `alwayscut: 3 distinct build ids` (actual `1`), `buildfail: 1 snapcraft call` (actual `3`) and `budget: 1 snapcraft call` (actual `3`). A different count means the stub or the script differs from what this plan was checked against: stop and find out why before going on.
 
 - [ ] **Step 3: Implement.** Replace `.github/scripts/remote-build.sh` entirely with the following (spec D1–D9; the header comment carries the reasons):
 
@@ -381,18 +396,21 @@ Expected: `Some remote-build tests FAILED.`, `exit=1`, and `40` FAIL lines (`16`
 set -uo pipefail
 
 ARCHS="${1:?usage: remote-build.sh <archs>, e.g. amd64,arm64,armhf}"
-# $1 = name, $2 = value, $3 = default, $4 = smallest valid value -> echoes the value to use
+# $1 = variable name, $2 = default, $3 = smallest valid value. Keeps the variable if it
+# holds an integer >= $3; otherwise warns (on stdout, where the Actions runner reads
+# workflow commands) and sets the default.
 int_or_default() {
-    case "$2" in
+    local v="${!1:-$2}"
+    case "$v" in
         ''|*[!0-9]*) ;;
-        *) if [ "${#2}" -le 9 ] && [ "$((10#$2))" -ge "$4" ]; then echo "$((10#$2))"; return; fi ;;
+        *) if [ "${#v}" -le 9 ] && [ "$((10#$v))" -ge "$3" ]; then printf -v "$1" '%s' "$((10#$v))"; return; fi ;;
     esac
-    echo "::warning::$1='$2' is not an integer >= $4; using $3" >&2
-    echo "$3"
+    echo "::warning::$1='$v' is not an integer >= $3; using $2"
+    printf -v "$1" '%s' "$2"
 }
-MAX_ATTEMPTS="$(int_or_default MAX_ATTEMPTS "${MAX_ATTEMPTS:-3}" 3 1)"
-RETRY_DELAY="$(int_or_default RETRY_DELAY "${RETRY_DELAY:-15}" 15 0)"
-BUILD_BUDGET="$(int_or_default BUILD_BUDGET "${BUILD_BUDGET:-18000}" 18000 1)"
+int_or_default MAX_ATTEMPTS 3 1
+int_or_default RETRY_DELAY 15 0
+int_or_default BUILD_BUDGET 18000 1
 
 IFS=',' read -ra WANT <<< "$ARCHS"
 want="${#WANT[@]}"
@@ -498,7 +516,7 @@ exit 0
 - [ ] **Step 4: Run the test and see it pass**
 
 Run: `bash .github/scripts/remote-build.test.sh; echo "exit=$?"; bash .github/scripts/remote-build.test.sh | grep -c '^ok'`
-Expected: `All remote-build tests passed.`, `exit=0`, `56`.
+Expected: `All remote-build tests passed.`, `exit=0`, `59`.
 
 - [ ] **Step 5: Write the mutation runner** `.github/scripts/remote-build.mutate.sh`:
 
@@ -532,11 +550,13 @@ mutate "M7 drop the budget guard"        's/if \[ \$\(\(used \+ RETRY_DELAY \+ t
 mutate "M8 drop --launchpad-timeout"     's/ \\\n\s*--launchpad-timeout="\$left"//'
 mutate "M9 keep a stale marker"          's/^rm -f "\$MARK"\n//m'
 mutate "M10 snapcraft output in ./"      's/mktemp "\$\{TMPDIR:-\/tmp\}\/remote-build-out/mktemp ".\/remote-build-out/'
-mutate "M11a drop the input validation"  's/^BUILD_BUDGET="\$\(int_or_default BUILD_BUDGET .*\)"$/BUILD_BUDGET="\$\{BUILD_BUDGET:-18000\}"/m'
+mutate "M11a drop the input validation"  's/^int_or_default BUILD_BUDGET 18000 1$/BUILD_BUDGET="\$\{BUILD_BUDGET:-18000\}"/m'
 mutate "M11b start with < 1 s left"      's/if \[ "\$left" -lt 1 \]; then/if false; then/'
 mutate "M12 tee -a (parse old attempts)" 's/\| tee "\$LOG"/| tee -a "\$LOG"/'
 mutate "M13 first state line, not last"  's/tail -n1 \| tr -d/head -n1 | tr -d/'
 mutate "M14 marker on attempt 1 too"     's/if \[ "\$attempt" -gt 1 \] && \[ -d \.git \]/if [ "\$attempt" -ge 1 ] \&\& [ -d .git ]/'
+mutate "M15 drop 2>&1 (stderr unread)"  's/--launchpad-timeout="\$left" 2>&1 \| tee/--launchpad-timeout="\$left" | tee/'
+mutate "M16 RETRY_DELAY not validated"   's/^int_or_default RETRY_DELAY 15 0$/RETRY_DELAY="\$\{RETRY_DELAY:-15\}"/m'
 [ "$bad" -eq 0 ] && echo "All mutants killed." || echo "Some mutants SURVIVED or did not apply."
 exit "$bad"
 ```
@@ -544,7 +564,7 @@ exit "$bad"
 - [ ] **Step 6: Run the mutation runner and see every mutant killed**
 
 Run: `bash .github/scripts/remote-build.mutate.sh; echo "exit=$?"`
-Expected: 15 `killed` lines (M1–M10, M11a, M11b, M12–M14), no `NOT APPLIED` and no `SURVIVED`, then `All mutants killed.` and `exit=0`. If you see `NOT APPLIED`, a pattern no longer matches the script text: fix the pattern, never the test. If you see `SURVIVED`, the test is missing a check: add it to the test. Both cases go back to Step 4.
+Expected: 17 `killed` lines (M1–M10, M11a, M11b, M12–M16), no `NOT APPLIED` and no `SURVIVED`, then `All mutants killed.` and `exit=0`. If you see `NOT APPLIED`, a pattern no longer matches the script text: fix the pattern, never the test. If you see `SURVIVED`, the test is missing a check: add it to the test. Both cases go back to Step 4.
 
 - [ ] **Step 7: Rewrite the workflow comment.** In `.github/workflows/pr-build-snap.yml`, replace exactly these lines:
 
@@ -619,10 +639,12 @@ D6, time:
 - No attempt starts with less than 1 s left: 0 would mean no timeout and a
   negative value crashes snapcraft.
 - MAX_ATTEMPTS, RETRY_DELAY and BUILD_BUDGET are validated; a bad value gives
-  a warning and the default.
+  a warning (on stdout, where the runner reads workflow commands) and the
+  default.
 
 D5a: snapcraft's output, whose last Succeeded: line picks the archs to rebuild,
-is captured per attempt (2>&1, truncated) in a temp file outside the project
+is captured per attempt (2>&1, because snapcraft prints the state lines on
+stderr; truncated) in a temp file outside the project
 dir. snapcraft auto-commits non-ignored files there into the public pushed
 source.
 
@@ -630,10 +652,11 @@ D8: snaps= now counts the requested archs that have a valid snap, matched by
 the upload step's *<arch>.snap suffix. Before, it counted distinct .snap files.
 
 Proven offline:
-- remote-build.test.sh is red on ae00129 (40 checks) and green after
-  (56). Its stub models snapcraft's build id hash, the --recover
-  failure, the state lines, --launchpad-timeout and the files it would push.
-- Each of the 15 mutants in remote-build.mutate.sh turns it red.
+- remote-build.test.sh is red on ae00129 (43 checks) and green after
+  (59). Its stub models snapcraft's build id hash, the --recover
+  failure, the state lines on stderr, --launchpad-timeout and the files it
+  would push.
+- Each of the 17 mutants in remote-build.mutate.sh turns it red.
 - All .github/scripts/*.test.sh suites and shellcheck pass.
 
 Not proven: any rebuild against Launchpad, or that a rebuild avoids another cut
@@ -699,12 +722,13 @@ New `.github/scripts/snapcraft-close.test.sh` (picked up by the existing `.githu
 
 ## Tests run
 
-- `remote-build.test.sh` uses a stub that models snapcraft's build id hash (md5 over every file's contents, `.git` included), the `--recover` failure text, the build state lines, `--launchpad-timeout` (exit 75) and the files snapcraft would push. A fake clock drives the budget. The suite is red on the previous script (40 checks) and green after (56).
-- `remote-build.mutate.sh` applies 15 mutants, and each turns the suite red:
+- `remote-build.test.sh` uses a stub that models snapcraft's build id hash (md5 over every file's contents, `.git` included), the `--recover` failure text, the build state lines (on stderr, where snapcraft prints them), `--launchpad-timeout` (exit 75) and the files snapcraft would push. A fake clock drives the budget, and a stubbed `sleep` records the retry delay. The suite is red on the previous script (43 checks) and green after (59).
+- `remote-build.mutate.sh` applies 17 mutants, and each turns the suite red:
   - re-add `--recover`; reuse the build id; rebuild all archs; drop the truncated-file check; unbounded attempts;
   - rebuild failed builds; drop the budget guard; drop `--launchpad-timeout`; keep a stale marker;
   - write snapcraft's output into the project dir; drop the input validation; start an attempt with no budget left;
-  - parse earlier attempts' output; read the first state line instead of the last; write the marker on attempt 1.
+  - parse earlier attempts' output; read the first state line instead of the last; write the marker on attempt 1;
+  - stop capturing stderr (`2>&1`), where the state lines arrive; leave `RETRY_DELAY` unvalidated.
 - The build id and push behaviour were also checked against snapcraft's own code, with no network:
   - a file under `.git` changes the id, and file names do not count;
   - with an ignored `.snap` and the marker in place, snapcraft's work tree commits nothing, so the pushed commit is the checkout's;
