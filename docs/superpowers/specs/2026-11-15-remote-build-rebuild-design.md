@@ -76,6 +76,13 @@ ignored snap -> is_clean: True
 plus log file -> is_clean: False
 ```
 
+A second probe ran snapcraft's own `WorkTree(...).init_repo()`, the copy that is pushed, under a throwaway `XDG_CACHE_HOME`. The independent reviewer also ran it.
+
+```
+ignored snap + .git marker:     HEAD files=['.gitignore', 'snapcraft.yaml']  pushed commit == checkout commit: True
+plus a non-ignored output file: HEAD files=['.gitignore', 'remote-build-out.abc', 'snapcraft.yaml']  pushed commit == checkout commit: False
+```
+
 ## 4. Decisions
 
 **D1 (the maintainer's, option 1). When the download leaves an arch without a valid snap, start a NEW remote build for it. Never use `--recover`. At most `MAX_ATTEMPTS` (default 3) attempts in total.**
@@ -124,7 +131,8 @@ Reasons:
 - 5 h leaves 60 min for the steps before and after this one. The most observed is 18 min (§6).
 - `--launchpad-timeout` caps an attempt that runs longer than estimated. On timeout snapcraft exits 75 and fetches nothing (§3.6). The script then stops, because the time is used up.
 - Attempt 1 gets the timeout too. **This is an accepted trade, stated honestly.** Between about 5 h and 5 h 40 min, the old script could still have finished an attempt and uploaded it. With the timeout on attempt 1, it now exits 75 at 5 h and fetches nothing. That is accepted because it keeps the upload step and the gate reachable inside 6 h. Past about 5 h 40 min the old script lost the upload anyway, because GitHub killed the job.
-- **Invariant: `left` is always ≥ 1.** It is clamped, because `--launchpad-timeout=0` means no timeout and a negative value is an internal error (§3.6). `BUILD_BUDGET` must be a positive integer. Any other value gives a `::warning::` and the script uses the default 18000.
+- **Invariant: no attempt starts with `left` < 1.** The script prints `::warning::not starting attempt <n>: the <budget>s budget is used up` and stops. `--launchpad-timeout=0` would mean no timeout, and a negative value is an internal error (§3.6). Clamping to 1 s was considered and dropped (plan review P3), because it would start a Launchpad build only to abandon it.
+- **Input validation:** `BUILD_BUDGET` and `MAX_ATTEMPTS` must be integers ≥ 1, and `RETRY_DELAY` an integer ≥ 0. Any other value (`0`, `-100`, `5h`, `x`) gives a `::warning::` and the default (18000, 3, 15).
 
 **D7 (the controller's D5). The channel-close fix in ae00129 stays unchanged.** That covers dropping `--yes`, the fallback printing the real exit status as a `::warning::`, and `snapcraft-close.test.sh`. Neither W-24 task touches `release-on-merge.yml` or `snapcraft-close.test.sh`.
 
@@ -183,10 +191,12 @@ Arithmetic, 6 h = 21600 s:
 | `buildfail`, amd64+arm64+armhf (amd64 `Stopped`) | 1 call; snaps=2; exit 0; `::warning::not rebuilding amd64: Launchpad did not report it Succeeded` |
 | `cut`, STUB_COST=15022 (PR #9's attempt length) | 1 call; snaps=1; `::warning::not rebuilding amd64: attempt 1 took 15022s` |
 | GITHUB_OUTPUT | receives `snaps=2` |
-| `cut` with the stub's tree check (every case) | the stub exits non-zero, with a message, when the project dir holds an untracked file that is not ignored when it is called. Only `snapcraft.yaml` and `frigate_*.snap` are allowed outside `.git`. This keeps the output file out of the tree (D5a) |
-| `BUILD_BUDGET=0` | `::warning::` and the default is used: call 1 gets `--launchpad-timeout=18000` |
+| the stub's tree check (every case; asserted in `cut` and `alwayscut`) | when called, the stub records and fails on any untracked file in the project dir that is not ignored. Only `snapcraft.yaml` and `frigate_*.snap` are allowed outside `.git`. This keeps the output file out of the tree (D5a) |
+| `cutthenfail`: call 1 cut, call 2 fails before any state line | exactly 2 calls; `::warning::not rebuilding amd64: … in attempt 2` (the output is parsed per attempt) |
+| `BUILD_BUDGET` = `0`, `-100`, `5h`; `MAX_ATTEMPTS=x` | `::warning::` and the default: call 1 gets `--launchpad-timeout=18000`; at most 3 calls |
 | `timeout` stub: prints `Succeeded: amd64`, then exits 75 with `Timed out waiting for build` and nothing fetched; the budget is used up | exactly 1 call; no rebuild; snaps=0 |
-| `left` clamp (budget almost used) | no call ever gets `--launchpad-timeout` below 1 |
+| `no budget left` (the clock runs out between attempts) | 1 call; `::warning::not starting attempt 2 …`; no call gets `--launchpad-timeout` below 1 |
+| attempt 1's build id | equals the test's own hash of the clean tree (no marker on attempt 1; plan review P5) |
 
 The suite must be **red on the current script** (ae00129) and green after. Each mutation below, applied to the new script, must turn it red (checked by a mutation runner in the plan):
 
@@ -202,7 +212,13 @@ The suite must be **red on the current script** (ae00129) and green after. Each 
 | M8 drop `--launchpad-timeout` | the `cut` timeout checks |
 | M9 keep a stale marker from an earlier run | the stale-marker check |
 | M10 write snapcraft's output into the project dir (`./`) | the stub's tree check |
-| M11 drop the `left ≥ 1` clamp or the `BUILD_BUDGET` validation | the `BUILD_BUDGET=0` and clamp cases |
+| M11a drop the input validation | the `BUILD_BUDGET=…` cases |
+| M11b start an attempt with `left` < 1 | the `no budget left` case |
+| M12 `tee -a` (parse earlier attempts' output) | `cutthenfail` |
+| M13 parse the first state line instead of the last | the `cut` cases (the stub prints `Building: amd64; Succeeded: arm64` before the final line) |
+| M14 write the marker on attempt 1 too | attempt 1's id check |
+
+Two more mutants survive and are equivalent, according to the plan review, so they need no test. X4: a `./*"$1"*` glob, because no real arch name is a substring of another. X8: dropping the `[ -d .git ]` guard, which differs only when `.git` is a file.
 
 Also: every `.github/scripts/*.test.sh` and both shellcheck steps of `lint-test.yml` pass. The baseline is green on ae00129 (checked 2026-11-15: all six suites passed, shellcheck 0.9.0 clean).
 
@@ -228,6 +244,7 @@ ae00129's channel-close fix and `snapcraft-close.test.sh` (D7); `prune_corrupt` 
   - If it is false, the cut is network luck and a retry may be cut again.
   - Either way, if all attempts end incomplete, the pipeline does what it does today. It uploads the valid snaps to `latest/edge/PR<N>`, and `Fail if build/upload incomplete` goes red when a required arch (`REQUIRED_ARCHS=amd64`) is missing. That is kept.
 - **Follow-up, not in this PR:** fetch the artifacts without an idle second connection, for example by fetching one file at a time ourselves. That needs a way to reach a finished build again, which is the maintainer's option 2 from the PR #10 question.
+- **Follow-up, not in this PR (plan review P8):** snapcraft's build-log files (`snapcraft-frigate-<id>_<arch>_<time>.txt`, `ca/commands/remote.py:227`) land in the project dir, and they are **not** ignored. They appear only after every artifact of an attempt has downloaded. A later attempt therefore follows only if a fully downloaded snap then failed `snap_ok`. In that rare case, the log would be auto-committed into the pushed source of the next attempt. A `.gitignore` entry or moving the logs out before a retry would close this. Both are outside this PR's scope.
 - **The same-id reuse path (§3.2) is not exercised.** D3 avoids depending on it, except when `.git` is not a directory.
 - **`--launchpad-timeout` was read in the source, not run** (0 means none, a negative value is an internal error, one more state line is printed after the deadline; §3.6). Its behaviour on Launchpad (exit 75, builds continue) is unproven.
 - **The `Succeeded:` line format** was read in the source (`ca/commands/remote.py:218`) and seen in three 9.2.1 CI logs. A future snapcraft could change it. The failure mode is safe: D5 then rebuilds nothing, which is today's outcome.
