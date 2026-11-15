@@ -1,0 +1,8 @@
+Rev.    Uploaded              Arches    Version    Channels
+7       2026-11-13T22:01:57Z  amd64     0.18.2     latest/edge*,latest/edge/PR8*
+6       2026-11-13T12:18:58Z  amd64     0.17.2     latest/edge,latest/edge/PR7*
+5       2026-07-15T01:04:41Z  amd64     0.17.2     latest/edge,latest/edge/PR4*
+4       2026-07-13T23:25:28Z  amd64     0.17.2     latest/edge/PR4
+3       2026-07-10T15:18:21Z  amd64     0.17.2     latest/beta*,latest/edge,latest/edge/PR3*
+2       2026-07-10T03:43:10Z  amd64     0.17.2     latest/edge,latest/edge/PR2*
+1       2026-07-09T22:47:49Z  amd64     0.17.2     latest/edge,latest/edge/PR1*

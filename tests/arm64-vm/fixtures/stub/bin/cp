@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "cp $*" >> "$STUB_ST/log"
+

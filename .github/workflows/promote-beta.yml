@@ -44,10 +44,11 @@ jobs:
           REVISION: ${{ inputs.revision }}
         run: |
           set -euo pipefail
+          set -a; . .github/release-archs.env; set +a
           if [ -n "$REVISION" ]; then
             echo ">> releasing revision $REVISION -> latest/beta"
-            snapcraft release "$SNAP_NAME" "$REVISION" latest/beta
+            .github/scripts/release-arch.sh --revision "$REVISION" latest/beta "$BETA_ARCHS"
           else
             echo ">> promoting latest/edge -> latest/beta"
-            snapcraft promote "$SNAP_NAME" --from-channel latest/edge --to-channel latest/beta --yes
+            .github/scripts/release-arch.sh latest/edge latest/beta "$BETA_ARCHS"
           fi

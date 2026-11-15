@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "curl $*" >> "$STUB_ST/log"
+echo "0.18.2-stub"

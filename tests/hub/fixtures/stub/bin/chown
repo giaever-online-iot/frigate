@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fake chown for the hub stubs: the test user cannot chown to root; succeed without changing anything.
+exit 0

@@ -14,7 +14,8 @@ LIBAVFORMAT_VERSION_MAJOR=$("$SNAP/usr/lib/ffmpeg/$DEFAULT_FFMPEG_VERSION/bin/ff
 export LIBAVFORMAT_VERSION_MAJOR
 # cv2 needs libGL.so.1 from the mesa-2604 content mount (gpu/cleanup strips it from
 # the snap prime — Task 10 finding; imports-probe / CLI-apps precedent for non-gpu-extension apps).
-MESA_LIB="$SNAP/gpu-2604/mesa-2604/usr/lib/x86_64-linux-gnu"
+_TRIPLET=$(arch_triplet)
+MESA_LIB="$SNAP/gpu-2604/mesa-2604/usr/lib/$_TRIPLET"
 # if-form, not '[ ] &&': set -e would abort when the content mount is absent
 if [ -d "$MESA_LIB" ]; then export LD_LIBRARY_PATH="$MESA_LIB:${LD_LIBRARY_PATH:-}"; fi
 mkdir -p "$SNAP_DATA/config" "$SNAP_COMMON/media/frigate" /tmp/cache

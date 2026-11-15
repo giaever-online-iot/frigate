@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fake ssh for tests/hub/*.test.sh: no network, no real master. State in $STUB_ST:
+#   gone          exists => the master is gone (-O check and every session rc 255)
+#   die-after     N => after N sessions the master dies (creates gone; that session rc 255)
+#   corrupt       exists => a session's stdin gets one extra byte (a damaged copy)
+#   log           one line per call: the full argv, tab-separated
+# A session's remote string is run with sh -c, PATH = fixtures/stub/bin first (a fake sudo that drops -n), or,
+# when $STUB_RESPONDER is set, handed to that program as $1 (stdin passes through) instead.
+set -u
+st="${STUB_ST:?}"; here=$(cd "$(dirname "$0")" && pwd)
+( IFS=$'\t'; printf '%s\n' "$*" ) >> "$st/log"
+check=0; target=""; rest=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -F|-S|-o) shift 2 ;;
+    -O) [ "${2:-}" = check ] && check=1; shift 2 ;;
+    -*) shift ;;
+    *) target=$1; shift; rest=("$@"); break ;;
+  esac
+done
+[ -n "$target" ] || { echo "stub ssh: no target" >&2; exit 255; }
+[ -e "$st/gone" ] && { echo "Connection closed by UNKNOWN port 65535" >&2; exit 255; }
+# A check that reads stdin would swallow what the caller meant for the session: model a greedy ssh.
+if [ "$check" = 1 ]; then [ -n "${STUB_GREEDY_CHECK:-}" ] && cat > /dev/null; echo "Master running (pid=4242)" >&2; exit 0; fi
+n=$(( $(cat "$st/sessions" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$st/sessions"
+if [ -f "$st/die-after" ] && [ "$n" -gt "$(cat "$st/die-after")" ]; then
+  : > "$st/gone"; echo "mux_client_request_session: read from master failed: Broken pipe" >&2; exit 255
+fi
+remote="${rest[*]}"
+if [ -e "$st/corrupt" ]; then
+  if [ -n "${STUB_RESPONDER:-}" ]; then { cat; printf 'X'; } | "$STUB_RESPONDER" "$remote"; exit $?; fi
+  { cat; printf 'X'; } | PATH="$here/bin:$PATH" sh -c "$remote"; exit $?
+fi
+if [ -n "${STUB_RESPONDER:-}" ]; then "$STUB_RESPONDER" "$remote"; exit $?; fi
+PATH="$here/bin:$PATH" sh -c "$remote"

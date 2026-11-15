@@ -1,0 +1,8 @@
+#!/bin/sh
+# Fake sleep for observe.test.sh: records the seconds, then moves the fake hub from phase a to b (every *.b file in
+# the tree replaces its sibling) instead of waiting.
+echo "$1" >> "$OBS_TREE/slept"
+if [ "$(cat "$OBS_TREE/phase")" = a ]; then
+  find "$OBS_TREE/root" -name '*.b' | while IFS= read -r f; do cp "$f" "${f%.b}"; done
+  echo b > "$OBS_TREE/phase"
+fi

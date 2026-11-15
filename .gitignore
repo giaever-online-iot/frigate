@@ -11,3 +11,7 @@
 
 # python -m unittest discover -s tests creates it
 tests/__pycache__/
+# Python bytecode from local test runs (never committed; the m7c-arch tripwire still guards spike/bin and
+# spike/probes, because ignoring does not stop the snap's dump parts from shipping files)
+__pycache__/
+*.pyc
