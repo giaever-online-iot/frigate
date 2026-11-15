@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-14, hub results added 2026-11-15  **Snap:** `frigate` 0.18.2 (core26, strict), arm64 and amd64  **PR:** #9, branch `feat/m7c-arm64`, CI-built at head `9a2e833` (later commits on the branch touch only `tests/**` and `docs/**`)  **Spec:** `docs/superpowers/specs/2026-11-13-m7c-arm64-design.md`  **Plan:** `docs/superpowers/plans/2026-11-13-m7c-arm64.md`, Part 2 (T14, T15), both on branch `spec/m7c-arm64-research`.
 
-**Status in one paragraph.** T14 is complete. The arm64 artifact is clean of foreign ELF (V2), its wheel set is the amd64 set with arm64 tags and one justified name difference (V3b), and the amd64 non-regression census against the released revision is fully explained (V1). The arm64 size floor is set from the first real artifact. T15 ran in an emulated Cortex-A76 VM on the local Launchpad arm64 file. It was **stopped by the maintainer's decision** after about 7 hours, because emulation ran about 19× slower than real hardware and tied up the laptop. Before the stop, V5 (bytes, install, layout), V6, V18, V7, V9 and the V9 mutation **PASSED**. V10, V11, V-OV, V-restore, V17 and the V8 full harness were **NOT RUN in the VM**. They are not claimed here. Verification moved to the hub. **On the Pi hub** (Raspberry Pi 5, aarch64, Ubuntu Core, snapd 2.78) the exact arm64 file installs, starts, runs the synthetic camera stand-in stably for 3 h 05 min and loads the Coral. Real-camera and long-run behaviour are **NOT PROVEN**: the cameras refuse RTSP, and the longest run ended after 3 h 05 min when the maintainer rebooted the hub (section "Results on the Pi hub"). This is not a production verdict on the arm64 file.
+**Status in one paragraph.** T14 is complete. The arm64 artifact is clean of foreign ELF (V2), its wheel set is the amd64 set with arm64 tags and one justified name difference (V3b), and the amd64 non-regression census against the released revision is fully explained (V1). The arm64 size floor is set from the first real artifact. T15 ran in an emulated Cortex-A76 VM on the local Launchpad arm64 file. It was **stopped by the maintainer's decision** after about 7 hours, because emulation ran about 19× slower than real hardware and tied up the laptop. Before the stop, V5 (bytes, install, layout), V6, V18, V7, V9 and the V9 mutation **PASSED**. V10, V11, V-OV, V-restore, V17 and the V8 full harness were **NOT RUN in the VM**. They are not claimed here. Verification moved to the hub. **On the Pi hub** (Raspberry Pi 5, aarch64, Ubuntu Core, snapd 2.78) the exact arm64 file installs, starts, runs the synthetic camera stand-in stably for 7 h 40 min (run 3, the longest of three runs) and loads the Coral. Real-camera and long-run behaviour are **NOT PROVEN**: the cameras refuse RTSP, and no run reached 24 h (section "Results on the Pi hub"). This is not a production verdict on the arm64 file.
 
 **Evidence classes.**
 
@@ -53,9 +53,9 @@ The snap is **private** on the Store. `snap download` answers "snap not found" e
 | V6 (hub) | 18 imports incl. sqlite_vec, 4 HEVC decoders, ffprobe | **PASS** | `[HUB: probe-20261114T140443/results.txt, hevc.txt, ffprobe.txt]` |
 | V18 (hub) | EdgeTPU with the Coral USB present: dlopen, `load_delegate`, one inference | **PASS** | `[HUB: probe-20261114T140443/coral-json.txt, dlopen-json.txt, usb-before.txt, usb-after.txt]` |
 | V-OV (hub) | the D10 guard functions in the snap's shell on arm64, stopped | **PASS, stopped-state only**. The start-time behaviour is NOT PROVEN | `[HUB: probe-20261114T140443/v-ov-stopped.txt]` |
-| V7 (hub, stand-in) | CPU decode of H.265 into the detect pipeline, `hwaccel_args: ""`, Coral detector | **PASS for the stand-in**: camera_fps 5 or 5.1 against detect fps 5, skipped_fps 0, in all 6 snapshots. The Coral ran no detections (detection_fps 0) | `[HUB: observe-*/results.txt, run2/observe-*/results.txt]` |
+| V7 (hub, stand-in) | CPU decode of H.265 into the detect pipeline, `hwaccel_args: ""`, Coral detector | **PASS for the stand-in**: camera_fps 5 or 5.1 against detect fps 5, skipped_fps 0, in all 9 snapshots. The Coral ran no detections (detection_fps 0) | `[HUB: observe-*/results.txt, run2/observe-*/results.txt, run3/observe-*/results.txt]` |
 | V9 (hub, stand-in) | shm bound (D13a) with a 1920x1080 and a 640x360 detect stream | **PASS**: 50 frame files per camera, `/dev/shm/snap.frigate` 173,422,202 to 173,427,663 B | ditto |
-| V10 (hub, stand-in) | memory in steady state | **MEASURED, no verdict**: anon 1,008 to 1,044 MiB, shmem 172 to 198 MiB; page cache fills the 4 GB group to its cap without a restart | ditto, and section "Results on the Pi hub" |
+| V10 (hub, stand-in) | memory in steady state | **MEASURED, no verdict**: anon 1,008 to 1,090 MiB (1,057 to 1,090 over run 3's last 7 h 07 min), shmem 172 to 198 MiB; page cache fills the 4 GB group to its cap without a restart | ditto, and section "Results on the Pi hub" |
 | V11, V17, V8, F11 (hub) | quota squeeze, hold/revert/purge, the full harness, Store auto-connect | **NOT RUN on the hub** (dropped for the hub, or impossible with a private snap) | section "Verification moved to the hub" |
 
 ### Battery lines as printed (file mode, SPIKE_TIME_SCALE=20)
@@ -132,8 +132,8 @@ Caveats for whoever computes it from a hub measurement:
 
 - **The battery's V10 is narrower than the spec.** It reads `MemoryPeak` of `snap.frigate.frigate.service` only, while spec §9 V10 asks for `MemoryPeak` per `snap.frigate.*` unit. A cap for the whole group should sum the units (or read the quota group's own current memory) and use `anon + shmem` for the unreclaimable part (§7.2). `MemoryCurrent` includes reclaimable page cache from recording writes.
 - **The workload differs.** The VM fixture ran the CPU detector on two 640×360 test cameras. The hub was meant to run the Coral with real cameras, so a VM number would not have carried over unchanged anyway.
-- **What the hub showed** (stand-in, section "Results on the Pi hub"): over 3 h the group's `MemoryPeak` reached 3,814 MiB against a `MemoryMax` of 3,815 MiB, which is the 4 GB cap itself, while anon stayed at 1,008 to 1,044 MiB and shmem at 172 to 198 MiB `[HUB: observe-*/results.txt, run2/observe-*/results.txt]`. The rest was page cache from recording writes, which the kernel reclaims at the cap. So the rule must use **anon + shmem**, not raw `MemoryPeak`: a cap computed from `MemoryPeak` would only reproduce whatever cap was set.
-- **Why the stand-in is not the basis.** The largest sampled anon + shmem is 1,225 MiB (run 1 at 1 h 38 min). The rule applied to that would give the 2 GB floor. That is **not adopted**: the samples are six point readings (cgroup v2 records no anon peak), the stand-in had no detection load (detection_fps 0), and no run lasted 24 h. The measurement shows only that nothing in 3 h came near an OOM under a 4 GB cap.
+- **What the hub showed** (stand-in, section "Results on the Pi hub"): in run 2 the group's `MemoryPeak` reached 3,814 MiB, and in run 3 3,815 MiB, against a `MemoryMax` of 3,815 MiB, which is the 4 GB cap itself, while anon stayed at 1,008 to 1,090 MiB and shmem at 172 to 198 MiB `[HUB: observe-*/results.txt, run2/observe-*/results.txt, run3/observe-*/results.txt]`. The rest was page cache from recording writes, which the kernel reclaims at the cap. So the rule must use **anon + shmem**, not raw `MemoryPeak`: a cap computed from `MemoryPeak` would only reproduce whatever cap was set.
+- **Why the stand-in is not the basis.** The largest sampled anon + shmem is 1,271 MiB (run 3 at 7 h 40 min), 46 MiB above the largest of runs 1 and 2 (1,225 MiB). The rule applied to it would still give the 2 GB floor, but only just: 1.5 × 1,271 MiB is 1,907 MiB, about 2.0 GB. That is **not adopted**: the samples are nine point readings (cgroup v2 records no anon peak), anon was still rising when run 3 ended (below), the stand-in had no detection load (detection_fps 0), and no run lasted 24 h. The measurement shows only that nothing in 7 h 40 min came near an OOM under a 4 GB cap.
 
 ---
 
@@ -202,7 +202,7 @@ At the first H5 start both cameras refused RTSP (connection refused on port 554)
 
 On all three, pts were strictly increasing and there were 0 decode error lines, 3 exec ffmpegs and 0 go2rtc ERR lines.
 
-Since then shown on the hub: validate-config accepted the exec lines `[REPORT: orchestrator]`, and under the hub's confinement go2rtc ran all three exec ffmpegs, reading the clips, for up to 5,882 s without a restart `[HUB: observe-2h/results.txt]`. The first hub observe failed both cameras only because observe.sh compared camera_fps with the clips' native 25 and 15 fps. Frigate's camera_fps is the detect rate (5), so the check now uses the detect fps (commit `77d4169`) `[HUB: observe-start-first-wrong-fps-expectation/results.txt]`.
+Since then shown on the hub: validate-config accepted the exec lines `[REPORT: orchestrator]`, and under the hub's confinement go2rtc ran all three exec ffmpegs, reading the clips, for up to 27,608 s (run 3) without a restart `[HUB: observe-2h/results.txt, run3/observe-6h/results.txt]`. The first hub observe failed both cameras only because observe.sh compared camera_fps with the clips' native 25 and 15 fps. Frigate's camera_fps is the detect rate (5), so the check now uses the detect fps (commit `77d4169`) `[HUB: observe-start-first-wrong-fps-expectation/results.txt]`.
 
 **NOT PROVEN by the stand-in:**
 - the real cameras' RTSP (they refuse it today), logins, reconnects, packet loss and timestamp jumps;
@@ -214,7 +214,7 @@ The synthetic motion is constant, which is pessimistic for motion detection and 
 
 ## Results on the Pi hub (Raspberry Pi 5, aarch64, Ubuntu Core, snapd 2.78)
 
-**In one line:** the exact arm64 file installs, starts, runs the stand-in stably for 3 h 05 min and loads the Coral on aarch64. Real-camera and long-run behaviour are not proven. Every hub step ran on the maintainer's go and was run by the orchestrator; no worker connected to the hub (D14). Times are CET. MB and GB in the observe and watcher lines are 2^20 and 2^30 bytes (MiB and GiB); quota sizes set with `snap set-quota` are decimal (4 GB = 4,000,000,000 B, which the slice shows as `MemoryMax` 3,815 MiB).
+**In one line:** the exact arm64 file installs, starts, runs the stand-in stably for 7 h 40 min (run 3, the longest of three runs) and loads the Coral on aarch64. Real-camera and long-run (24 h) behaviour, the Coral under real detection load and a graceful stop are not proven. Every hub step ran on the maintainer's go and was run by the orchestrator; no worker connected to the hub (D14). Times are CET. MB and GB in the observe and watcher lines are 2^20 and 2^30 bytes (MiB and GiB); quota sizes set with `snap set-quota` are decimal (4 GB = 4,000,000,000 B, which the slice shows as `MemoryMax` 3,815 MiB).
 
 ### Install and stopped-state probe (H1 to H4)
 
@@ -232,7 +232,7 @@ The synthetic motion is constant, which is pessimistic for motion detection and 
 
 ### The workload: the synthetic stand-in, and what it does not exercise
 
-The cameras refuse RTSP (connection refused on port 554 for all four stream URLs) `[REPORT: orchestrator]`, so **no real-camera run exists**. Both runs used the stand-in from the previous section:
+The cameras refuse RTSP (connection refused on port 554 for all four stream URLs) `[REPORT: orchestrator]`, so **no real-camera run exists**. All three runs used the stand-in from the previous section:
 
 - two looped H.265 clips, 180 s each, played into go2rtc by exec ffmpeg sources;
 - cam1 detects and records the 1080p25 clip;
@@ -261,11 +261,28 @@ What it does **not** exercise:
 - **A second reboot.** The maintainer rebooted the hub a second time at about 22:22: that boot's journal ends at 21:22:07 UTC `[HUB: journal-excerpts.txt]`. Frigate had already been stopped at 22:18 (journal) and disabled `[REPORT: orchestrator]`, so this did not affect the run. The next boot, today's, began at about 22:23 CET on 14 Nov `[REPORT: orchestrator]`.
 - **Watcher** (367 samples at 30 s): 0 TRIP lines, Frigate NRestarts 0 until the reset, and the Home Assistant unit and container untouched `[HUB: run2/watch-act-run2-19h08-to-22h13.log]`.
 
+### Run 3: 15 Nov, about 11:49 to the planned stop at 19:29:35 (7 h 40 min)
+
+- **Timeline.** Frigate's start, the first of that boot, worked at once (finding b), and the run ended with the planned stop, issued at 19:29:35 `[HUB: run3/stop-journal-excerpt.txt]`. The last snapshot saw a Frigate uptime of 27,606 s (7 h 40 min) `[HUB: run3/observe-6h/results.txt]`; its directory is named `observe-6h`, but that name is only a label. The watcher ran from 11:48:45 to 19:30:08 (laptop clock) `[HUB: run3/watch-act-run3.log]`.
+- **Snapshots.** observe.sh ran at Frigate uptimes of 463 s, 1,974 s and 27,606 s (8 min, 33 min and 7 h 40 min), 7 PASS and 0 FAIL each `[HUB: run3/observe-start, run3/observe-30min, run3/observe-6h]`. Their numbers are in the table below.
+- **Stability.** NRestarts was 0 for all four units at every snapshot. The same three exec ffmpeg PIDs ran throughout, 27,608 s at the last snapshot (`none restarted since --prev`) `[HUB: run3/observe-6h/results.txt]`.
+- **Memory.** anon went from 1,049 MiB (8 min) to 1,057 MiB (33 min) to 1,090 MiB (7 h 40 min): 33 MiB over the last 25,632 s, about 5 MiB per hour. These are three point readings, so they do not show whether anon levels off; **anon is not shown flat, and a 24 h run is needed for that**. shmem was 174, 180 and 181 MiB and `file` 969, 1,564 and 2,564 MiB. At the end, anon + shmem was 1,271 MiB, 46 MiB above the largest reading of runs 1 and 2 (1,225 MiB). The slice stood at the cap: `MemoryCurrent` 3,798 MiB, `MemoryPeak` 3,815 MiB, `MemoryMax` 3,815 MiB `[HUB: run3/observe-*/results.txt]`.
+- **CPU.** Over the 25,632 s between the 33-min and the last snapshot, the slice averaged 0.88 cores (frigate 0.83, go2rtc 0.05). The 2-core quota throttled 3,778 of 256,324 periods (1.5 %), 460 s in total `[HUB: run3/observe-6h/results.txt, "cpu since --prev"]`.
+- **shm.** `/dev/shm/snap.frigate` was 173,422,213 B (165 MiB) with 50 frame files per camera in all three snapshots.
+- **Watcher** (act mode, 915 samples at 30 s, 913 of them while Frigate ran, i.e. up to 19:29:08) `[HUB: run3/watch-act-run3.log]`; the figures below were recomputed from the log while writing this `[VERIFIED: recomputed from run3/watch-act-run3.log]`:
+  - **0 TRIP lines.** Frigate's NRestarts stayed 0. The Home Assistant unit kept the same MainPID with 0 restarts (NRestarts 1 from before the run, unchanged), and its container stayed running with RestartCount 0.
+  - **MemAvailable** 13,046 to 14,451 MiB.
+  - **Swap** was 0 until 13:15, rose to 16 to 17 MiB by 13:50 and then slowly to 23 MiB (18:43), its maximum. After the stop it fell to 9 MiB and then 0.
+  - **Disk free** went from 199 to 190 GiB (1 GiB resolution, not monotonic), about 1.2 GiB per hour.
+  - **Home Assistant** answered HTTP 200 in 11 to 53 ms in 912 of the 913 samples. The exception is one sample at 13:02:58, where the TCP connect to its port failed (`tcp=1`) and no status line came (`http=none`, 19 ms); the samples 30 s before and after were HTTP 200. The watcher's rule needs 3 such samples in a row, so it did not trip. Runs 1 and 2 had no such sample.
+  - **Load.** The 1-minute load averaged 1.24 (max 5.96). 9 of the 913 samples were above 3.5, the load rule's threshold: 12:06 (3.55), 14:00 (4.40), 14:01 (3.54), 15:00 (5.96), 15:01 (4.11), 18:00 (3.61), 19:00 (4.88 and 3.89) and 19:21 (3.62). They came in bursts of 1 or 2 samples, 7 of the 9 within the first two minutes of an hour. The rule needs load above 3.5 for 10 minutes, so none came near a trip. At the 3.0 level used for runs 1 and 2, the bursts were shorter (at most 1.5 minutes) and several again came about 16.6 minutes apart. **Cause not identified.**
+- **The stop** at 19:29:35 was SIGKILLed after the 30 s timeout, like every earlier stop of a running Frigate (finding a), and left `/dev/shm/snap.frigate` behind (finding d) `[HUB: run3/stop-journal-excerpt.txt]`.
+
 Later runs get their own subsection after this one.
 
 ### Numbers
 
-Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one core) `[HUB: observe-*/results.txt, run2/observe-*/results.txt]`:
+Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one core) `[HUB: observe-*/results.txt, run2/observe-*/results.txt, run3/observe-*/results.txt]`:
 
 | Snapshot (Frigate uptime) | slice MemoryCurrent / Peak MiB | anon MiB | shmem MiB | file MiB | slice cores | cam1 detect ffmpeg | cam2_sub detect ffmpeg | throttled periods | Home Assistant |
 |---|---|---|---|---|---|---|---|---|---|
@@ -275,9 +292,12 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
 | run 2, 282 s | 3,736 / 3,750 | 1,018 | 176 | 2,604 | 0.94 | 52.1 % | 8.1 % | 0 of 101 | 12 ms |
 | run 2, 1,973 s | 3,244 / 3,814 | 1,024 | 188 | 2,114 | 0.94 | 52.4 % | 8.2 % | 0 of 101 | 16 ms |
 | after reset, 221 s | 2,011 / 2,027 | 1,044 | 172 | 909 | 0.69 | 42.6 % | 4.7 % | 1 of 101 | 24 ms |
+| run 3, 463 s | 2,074 / 2,092 | 1,049 | 174 | 969 | 0.87 | 52.3 % | 5.8 % | 1 of 101 | 13 ms |
+| run 3, 1,974 s | 2,696 / 2,715 | 1,057 | 180 | 1,564 | 0.88 | 53.4 % | 5.8 % | 0 of 102 | 17 ms |
+| run 3, 27,606 s | 3,798 / 3,815 | 1,090 | 181 | 2,564 | 0.85 | 51.3 % | 5.6 % | 0 of 102 | 12 ms |
 
 - **Memory.**
-  - The unreclaimable part (anon + shmem) stayed between 1,180 and 1,225 MiB in every snapshot.
+  - The unreclaimable part (anon + shmem) stayed between 1,180 and 1,225 MiB in every snapshot of runs 1 and 2. In run 3 it was 1,223, 1,237 and 1,271 MiB, with anon still rising at the end (Run 3 above).
   - Page cache (`file`) grew from recording writes. It took the slice from 2,033 to 3,653 MiB between the 30-min and the 1 h 38 min snapshots of run 1 `[HUB: observe-2h/results.txt, "memory since --prev"]`.
   - In run 2, `MemoryPeak` reached 3,814 MiB against `MemoryMax` 3,815 MiB, i.e. the cap, and `MemoryCurrent` was back at 3,244 MiB: the kernel reclaimed cache at the cap. No unit restarted.
   - The page cache charged to the quota group survived the stop between the runs: run 2 began at 3,736 MiB for the slice while the frigate unit itself held 1,273 MiB.
@@ -286,12 +306,12 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
   - Over the 3,985 s between run 1's second and third snapshots, the slice averaged 0.90 cores (frigate 0.86, go2rtc 0.04). The 2-core quota throttled 449 of 39,852 periods (1.1 %), 42.9 s in total `[HUB: observe-2h/results.txt, "cpu since --prev"]`.
   - Decoding the 1920x1080 25 fps clip at its native size (cam1's detect ffmpeg, CPU decode) took 51.9 to 53.1 % of one core in steady state; the 640x360 15 fps clip took 5.7 to 8.2 %.
   - The after-reset snapshot is lower (42.6 % and 4.7 %). Its cause was not investigated; it came 4 minutes after a cold boot.
-  - Run 2 has no long-window average, because no observe in run 2 was taken with `--prev`.
+  - Run 2 has no long-window average, because no observe in run 2 was taken with `--prev`. Run 3's, over 25,632 s, was 0.88 cores with 1.5 % of periods throttled (Run 3 above).
 - **Cameras.**
-  - camera_fps was 5 or 5.1 against detect fps 5 on both cameras in all six snapshots, with skipped_fps 0, so the decode kept up with real time.
-  - The 3 exec ffmpegs ran 5,882 s in run 1 without a restart.
+  - camera_fps was 5 or 5.1 against detect fps 5 on both cameras in all nine snapshots, with skipped_fps 0, so the decode kept up with real time.
+  - The 3 exec ffmpegs ran 5,882 s in run 1 and 27,608 s in run 3 without a restart.
 - **shm.** `/dev/shm/snap.frigate` was 173,422,202 to 173,427,663 B (165 MiB), with 50 frame files per camera in every snapshot.
-- **Host** (the watcher's 30 s samples, both runs) `[HUB: watch-act-final-before-reboot.log, run2/watch-act-run2-19h08-to-22h13.log]`:
+- **Host** (the watcher's 30 s samples, runs 1 and 2; run 3's are in its subsection) `[HUB: watch-act-final-before-reboot.log, run2/watch-act-run2-19h08-to-22h13.log]`:
   - **MemAvailable** never below 13,016 MiB.
   - **Swap** 0 in run 1. In run 2 it rose from 0 to 1 MiB at 20:55 and to 17 MiB by the last sample at 22:12:49. The after-reset snapshot shows 0.
   - **Disk free** on the data filesystem went from 206 to 203 GiB in run 1 and from 203 to 199 GiB in run 2 (1 GiB resolution). That fits two recordings of the ~1.6 Mbit/s clip, about 1.3 GiB per hour.
@@ -301,13 +321,14 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
 
 ### New findings
 
-- **a. A stop is not graceful: 3 of 3 stops of a running Frigate were killed.** The journal shows three such stops, at 14:08:37, 16:57:59 and 22:18:39 (13:08:37, 15:57:59 and 21:18:39 UTC as the journal stamps them) `[HUB: journal-excerpts.txt]`. They were the end of the 2 min 50 s first start (H5), the end of run 1, and the stop after the post-reset snapshot.
+- **a. A stop is not graceful: 4 of 4 stops of a running Frigate were killed.** The journal shows three such stops on 14 Nov, at 14:08:37, 16:57:59 and 22:18:39 (13:08:37, 15:57:59 and 21:18:39 UTC as the journal stamps them) `[HUB: journal-excerpts.txt]`. They were the end of the 2 min 50 s first start (H5), the end of run 1, and the stop after the post-reset snapshot. The fourth was the end of run 3, issued at 19:29:35 on 15 Nov; `snap stop` returned after 31.2 s, and `systemctl show` then gave `Result=timeout`, `ExecMainStatus=9` and `NRestarts=0` `[HUB: run3/stop-journal-excerpt.txt]`. That excerpt has no journal timestamps.
   - Each hit `State 'stop-sigterm' timed out. Killing` 30 s after `Stopping`. systemd sent SIGKILL to two python3.11 processes, and the unit `Failed with result 'timeout'`, staying failed until the next start.
   - One more stop, a 2 s start and stop at 13:09 (12:09 UTC), ended cleanly with `db=absent result=nodb`. It is not evidence against: nothing had started yet.
-  - **The D24 WAL fix held after each SIGKILL on arm64.** The post-stop `frigate-db-quiesce` hook ran all three times:
+  - **The D24 WAL fix held after each SIGKILL on arm64.** The post-stop `frigate-db-quiesce` hook ran all four times:
     - `db=188416 wal_before=8272 wal_after=absent shm_after=absent result=ok`;
     - `db=5337088 wal_before=4202432 wal_after=absent shm_after=absent result=ok`;
-    - `db=15282176 wal_before=2266032 wal_after=absent shm_after=absent result=ok`.
+    - `db=15282176 wal_before=2266032 wal_after=absent shm_after=absent result=ok`;
+    - `db=34435072 wal_before=5957552 wal_after=absent shm_after=absent result=ok` (run 3: a 5.96 MB WAL checkpointed and removed) `[HUB: run3/stop-journal-excerpt.txt]`.
   - Whether amd64 stops the same way was **not checked**.
 - **b. Cold boot after a hub reset: the first start failed on the Coral delegate.** The frigate unit was enabled, so Frigate started by itself at boot.
   - At 22:14:14 (21:14:14 UTC) the first start raised `ValueError: Failed to load delegate from libedgetpu.so.1.0` `[HUB: journal-excerpts.txt]`.
@@ -324,7 +345,7 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
   - the first Frigate start after the reset is stamped 21:12:31 UTC, 16 s before the previous boot's last entry (21:12:47 UTC).
 
   The first start's real time is therefore later than its stamp. The restart at 21:14:36 UTC agrees with the laptop clock: the after-reset snapshot at about 22:18 CET saw an uptime of 221 s. This is cosmetic, but it matters when reading a journal across a reset.
-- **d. Leftovers after a stop.** `/dev/shm/snap.frigate` (165 MiB) stays after Frigate stops, until the snap is removed (H9) `[REPORT: orchestrator]`.
+- **d. Leftovers after a stop.** `/dev/shm/snap.frigate` stays after Frigate stops: after the run-3 stop it still held `166M` as `du -h` prints it (du rounds 165.4 MiB up), "the same leftover as after the earlier stops" `[HUB: run3/stop-journal-excerpt.txt]`. That it stays until the snap is removed (H9) is `[REPORT: orchestrator]`.
 - **e. AppArmor denials on the hub: every daemon-profile denial matches the amd64 allowlist; two imports-probe capability lines have no arm.** The orchestrator applied the harness's own allowlist to the hub's journal `[HUB: journal-excerpts.txt]`. The allowlist is the regex of the `UNEXPECTED=` grep at `tests/spike-smoke.sh` line 2090, extracted verbatim from the tree of `758e992`, with sha256 `335df6b66a49b6032d5147e87477a640ae7ac389e53ae75edcc5d00072701b06` as a file with its trailing newline. It was run with `grep -cvE -f` over every `apparmor="DENIED"` kernel line on a `snap.frigate*` profile, over all boots since 14 Nov. The sha256 of that regex, extracted from `758e992`, was recomputed while writing this, as were the two non-matching lines and four matching lines rebuilt from the excerpt `[VERIFIED: sha256 equal; grep -cvE -f on the rebuilt lines]`.
   - **Lines checked:** 11,885 at about 12:05 CET on 15 Nov, with run 3 about 15 minutes in. The class counts below are from an earlier pull of 11,752 lines, so they differ slightly from the 11,885.
   - **Not matching: exactly 2 lines.** Both are on the imports-probe profile at 13:04:58 UTC on 14 Nov, during the stopped-state probe, with comm `python3.11`: capname `dac_read_search`, and capname `dac_override`.
@@ -348,22 +369,24 @@ Per snapshot, from observe.sh (cores and %CPU over its 10 s window; 100 % = one 
 
 ### NOT PROVEN on the hub, with the reason
 
-- **A 24-hour soak.** The longest run is 3 h 05 min. The maintainer rebooted the hub, and a new hub SSH master needs a touch of the maintainer's security key.
+- **A 24-hour soak.** The longest run is run 3, 7 h 40 min, stopped as planned. anon was still rising when it ended (1,057 to 1,090 MiB over its last 7 h 07 min), so a steady state is not shown.
 - **Real cameras:** they refuse RTSP.
 - **The Coral under real detection load:** the stand-in produced no detections.
 - **V11** (a deliberate OOM or swap squeeze): run on no host. It was dropped for the hub because the hub shares its disk with Home Assistant.
 - **V-OV start-time behaviour:** only the stopped-state guard check ran.
 - **V17** refresh-under-hold and `snap download`, and **F11** Store auto-connect: the snap is private on the Store, and the hub has no Store account.
 - **A Store-installed (asserted) arm64 revision:** the same reason. The hub runs the `--dangerous` install `x1`.
+- **A graceful stop:** 4 of 4 stops of a running Frigate were SIGKILLed after the 30 s timeout (finding a).
 - **The amd64 stop path** (finding a): not compared.
 - **The two imports-probe capability denials on amd64** (finding e): whether amd64 prints them was not checked. The hub's lines were checked against the harness allowlist, but no V8 harness ran on arm64.
 
 ## Open at the time of writing
 
-- The 24-hour soak (or a decision that the 3 h 05 min stand-in run suffices for an "experimental" arm64 label).
+- The 24-hour soak (or a decision that the 7 h 40 min stand-in run suffices for an "experimental" arm64 label). It would also show whether anon levels off.
 - A real-camera run, once the cameras serve RTSP.
-- The D13b number. It needs anon + shmem under real detection load.
-- Finding a: 3 of 3 stops of a running Frigate were killed after the 30 s SIGTERM timeout on arm64. Is that also so on amd64, and should the stop timeout or Frigate's shutdown change?
+- The D13b number. It needs anon + shmem under real detection load, over a run long enough to show whether anon levels off.
+- Finding a: 4 of 4 stops of a running Frigate were killed after the 30 s SIGTERM timeout on arm64. Is that also so on amd64, and should the stop timeout or Frigate's shutdown change?
+- Finding d: decide whether a stop should remove `/dev/shm/snap.frigate` (165 MiB stays behind).
 - Finding b: confirm the cause (Coral not ready after a power loss) and then decide on a boot-time wait for the Coral. That is a snap change; it was not made here.
 - Finding e: two imports-probe capability lines (`dac_read_search`, and `dac_override` with comm `python3.11`) have no allowlist arm. Check whether amd64's imports-probe prints them too, then add arms or explain them.
 - C1 (the arm64 Store upload) and follow-ups F1 to F7 on the W-7 card.
