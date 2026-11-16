@@ -21,8 +21,17 @@
 # .git/remote-build-attempt changes it, while the source snapcraft pushes stays
 # the PR's commit (nothing under .git is committed). Removed at exit.
 #
-# Not retried: an arch Launchpad did not report as Succeeded (a genuine build
-# failure or a timeout); it is left to the caller's completeness gate, as before.
+# Exit 75 ("Timed out waiting for build.") is snapcraft's answer to ANY
+# TimeoutError while it monitors the build, not only to its own deadline: a
+# Launchpad API call that times out at the socket ends the attempt the same way
+# (PR 10: 13 min into an 18000 s timeout). Launchpad's state is then unknown and
+# nothing was fetched, so the retry builds every missing arch except one the last
+# state line reported Stopped. A real deadline is never retried: it ends only once
+# the whole budget is used, so the budget check below always refuses it.
+#
+# Not retried: an arch Launchpad reported Stopped (a genuine build failure), or,
+# after any exit other than 75, an arch it did not report as Succeeded; it is left
+# to the caller's completeness gate, as before.
 # A rebuild only starts if the previous attempt's duration still fits in
 # BUILD_BUDGET, and each attempt passes --launchpad-timeout=<budget left>, so the
 # job reaches its upload step inside GitHub's 6 h job limit. No attempt starts
@@ -94,6 +103,18 @@ rebuild_archs() {
     (IFS=,; echo "${out[*]}")
 }
 
+# Missing archs to rebuild after an exit 75, whose output is in $1: every missing arch
+# except one the last "Stopped: amd64" state line reported (a build failure stays final).
+timeout_archs() {
+    local a out=() stopped
+    stopped=",$(sed -n 's/.*Stopped: \([^;]*\).*/\1/p' "$1" | tail -n1 | tr -d ' '),"
+    for a in "${WANT[@]}"; do
+        have_arch "$a" && continue
+        case "$stopped" in *",$a,"*) ;; *) out+=("$a") ;; esac
+    done
+    (IFS=,; echo "${out[*]}")
+}
+
 MARK=.git/remote-build-attempt
 # snapcraft's output (D5 parses its state lines) must stay OUT of the project dir:
 # snapcraft copies the whole dir and auto-commits every file that is not ignored,
@@ -115,14 +136,23 @@ while :; do
     fi
     echo "::group::remote-build attempt ${attempt}/${MAX_ATTEMPTS} (${build_for}; ${left}s of budget left)"
     # A new build every time (never --recover); attempts 2+ write their number into
-    # .git so snapcraft computes a new build id. `|| true`: a partial-arch failure must
-    # not abort; what was fetched is validated below.
+    # .git so snapcraft computes a new build id. A failed attempt does not abort the
+    # script: its exit code is kept (75 = timed out) and what was fetched is validated
+    # below.
     if [ "$attempt" -gt 1 ] && [ -d .git ]; then echo "$attempt" > "$MARK"; fi
     t0="$(date +%s)"
+    rc=0
     snapcraft remote-build -v --launchpad-accept-public-upload --build-for="$build_for" \
-        --launchpad-timeout="$left" 2>&1 | tee "$LOG" || true
+        --launchpad-timeout="$left" 2>&1 | tee "$LOG" || rc="${PIPESTATUS[0]}"
     t1="$(date +%s)"
     echo "::endgroup::"
+    took=$((t1 - t0)); used=$((t1 - start))
+    if [ "$rc" -eq 75 ]; then
+        # snapcraft sets its deadline after t0, so the deadline cannot end an attempt
+        # shorter than `left`; a shorter one ended on a Launchpad call that timed out.
+        if [ "$took" -lt "$left" ]; then kind="a Launchpad call timed out, not the deadline"; else kind="the deadline, or a timeout too close to it to tell"; fi
+        echo "::warning::attempt ${attempt}: snapcraft exited 75 after ${took}s of its ${left}s --launchpad-timeout: ${kind}"
+    fi
 
     prune_corrupt
     count="$(valid_count)"
@@ -132,12 +162,17 @@ while :; do
         echo "::warning::still missing $(missing_archs) after ${MAX_ATTEMPTS} attempts"
         break
     fi
-    rebuild="$(rebuild_archs "$LOG")"
+    if [ "$rc" -eq 75 ]; then
+        rebuild="$(timeout_archs "$LOG")"
+        why="Launchpad reported it Stopped in attempt ${attempt} (a build failure)"
+    else
+        rebuild="$(rebuild_archs "$LOG")"
+        why="Launchpad did not report it Succeeded in attempt ${attempt} (a build failure or an error before the build, not a broken download)"
+    fi
     if [ -z "$rebuild" ]; then
-        echo "::warning::not rebuilding $(missing_archs): Launchpad did not report it Succeeded in attempt ${attempt} (a build failure or timeout, not a broken download)"
+        echo "::warning::not rebuilding $(missing_archs): ${why}"
         break
     fi
-    took=$((t1 - t0)); used=$((t1 - start))
     if [ $((used + RETRY_DELAY + took)) -gt "$BUILD_BUDGET" ]; then
         echo "::warning::not rebuilding ${rebuild}: attempt ${attempt} took ${took}s, ${used}s of the ${BUILD_BUDGET}s budget are used"
         break

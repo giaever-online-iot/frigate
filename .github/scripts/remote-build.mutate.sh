@@ -34,5 +34,11 @@ mutate "M13 first state line, not last"  's/tail -n1 \| tr -d/head -n1 | tr -d/'
 mutate "M14 marker on attempt 1 too"     's/if \[ "\$attempt" -gt 1 \] && \[ -d \.git \]/if [ "\$attempt" -ge 1 ] \&\& [ -d .git ]/'
 mutate "M15 drop 2>&1 (stderr unread)"  's/--launchpad-timeout="\$left" 2>&1 \| tee/--launchpad-timeout="\$left" | tee/'
 mutate "M16 RETRY_DELAY not validated"   's/^int_or_default RETRY_DELAY 15 0$/RETRY_DELAY="\$\{RETRY_DELAY:-15\}"/m'
+mutate "M17 exit 75 handled as any exit" 's/if \[ "\$rc" -eq 75 \]; then\n        rebuild=/if false; then\n        rebuild=/'
+mutate "M18 after 75, rebuild Stopped too" 's/case "\$stopped" in \*",\$a,"\*\) ;; \*\) out\+=\("\$a"\) ;; esac/out+=("\$a")/'
+mutate "M19 exit code not kept (|| true)" 's/\|\| rc="\$\{PIPESTATUS\[0\]\}"/|| true/'
+mutate "M20 no exit-75 diagnostic"       's/^ *echo "::warning::attempt \$\{attempt\}: snapcraft exited 75.*\n//m'
+mutate "M21 deadline boundary -le"       's/if \[ "\$took" -lt "\$left" \]/if [ "\$took" -le "\$left" ]/'
+mutate "M22 after 75, rebuild valid archs" 's/        have_arch "\$a" && continue\n(        case "\$stopped")/\1/'
 [ "$bad" -eq 0 ] && echo "All mutants killed." || echo "Some mutants SURVIVED or did not apply."
 exit "$bad"

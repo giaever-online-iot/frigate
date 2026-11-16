@@ -16,6 +16,9 @@
 # - `--launchpad-timeout=<s>`: an attempt that would take longer prints one last
 #   state line (stderr), "Timed out waiting for build." (stdout: emit.message,
 #   messages.py:553), fetches nothing and exits 75;
+# - an early exit 75: a Launchpad call that times out while snapcraft monitors the
+#   build ends the attempt the same way (craft_application commands/remote.py catches every TimeoutError),
+#   long before the deadline, after its last state line and with nothing fetched;
 # - a file in the project dir that is neither the tracked snapcraft.yaml nor an
 #   ignored frigate_*.snap would be auto-committed and pushed: the stub records it
 #   in $work/stray and fails.
@@ -49,6 +52,15 @@ tree_id() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r 
 # mode=authfail:    snapcraft fails before any build starts (no state line, no file).
 # mode=buildfail:   amd64 fails to BUILD on Launchpad (Stopped); the others build and
 #                   arrive whole; snapcraft exits 0 (_monitor_and_complete returns 0).
+# mode=early75:     call 1 ends as PR 10's second run did: state lines (Pending, then
+#                   Building), "Timed out waiting for build." and exit 75 after STUB_COST
+#                   seconds, before the deadline, nothing fetched; later calls build and
+#                   fetch everything whole.
+# mode=early75stopped: as early75, but call 1's last state line reports the FIRST
+#                   requested arch Stopped (a build failure) and the others Building.
+# mode=alwaysearly75: every call ends as early75's call 1 does.
+# mode=cutthen75:   call 1 as cut (the first requested arch cut, the others whole); call 2
+#                   ends as early75's call 1 does; later calls fetch everything whole.
 # Layout: $work/bin (stubs), $work/calls + $work/n + $work/clock (+ stray, sleeps) (stub
 # state), $work/proj (the project dir: one tracked file and a .git dir, as a checkout has).
 setup() {
@@ -108,6 +120,25 @@ first="\${req[0]}"
 if [ -n "\$to" ] && [ "\$to" -gt 0 ] && [ "\$cost" -gt "\$to" ]; then
   echo \$(( \$(cat "$work/clock") + to )) > "$work/clock"
   echo "Succeeded: \$first" >&2
+  echo "Timed out waiting for build."
+  echo "To resume, run 'snapcraft remote-build --recover'"
+  exit 75
+fi
+early=0
+case "$mode" in
+  early75|early75stopped) [ "\$n" -eq 1 ] && early=1 ;;
+  alwaysearly75) early=1 ;;
+  cutthen75) [ "\$n" -eq 2 ] && early=1 ;;
+esac
+if [ "\$early" -eq 1 ]; then
+  echo \$(( \$(cat "$work/clock") + cost )) > "$work/clock"
+  echo "Pending: \$(echo "\$bf" | sed 's/,/, /g')" >&2
+  rest="\$(IFS=,; echo "\${req[*]:1}" | sed 's/,/, /g')"
+  if [ "$mode" = early75stopped ]; then
+    echo "Stopped: \$first\${rest:+; Building: \$rest}" >&2
+  else
+    echo "Building: \$(echo "\$bf" | sed 's/,/, /g')" >&2
+  fi
   echo "Timed out waiting for build."
   echo "To resume, run 'snapcraft remote-build --recover'"
   exit 75
@@ -233,7 +264,65 @@ out="$(run "$work" amd64,arm64 STUB_COST=20000 BUILD_BUDGET=18000)"
 check "timeout: 1 snapcraft call"               "1"       "$(calls "$work")"
 check "timeout: call 1 got the whole budget"    "18000"   "$(field "$work" 1 5)"
 check "timeout: nothing fetched"                "snaps=0" "$(snaps_line "$out")"
-check "timeout: says why it does not rebuild"   "1"       "$(warned "$out" 'not rebuilding amd64: attempt 1 took 18000s')"
+check "timeout: says why it does not rebuild"   "1"       "$(warned "$out" 'not rebuilding amd64,arm64: attempt 1 took 18000s')"
+check "timeout: says it was the deadline"       "1"       "$(warned "$out" 'attempt 1: snapcraft exited 75 after 18000s of its 18000s --launchpad-timeout: the deadline, or a timeout too close to it to tell')"
+rm -rf "$work"
+
+# --- PR 10's second run: snapcraft exits 75 ("Timed out waiting for build.") 869 s into
+#     the attempt (782 s after it set its 18000 s timeout), both archs still Building,
+#     nothing fetched. Not the deadline, so a NEW build of every missing arch, with a new
+#     build id ---
+work="$(setup early75)"
+out="$(run "$work" amd64,arm64 STUB_COST=869 BUILD_BUDGET=18000)"
+check "early75: 2 snapcraft calls"              "2"       "$(calls "$work")"
+check "early75: call 2 rebuilds every missing arch" "amd64,arm64" "$(field "$work" 2 3)"
+check "early75: call 2 has a new build id"      "differ"  "$( [ "$(calls "$work")" -ge 2 ] && [ "$(field "$work" 1 2)" != "$(field "$work" 2 2)" ] && echo differ || echo same )"
+check "early75: call 2 timeout is what is left" "17131"   "$(field "$work" 2 5)"
+check "early75: reports 2 valid snaps"          "snaps=2" "$(snaps_line "$out")"
+check "early75: says it was not the deadline"   "1"       "$(warned "$out" 'attempt 1: snapcraft exited 75 after 869s of its 18000s --launchpad-timeout: a Launchpad call timed out, not the deadline')"
+rm -rf "$work"
+
+# --- an early exit 75 with the first arch already Stopped (a build failure): only the
+#     other arch is rebuilt ---
+work="$(setup early75stopped)"
+out="$(run "$work" amd64,arm64 STUB_COST=869)"
+check "early75stopped: 2 snapcraft calls"       "2"       "$(calls "$work")"
+check "early75stopped: call 2 rebuilds only arm64" "arm64" "$(field "$work" 2 3)"
+check "early75stopped: reports 1 valid snap"    "snaps=1" "$(snaps_line "$out")"
+rm -rf "$work"
+
+# --- the only arch Stopped, then exit 75: nothing to rebuild ---
+work="$(setup early75stopped)"
+out="$(run "$work" amd64 STUB_COST=869)"
+check "early75 all stopped: 1 snapcraft call"   "1"       "$(calls "$work")"
+check "early75 all stopped: says it was Stopped" "1"      "$(warned "$out" 'not rebuilding amd64: Launchpad reported it Stopped in attempt 1')"
+rm -rf "$work"
+
+# --- an early exit 75 on every attempt: bounded at MAX_ATTEMPTS, each a new id, exit 0 ---
+work="$(setup alwaysearly75)"
+out="$(run "$work" amd64,arm64 STUB_COST=869)"
+rc=$?
+check "alwaysearly75: exactly 3 snapcraft calls" "3"      "$(calls "$work")"
+check "alwaysearly75: 3 distinct build ids"     "3"       "$(cut -d'|' -f2 "$work/calls" | sort -u | wc -l | tr -d ' ')"
+check "alwaysearly75: snaps=0, exit 0"          "snaps=0 0" "$(snaps_line "$out") $rc"
+check "alwaysearly75: says what is still missing" "1"     "$(warned "$out" 'still missing amd64,arm64 after 3 attempts')"
+rm -rf "$work"
+
+# --- a cut download (arm64 arrives whole), then an early exit 75: the next build is of
+#     amd64 only; the valid arm64 is neither rebuilt nor fetched again (D2) ---
+work="$(setup cutthen75)"
+out="$(run "$work" amd64,arm64 STUB_COST=869)"
+check "cutthen75: 3 snapcraft calls"            "3"       "$(calls "$work")"
+check "cutthen75: call 2 rebuilds only amd64"   "amd64"   "$(field "$work" 2 3)"
+check "cutthen75: call 3 rebuilds only amd64"   "amd64"   "$(field "$work" 3 3)"
+check "cutthen75: reports 2 valid snaps"        "snaps=2" "$(snaps_line "$out")"
+rm -rf "$work"
+
+# --- an early exit 75 that took too long to fit a second attempt in the budget ---
+work="$(setup early75)"
+out="$(run "$work" amd64,arm64 STUB_COST=10000 BUILD_BUDGET=18000)"
+check "early75 late: 1 snapcraft call"          "1"       "$(calls "$work")"
+check "early75 late: says why it does not rebuild" "1"    "$(warned "$out" 'not rebuilding amd64,arm64: attempt 1 took 10000s')"
 rm -rf "$work"
 
 # --- the budget runs out between attempts (every clock read costs 1 s here): never
