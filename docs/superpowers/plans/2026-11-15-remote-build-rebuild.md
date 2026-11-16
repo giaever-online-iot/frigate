@@ -2,19 +2,20 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When Launchpad built an arch but its artifact download broke, `.github/scripts/remote-build.sh` starts a NEW remote build of only the missing archs. It never uses `--recover`, makes at most 3 attempts, and stays inside a 5 h budget.
+**Goal:** When Launchpad built an arch but its artifact download broke, `.github/scripts/remote-build.sh` starts a NEW remote build of only the missing archs. It never uses `--recover`, makes at most 3 attempts, and stays inside a 5 h budget. Amendment 1 (Task 3): an exit 75 long before the deadline is retried the same way; a real deadline stays final.
 
 **Architecture:** One bash script keeps its contract: one arg (comma-separated archs), exit 0, `snaps=<n>` on stdout and in `GITHUB_OUTPUT`. Its retry loop changes:
 - each retry is a fresh `snapcraft remote-build --build-for=<missing>`;
 - each retry gets its own build id from an attempt number written into `.git/remote-build-attempt`;
 - the archs to rebuild come from the last `Succeeded:` state line of the attempt just finished. snapcraft's output is captured per attempt in a temp file **outside** the project dir (spec D5a);
 - a budget check and `--launchpad-timeout` bound the time. No attempt starts with less than 1 s left, and the numeric inputs are validated (spec D6).
+- after an exit 75 (Amendment 1), the retry builds every missing arch that the last state line did not report `Stopped`. The budget check alone keeps a real deadline from being retried (spec D6).
 
 The stub-driven test models snapcraft 9.2.1 (build id hash, `--recover` failure, state lines on stderr, `--launchpad-timeout`, files it would push), plus a fake clock and a recording `sleep`. A committed mutation runner proves the test catches each decision.
 
 **Tech Stack:** bash, shellcheck 0.9.0, GitHub Actions; snapcraft 9.2.1 (modelled by the stub, never called).
 
-**Spec:** `docs/superpowers/specs/2026-11-15-remote-build-rebuild-design.md` (decisions D1–D11; §3 cites the snapcraft source, §6 has the timing arithmetic).
+**Spec:** `docs/superpowers/specs/2026-11-15-remote-build-rebuild-design.md` (decisions D1–D13 and Amendment 1; §3 cites the snapcraft source, §3.8 the early exit 75, §6 has the timing arithmetic).
 
 ## Global Constraints
 
@@ -23,7 +24,8 @@ The stub-driven test models snapcraft 9.2.1 (build id hash, `--recover` failure,
 - Never `--recover`. Exit 0 always. `prune_corrupt` stays. `snaps=` counts the requested archs that have a valid snap, matched by the upload step's suffix match `*<arch>.snap` (spec D8).
 - Input validation: `MAX_ATTEMPTS` and `BUILD_BUDGET` must be integers ≥ 1, and `RETRY_DELAY` an integer ≥ 0. Any other value gives `::warning::<NAME>='<value>' is not an integer >= <min>; using <default>` on stdout, where the Actions runner reads workflow commands. No attempt starts with `left` < 1; instead the script prints `::warning::not starting attempt <n>: the <budget>s budget is used up` (spec D6, review P3).
 - snapcraft's output goes to `mktemp "${TMPDIR:-/tmp}/remote-build-out.XXXXXX"`, with `2>&1` and plain `tee` (truncated per attempt). It never goes into the project dir (spec D5a).
-- Mutant numbering is the spec's §7: M1–M16, with M11 split into M11a (validation) and M11b (the `left` < 1 guard).
+- Mutant numbering is the spec's §7: M1–M21 (M17–M21 from Amendment 1), with M11 split into M11a (validation) and M11b (the `left` < 1 guard).
+- Amendment 1 is Task 3, built on top of `e089f48` (Task 1 as built). Task 1's code blocks stay as they were built. The spec's D13 is an option that is NOT built.
 - No camera or host addresses, hostnames, credentials, tokens, serials, Launchpad owner or project names (write `<owner>`/`<project>`), or the maintainer's name or pronouns in any file, commit message or PR text.
 - **Do not push.** A push starts a Launchpad build and a Store upload. The controller pushes, once.
 - Heavy suites go under `flock -w 3600 /tmp/claude-1000/chim-suites.lock <cmd>`. The `.github/scripts` suites take seconds and need no lock.
@@ -31,13 +33,14 @@ The stub-driven test models snapcraft 9.2.1 (build id hash, `--recover` failure,
 
 ## Review Focus
 
-Conditions the spec implies that a reader could overlook. Each is pinned by a test in Task 1:
+Conditions the spec implies that a reader could overlook. Each is pinned by a test, items 1–5 in Task 1 and item 6 in Task 3:
 
 1. **A retry that fails before printing any state** (auth or network): attempt 1's `Succeeded:` line must not be read again. Expect 2 calls and `not rebuilding amd64: … in attempt 2`. Test: `cutthenfail` (mutant M12, `tee -a`).
 2. **snapcraft's output written into the project dir:** it would be auto-committed into the public pushed source. Test: the stub's stray-file record, `no stray file … at any call` (mutant M10).
 3. **Bad numeric input** (`BUILD_BUDGET=0`, `-100`, `5h`; `MAX_ATTEMPTS=x`): with 0 snapcraft would wait without a timeout, with a negative value it would crash, and `5h` would make no call at all. Expect a warning and the default. Tests: `BUILD_BUDGET=…` and `MAX_ATTEMPTS=x` (M11a). The budget running out between attempts is covered by `no budget left` (M11b).
 4. **An attempt that hits `--launchpad-timeout`:** snapcraft prints one more `Succeeded:` line, fetches nothing and exits 75. Do not rebuild with the budget used up. Test: `timeout`.
 5. **snapcraft's state lines arrive on stderr**, an intermediate one (`Building: amd64; Succeeded: arm64`) before the final one: capture stderr and parse the last line. Test: every `cut` case (mutants M13 and M15, `drop 2>&1`); the stub prints both lines on stderr, as snapcraft's verbose `emit.progress` does.
+6. **An exit 75 long before the deadline** (PR #10's run 43838113093): snapcraft gives the same message and exit code as at its deadline. Expect a new build of every missing arch not reported `Stopped`, and a warning that says it was not the deadline. A real deadline must still not be retried. Tests (Task 3): `early75`, `early75stopped`, `alwaysearly75`, `timeout` (mutants M17–M21).
 
 ---
 
@@ -682,10 +685,10 @@ The PR text is not in the repository, and you do not edit the PR: the controller
 - Create: `<your scratchpad>/pr-body-fetchfix.md`, a replacement for the controller's copy of the current body (`pr-body-fetchfix.md` in the controller's scratchpad; its path is in the W-24 brief). Section 2 below is that copy's section 2, word for word.
 
 **Interfaces:**
-- Consumes: Task 1's commit hash and the numbers its Steps 2, 4 and 6 printed.
+- Consumes: the numbers that Steps 2, 4 and 6 of Task 1 and of Task 3 printed. When Amendment 1 is built, this task runs after Task 3.
 - Produces: one file the controller pastes as PR #10's body.
 
-- [ ] **Step 1: Write the body.** Fill in `<task-1 commit>` and adjust any count that differed in Task 1:
+- [ ] **Step 1: Write the body.** Adjust any count that differed in Task 1 or Task 3:
 
 ```markdown
 ## What
@@ -699,7 +702,8 @@ Launchpad built both archs on #9 and on this PR. In each run, the download of on
 The script now:
 - drops truncated files as before;
 - for each arch that Launchpad reported `Succeeded` but that has no valid snap, starts a **new** remote build of just those archs, with at most 3 attempts in total;
-- gives each attempt its own build id by writing the attempt number into `.git/remote-build-attempt`. snapcraft hashes every file in the project dir, `.git` included, but nothing under `.git` is part of the commit it pushes, so the source built stays the PR's commit.
+- gives each attempt its own build id by writing the attempt number into `.git/remote-build-attempt`. snapcraft hashes every file in the project dir, `.git` included, but nothing under `.git` is part of the commit it pushes, so the source built stays the PR's commit;
+- when snapcraft exits 75 (`Timed out waiting for build.`) before its deadline, which it does for any timeout while it watches the build, starts a new build of every missing arch that Launchpad did not report `Stopped`. A real deadline is not retried: it can only end an attempt once the whole budget is used, so the budget check refuses the retry. Every exit 75 prints a warning with the attempt's duration against its timeout.
 
 Not retried:
 - an arch that failed to build (it stays tolerated, as before);
@@ -722,13 +726,14 @@ New `.github/scripts/snapcraft-close.test.sh` (picked up by the existing `.githu
 
 ## Tests run
 
-- `remote-build.test.sh` uses a stub that models snapcraft's build id hash (md5 over every file's contents, `.git` included), the `--recover` failure text, the build state lines (on stderr, where snapcraft prints them), `--launchpad-timeout` (exit 75) and the files snapcraft would push. A fake clock drives the budget, and a stubbed `sleep` records the retry delay. The suite is red on the previous script (43 checks) and green after (59).
-- `remote-build.mutate.sh` applies 17 mutants, and each turns the suite red:
+- `remote-build.test.sh` uses a stub that models snapcraft's build id hash (md5 over every file's contents, `.git` included), the `--recover` failure text, the build state lines (on stderr, where snapcraft prints them), `--launchpad-timeout` (exit 75), an early exit 75 while Launchpad is still building, and the files snapcraft would push. A fake clock drives the budget, and a stubbed `sleep` records the retry delay. The suite is red on the script before this PR (43 checks) and green after the first fix (59). The early-exit-75 cases are red on the first fix (15 checks), and the whole suite is green after the second (77).
+- `remote-build.mutate.sh` applies 22 mutants, and each turns the suite red:
   - re-add `--recover`; reuse the build id; rebuild all archs; drop the truncated-file check; unbounded attempts;
   - rebuild failed builds; drop the budget guard; drop `--launchpad-timeout`; keep a stale marker;
   - write snapcraft's output into the project dir; drop the input validation; start an attempt with no budget left;
   - parse earlier attempts' output; read the first state line instead of the last; write the marker on attempt 1;
-  - stop capturing stderr (`2>&1`), where the state lines arrive; leave `RETRY_DELAY` unvalidated.
+  - stop capturing stderr (`2>&1`), where the state lines arrive; leave `RETRY_DELAY` unvalidated;
+  - treat exit 75 like any other exit; rebuild a `Stopped` arch after a 75; drop snapcraft's exit code; drop the exit-75 warning; count an attempt as long as its timeout as early.
 - The build id and push behaviour were also checked against snapcraft's own code, with no network:
   - a file under `.git` changes the id, and file names do not count;
   - with an ignored `.snap` and the marker in place, snapcraft's work tree commits nothing, so the pushed commit is the checkout's;
@@ -739,7 +744,13 @@ New `.github/scripts/snapcraft-close.test.sh` (picked up by the existing `.githu
 
 ## Not verified
 
-- No real rebuild against Launchpad. The rebuild only runs when a download is cut, which happened in both two-arch runs so far, so this PR's own CI run is the first real test.
+- No real rebuild against Launchpad yet. This PR's run of the first fix (43838113093, head e089f48) never got that far:
+  - snapcraft exited 75 (`Timed out waiting for build.`) 869 s into its 18000 s timeout, with both archs still building on Launchpad;
+  - nothing was fetched or uploaded, and the gate went red;
+  - the first fix read every exit 75 as the deadline. The second fix retries it.
+
+  The next CI run is the first real test of either retry.
+- Why snapcraft timed out early is not proven. It was not its deadline, which was 5 h away: snapcraft reports every timeout while it watches the build the same way. The last build-state line came 163.7 s before the timeout, where they normally come 31–49 s apart. That fits a connection to Launchpad's API that got no answer, but the log has no traceback.
 - A rebuild is not guaranteed to avoid another cut. snapcraft opens every artifact download at once and then drains them one after another, so the second connection sits idle while the first ~1 GB file arrives. Both cuts happened under 1 MB into a file, which fits that idle connection being dropped. That explanation is NOT PROVEN. A one-arch rebuild downloads a single file over a single connection, so if the explanation holds, the retry is likely to succeed.
 - If every attempt ends incomplete, the pipeline does what it does today. It uploads the valid snaps to `latest/edge/PR<N>`, and `Fail if build/upload incomplete` goes red when amd64 is missing.
 - Each failed attempt leaves its repository and recipe on Launchpad. snapcraft cleans up only after a success, and that was already the case before this change.
@@ -750,6 +761,7 @@ New `.github/scripts/snapcraft-close.test.sh` (picked up by the existing `.githu
 
 The change touches `.github/**`, so `PR Build Snap` runs on both archs and uploads to `latest/edge/PR<this number>`. Measured job times:
 - this PR's first run: 43 min. Launchpad took about 25 min, then the download broke.
+- this PR's run of the first fix: the build step ended after 869 s on that early exit 75, while Launchpad was still building; nothing was uploaded.
 - #9: 4 h 29 min. Both archs spent about 3 h 44 min in Launchpad's own "Uploading" state after building in about 22 min.
 
 A rebuild adds about 25–30 min at this PR's speed. At #9's speed the budget allows no rebuild. Merging promotes the amd64 revision to `latest/edge` as usual. arm64 stays manual (see `.github/release-archs.env`).
@@ -760,4 +772,388 @@ A rebuild adds about 25–30 min at this PR's speed. At #9's speed the budget al
 Run: `grep -n -i -E '4\.5 h|park|recoverable|craft-remote-build|~[a-z]' <your scratchpad>/pr-body-fetchfix.md`
 Expected: no output. Also confirm by reading it that the body names no person, owner, project, host or address.
 
-- [ ] **Step 3: Hand it over.** Send the controller the file's full path and Task 1's commit hash. Nothing is committed in this task.
+- [ ] **Step 3: Hand it over.** Send the controller the file's full path and the commit hash of the task just built. Nothing is committed in this task.
+
+---
+
+### Task 3: Amendment 1 — an exit 75 before the deadline is retried as a new build
+
+Spec: Amendment 1, D5 (the exit-75 branch), D6 (the proof that a real deadline is never retried), D12, and §7's new rows with M17–M21. D13 is an option that is NOT built.
+
+**Files:**
+- Modify: `.github/scripts/remote-build.test.sh` (edits T1–T4)
+- Modify: `.github/scripts/remote-build.sh` (edits S1–S4)
+- Modify: `.github/scripts/remote-build.mutate.sh` (edit M1: five mutants appended)
+- Modify: `.github/workflows/pr-build-snap.yml` (edit W1: the comment above the build step)
+
+**Interfaces:**
+- Consumes: Task 1 as built in `e089f48`. At `e089f48`, each edit's "replace" text occurs exactly once in its file.
+- Produces:
+  - the same contract as Task 1 (one argument, exit 0, `snaps=<n>`);
+  - new: the `::warning::attempt <n>: snapcraft exited 75 …` line (spec D12) and the function `timeout_archs <log>` in `remote-build.sh`.
+
+Work in the W-24 worktree on `fix/remote-build-fetch-recover`, at `e089f48` or a docs-only commit on top of it. Apply each edit as an exact text replacement: the "replace" block, without its last newline, must occur exactly once, and becomes the "with" block, without its last newline.
+
+- [ ] **Step 1: Write the failing tests.** Apply edits T1–T4:
+  - T1 and T2 extend the stub's description;
+  - T3 adds the early-75 modes to the stub;
+  - T4 changes one check of the `timeout` case and adds the new cases.
+
+**Edit T1** in `.github/scripts/remote-build.test.sh`: replace
+
+```bash
+#   messages.py:553), fetches nothing and exits 75;
+```
+
+with
+
+```bash
+#   messages.py:553), fetches nothing and exits 75;
+# - an early exit 75: a Launchpad call that times out while snapcraft monitors the
+#   build ends the attempt the same way (craft_application commands/remote.py catches every TimeoutError),
+#   long before the deadline, after its last state line and with nothing fetched;
+```
+
+**Edit T2** in `.github/scripts/remote-build.test.sh`: replace
+
+```bash
+# mode=buildfail:   amd64 fails to BUILD on Launchpad (Stopped); the others build and
+#                   arrive whole; snapcraft exits 0 (_monitor_and_complete returns 0).
+```
+
+with
+
+```bash
+# mode=buildfail:   amd64 fails to BUILD on Launchpad (Stopped); the others build and
+#                   arrive whole; snapcraft exits 0 (_monitor_and_complete returns 0).
+# mode=early75:     call 1 ends as PR 10's second run did: state lines (Pending, then
+#                   Building), "Timed out waiting for build." and exit 75 after STUB_COST
+#                   seconds, before the deadline, nothing fetched; later calls build and
+#                   fetch everything whole.
+# mode=early75stopped: as early75, but call 1's last state line reports the FIRST
+#                   requested arch Stopped (a build failure) and the others Building.
+# mode=alwaysearly75: every call ends as early75's call 1 does.
+```
+
+**Edit T3** in `.github/scripts/remote-build.test.sh`: replace
+
+```bash
+  echo "To resume, run 'snapcraft remote-build --recover'"
+  exit 75
+fi
+echo \$(( \$(cat "$work/clock") + cost )) > "$work/clock"
+```
+
+with
+
+```bash
+  echo "To resume, run 'snapcraft remote-build --recover'"
+  exit 75
+fi
+early=0
+case "$mode" in
+  early75|early75stopped) [ "\$n" -eq 1 ] && early=1 ;;
+  alwaysearly75) early=1 ;;
+esac
+if [ "\$early" -eq 1 ]; then
+  echo \$(( \$(cat "$work/clock") + cost )) > "$work/clock"
+  echo "Pending: \$(echo "\$bf" | sed 's/,/, /g')" >&2
+  rest="\$(IFS=,; echo "\${req[*]:1}" | sed 's/,/, /g')"
+  if [ "$mode" = early75stopped ]; then
+    echo "Stopped: \$first\${rest:+; Building: \$rest}" >&2
+  else
+    echo "Building: \$(echo "\$bf" | sed 's/,/, /g')" >&2
+  fi
+  echo "Timed out waiting for build."
+  echo "To resume, run 'snapcraft remote-build --recover'"
+  exit 75
+fi
+echo \$(( \$(cat "$work/clock") + cost )) > "$work/clock"
+```
+
+**Edit T4** in `.github/scripts/remote-build.test.sh`: replace
+
+```bash
+check "timeout: says why it does not rebuild"   "1"       "$(warned "$out" 'not rebuilding amd64: attempt 1 took 18000s')"
+rm -rf "$work"
+```
+
+with
+
+```bash
+check "timeout: says why it does not rebuild"   "1"       "$(warned "$out" 'not rebuilding amd64,arm64: attempt 1 took 18000s')"
+check "timeout: says it was the deadline"       "1"       "$(warned "$out" 'attempt 1: snapcraft exited 75 after 18000s of its 18000s --launchpad-timeout: the deadline')"
+rm -rf "$work"
+
+# --- PR 10's second run: snapcraft exits 75 ("Timed out waiting for build.") 869 s into
+#     an 18000 s timeout, both archs still Building, nothing fetched. Not the deadline,
+#     so a NEW build of every missing arch, with a new build id ---
+work="$(setup early75)"
+out="$(run "$work" amd64,arm64 STUB_COST=869 BUILD_BUDGET=18000)"
+check "early75: 2 snapcraft calls"              "2"       "$(calls "$work")"
+check "early75: call 2 rebuilds every missing arch" "amd64,arm64" "$(field "$work" 2 3)"
+check "early75: call 2 has a new build id"      "differ"  "$( [ "$(field "$work" 1 2)" != "$(field "$work" 2 2)" ] && echo differ || echo same )"
+check "early75: call 2 timeout is what is left" "17131"   "$(field "$work" 2 5)"
+check "early75: reports 2 valid snaps"          "snaps=2" "$(snaps_line "$out")"
+check "early75: says it was not the deadline"   "1"       "$(warned "$out" 'attempt 1: snapcraft exited 75 after 869s of its 18000s --launchpad-timeout: a Launchpad call timed out, not the deadline')"
+rm -rf "$work"
+
+# --- an early exit 75 with the first arch already Stopped (a build failure): only the
+#     other arch is rebuilt ---
+work="$(setup early75stopped)"
+out="$(run "$work" amd64,arm64 STUB_COST=869)"
+check "early75stopped: 2 snapcraft calls"       "2"       "$(calls "$work")"
+check "early75stopped: call 2 rebuilds only arm64" "arm64" "$(field "$work" 2 3)"
+check "early75stopped: reports 1 valid snap"    "snaps=1" "$(snaps_line "$out")"
+rm -rf "$work"
+
+# --- the only arch Stopped, then exit 75: nothing to rebuild ---
+work="$(setup early75stopped)"
+out="$(run "$work" amd64 STUB_COST=869)"
+check "early75 all stopped: 1 snapcraft call"   "1"       "$(calls "$work")"
+check "early75 all stopped: says it was Stopped" "1"      "$(warned "$out" 'not rebuilding amd64: Launchpad reported it Stopped in attempt 1')"
+rm -rf "$work"
+
+# --- an early exit 75 on every attempt: bounded at MAX_ATTEMPTS, each a new id, exit 0 ---
+work="$(setup alwaysearly75)"
+out="$(run "$work" amd64,arm64 STUB_COST=869)"
+rc=$?
+check "alwaysearly75: exactly 3 snapcraft calls" "3"      "$(calls "$work")"
+check "alwaysearly75: 3 distinct build ids"     "3"       "$(cut -d'|' -f2 "$work/calls" | sort -u | wc -l | tr -d ' ')"
+check "alwaysearly75: snaps=0, exit 0"          "snaps=0 0" "$(snaps_line "$out") $rc"
+check "alwaysearly75: says what is still missing" "1"     "$(warned "$out" 'still missing amd64,arm64 after 3 attempts')"
+rm -rf "$work"
+
+# --- an early exit 75 that took too long to fit a second attempt in the budget ---
+work="$(setup early75)"
+out="$(run "$work" amd64,arm64 STUB_COST=10000 BUILD_BUDGET=18000)"
+check "early75 late: 1 snapcraft call"          "1"       "$(calls "$work")"
+check "early75 late: says why it does not rebuild" "1"    "$(warned "$out" 'not rebuilding amd64,arm64: attempt 1 took 10000s')"
+rm -rf "$work"
+```
+
+- [ ] **Step 2: Run them against `e089f48`'s script and see them fail**
+
+Run: `bash .github/scripts/remote-build.test.sh; echo "exit=$?"; bash .github/scripts/remote-build.test.sh | grep -c '^FAIL'`
+Expected: `Some remote-build tests FAILED.`, `exit=1`, and `15` FAIL lines (`62` ok). Among them must be:
+- `early75: 2 snapcraft calls` (actual `1`);
+- `early75stopped: call 2 rebuilds only arm64` (actual empty);
+- `alwaysearly75: exactly 3 snapcraft calls` (actual `1`);
+- `timeout: says why it does not rebuild` (actual `0`: the old script names only `amd64`);
+- `timeout: says it was the deadline` (actual `0`).
+
+The new checks that pass on the old script expect what the old script already does, for example `early75 late: 1 snapcraft call`.
+
+- [ ] **Step 3: Implement.** Apply edits S1–S4 to `.github/scripts/remote-build.sh`:
+  - S1 rewrites the header's "Not retried" paragraph;
+  - S2 adds `timeout_archs`;
+  - S3 keeps snapcraft's exit code, prints the D12 warning, and moves the `took`/`used` line up;
+  - S4 picks the rebuild set by exit code.
+
+**Edit S1** in `.github/scripts/remote-build.sh`: replace
+
+```bash
+# Not retried: an arch Launchpad did not report as Succeeded (a genuine build
+# failure or a timeout); it is left to the caller's completeness gate, as before.
+```
+
+with
+
+```bash
+# Exit 75 ("Timed out waiting for build.") is snapcraft's answer to ANY
+# TimeoutError while it monitors the build, not only to its own deadline: a
+# Launchpad API call that times out at the socket ends the attempt the same way
+# (PR 10: 13 min into an 18000 s timeout). Launchpad's state is then unknown and
+# nothing was fetched, so the retry builds every missing arch except one the last
+# state line reported Stopped. A real deadline is never retried: it ends only once
+# the whole budget is used, so the budget check below always refuses it.
+#
+# Not retried: an arch Launchpad reported Stopped (a genuine build failure), or,
+# after any exit other than 75, an arch it did not report as Succeeded; it is left
+# to the caller's completeness gate, as before.
+```
+
+**Edit S2** in `.github/scripts/remote-build.sh`: replace
+
+```bash
+    (IFS=,; echo "${out[*]}")
+}
+
+MARK=.git/remote-build-attempt
+```
+
+with
+
+```bash
+    (IFS=,; echo "${out[*]}")
+}
+
+# Missing archs to rebuild after an exit 75, whose output is in $1: every missing arch
+# except one the last "Stopped: amd64" state line reported (a build failure stays final).
+timeout_archs() {
+    local a out=() stopped
+    stopped=",$(sed -n 's/.*Stopped: \([^;]*\).*/\1/p' "$1" | tail -n1 | tr -d ' '),"
+    for a in "${WANT[@]}"; do
+        have_arch "$a" && continue
+        case "$stopped" in *",$a,"*) ;; *) out+=("$a") ;; esac
+    done
+    (IFS=,; echo "${out[*]}")
+}
+
+MARK=.git/remote-build-attempt
+```
+
+**Edit S3** in `.github/scripts/remote-build.sh`: replace
+
+```bash
+    # .git so snapcraft computes a new build id. `|| true`: a partial-arch failure must
+    # not abort; what was fetched is validated below.
+    if [ "$attempt" -gt 1 ] && [ -d .git ]; then echo "$attempt" > "$MARK"; fi
+    t0="$(date +%s)"
+    snapcraft remote-build -v --launchpad-accept-public-upload --build-for="$build_for" \
+        --launchpad-timeout="$left" 2>&1 | tee "$LOG" || true
+    t1="$(date +%s)"
+    echo "::endgroup::"
+```
+
+with
+
+```bash
+    # .git so snapcraft computes a new build id. A failed attempt does not abort the
+    # script: its exit code is kept (75 = timed out) and what was fetched is validated
+    # below.
+    if [ "$attempt" -gt 1 ] && [ -d .git ]; then echo "$attempt" > "$MARK"; fi
+    t0="$(date +%s)"
+    rc=0
+    snapcraft remote-build -v --launchpad-accept-public-upload --build-for="$build_for" \
+        --launchpad-timeout="$left" 2>&1 | tee "$LOG" || rc="${PIPESTATUS[0]}"
+    t1="$(date +%s)"
+    echo "::endgroup::"
+    took=$((t1 - t0)); used=$((t1 - start))
+    if [ "$rc" -eq 75 ]; then
+        # snapcraft sets its deadline after t0, so the deadline cannot end an attempt
+        # shorter than `left`; a shorter one ended on a Launchpad call that timed out.
+        if [ "$took" -lt "$left" ]; then kind="a Launchpad call timed out, not the deadline"; else kind="the deadline"; fi
+        echo "::warning::attempt ${attempt}: snapcraft exited 75 after ${took}s of its ${left}s --launchpad-timeout: ${kind}"
+    fi
+```
+
+**Edit S4** in `.github/scripts/remote-build.sh`: replace
+
+```bash
+    rebuild="$(rebuild_archs "$LOG")"
+    if [ -z "$rebuild" ]; then
+        echo "::warning::not rebuilding $(missing_archs): Launchpad did not report it Succeeded in attempt ${attempt} (a build failure or timeout, not a broken download)"
+        break
+    fi
+    took=$((t1 - t0)); used=$((t1 - start))
+```
+
+with
+
+```bash
+    if [ "$rc" -eq 75 ]; then
+        rebuild="$(timeout_archs "$LOG")"
+        why="Launchpad reported it Stopped in attempt ${attempt} (a build failure)"
+    else
+        rebuild="$(rebuild_archs "$LOG")"
+        why="Launchpad did not report it Succeeded in attempt ${attempt} (a build failure or an error before the build, not a broken download)"
+    fi
+    if [ -z "$rebuild" ]; then
+        echo "::warning::not rebuilding $(missing_archs): ${why}"
+        break
+    fi
+```
+
+- [ ] **Step 4: Run the test and see it pass**
+
+Run: `bash .github/scripts/remote-build.test.sh; echo "exit=$?"; bash .github/scripts/remote-build.test.sh | grep -c '^ok'`
+Expected: `All remote-build tests passed.`, `exit=0`, `77`.
+
+- [ ] **Step 5: Append the new mutants.** Apply edit M1 to `.github/scripts/remote-build.mutate.sh`. M1–M16 stay as they are.
+
+**Edit M1** in `.github/scripts/remote-build.mutate.sh`: replace
+
+```bash
+[ "$bad" -eq 0 ] &&
+```
+
+with
+
+```bash
+mutate "M17 exit 75 handled as any exit" 's/if \[ "\$rc" -eq 75 \]; then\n        rebuild=/if false; then\n        rebuild=/'
+mutate "M18 after 75, rebuild Stopped too" 's/case "\$stopped" in \*",\$a,"\*\) ;; \*\) out\+=\("\$a"\) ;; esac/out+=("\$a")/'
+mutate "M19 exit code not kept (|| true)" 's/\|\| rc="\$\{PIPESTATUS\[0\]\}"/|| true/'
+mutate "M20 no exit-75 diagnostic"       's/^ *echo "::warning::attempt \$\{attempt\}: snapcraft exited 75.*\n//m'
+mutate "M21 deadline boundary -le"       's/if \[ "\$took" -lt "\$left" \]/if [ "\$took" -le "\$left" ]/'
+[ "$bad" -eq 0 ] &&
+```
+
+- [ ] **Step 6: Run the mutation runner and see every mutant killed**
+
+Run: `bash .github/scripts/remote-build.mutate.sh; echo "exit=$?"`
+Expected: 22 `killed` lines (M1–M10, M11a, M11b, M12–M21), no `NOT APPLIED` and no `SURVIVED`, then `All mutants killed.` and `exit=0`. Task 1 Step 6's rules apply: fix a pattern that does not apply, never the test; a survivor means a missing check.
+
+- [ ] **Step 7: Update the workflow comment.** Apply edit W1.
+
+**Edit W1** in `.github/workflows/pr-build-snap.yml`: replace
+
+```yaml
+      # When Launchpad built an arch but its DOWNLOAD broke (PR 9, PR 10), starts a
+      # NEW remote build of just the missing archs: never --recover, which cannot
+      # find snapcraft's own Launchpad repository. At most 3 attempts, inside a 5 h
+      # budget (BUILD_BUDGET), so the upload below runs before the 6 h job limit.
+      # A genuine build failure is not rebuilt; it stays tolerated.
+```
+
+with
+
+```yaml
+      # When Launchpad built an arch but its DOWNLOAD broke (PR 9, PR 10), or a Launchpad
+      # call timed out long before the deadline (exit 75; PR 10), starts a NEW remote
+      # build of just the missing archs: never --recover, which cannot find
+      # snapcraft's own Launchpad repository. At most 3 attempts, inside a 5 h
+      # budget (BUILD_BUDGET), so the upload below runs before the 6 h job limit.
+      # A genuine build failure or a real deadline is not rebuilt; it stays tolerated.
+```
+
+- [ ] **Step 8: Run every `.github/scripts` suite and both shellcheck steps of `lint-test.yml`.** Use the commands and expectations of Task 1 Step 8 with one change: the `--recover` grep now finds the workflow comment line `build of just the missing archs: never --recover, which cannot find`, plus the same three comment lines in `remote-build.sh` as before.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add .github/scripts/remote-build.sh .github/scripts/remote-build.test.sh .github/scripts/remote-build.mutate.sh .github/workflows/pr-build-snap.yml
+git commit -F - <<'EOF'
+fix(ci): remote-build retries an exit 75 before the deadline as a new build; a real deadline stays final (W-24 amendment 1)
+
+PR 10's first run of e089f48 (run 43838113093) ended with snaps=0. snapcraft
+printed "Timed out waiting for build." and exited 75 869 s into an 18000 s
+--launchpad-timeout, with both archs still Building and nothing fetched.
+snapcraft returns 75 for any TimeoutError while it monitors the build
+(craft_application commands/remote.py:173-178), not only at its deadline
+(services/remotebuild.py:176-184). The script read the 75 as the deadline and,
+with no arch Succeeded, rebuilt nothing.
+
+After an exit 75 the retry now builds every missing arch except one the last
+state line reported Stopped, within the same MAX_ATTEMPTS and BUILD_BUDGET
+(the maintainer's decision on W-24 Q1). A real deadline is never retried. It
+cannot end an attempt shorter than the timeout the attempt was given, so the
+existing budget check (used + delay + took <= budget) always refuses it. No
+new threshold is needed. Every exit 75 prints a warning with the attempt's
+duration against its timeout and says whether that was the deadline. Other
+exit codes keep D5: only Succeeded archs are rebuilt.
+
+Proven offline:
+- The new cases of remote-build.test.sh are red on e089f48's script (15
+  checks), and the suite is green after (77).
+- Each of the 22 mutants in remote-build.mutate.sh (M1-M21) turns it red.
+- All .github/scripts/*.test.sh suites and shellcheck pass.
+- From the source and the log: that exit 75 was not the deadline.
+
+Not proven: which Launchpad call raised the TimeoutError, and why (no
+traceback; an unanswered connect is a hypothesis), and any retry against
+Launchpad. PR 10's next CI run is the first real test.
+EOF
+```
+
+Correct the counts in the message if Step 2, 4 or 6 printed different ones, and say why. Then write Task 2's body with this task's numbers.
