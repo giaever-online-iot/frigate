@@ -8,14 +8,15 @@
 
 ## Amendment 1 (2026-11-16): an exit 75 before the deadline is retried
 
-- **What happened.** PR #10's first CI run of the built script (`e089f48`, run 43838113093) ended with `snaps=0`. snapcraft printed `Timed out waiting for build.` and exited 75 869 s into attempt 1, although it had been given `--launchpad-timeout=18000`. Both archs were still `Building`, and nothing was fetched. The script read the 75 as the deadline. No arch was `Succeeded`, so D5 rebuilt nothing, and the completeness gate went red (§3.8).
+- **What happened.** PR #10's first CI run of the built script (`e089f48`, run 43838113093) ended with `snaps=0`. snapcraft printed `Timed out waiting for build.` and exited 75 869 s into attempt 1 (782 s after snapcraft set its timeout), although it had been given `--launchpad-timeout=18000`. Both archs were still `Building`, and nothing was fetched. The script read the 75 as the deadline. No arch was `Succeeded`, so D5 rebuilt nothing, and the completeness gate went red (§3.8).
 - **Why.** snapcraft returns 75 for *any* `TimeoutError` while it monitors the build, not only for its own deadline (§3.8). That run's deadline was still more than 4 h away.
 - **The maintainer's decision** (W-24 Q1, answered 2026-11-16, option 1, "Fix it in W-24: retry on an early timeout"): when snapcraft exits 75 long before the budget is used up, start a NEW build of the requested archs, inside the same `MAX_ATTEMPTS` and `BUILD_BUDGET`. A real deadline stays final.
 - **What changes:**
   - D5: after an exit 75, the retry builds every missing arch except one that the last state line reported `Stopped`. The `Stopped` exception is the design's addition to the maintainer's rule. Other exit codes keep D5 as it was.
   - D6: no new threshold. The existing budget check already refuses any retry after a real deadline (the proof is in D6).
+  - **The cutoff this keeps, for the maintainer to see before approving.** The same check retries an early 75 only if another attempt of the same length still fits in the budget. In attempt 1 an early 75 after 8992 s (about 2 h 30 min, half of 18000 s less the 15 s delay) is therefore **not** retried, although up to about 2 h 30 min of budget remain and a retry would be capped by `--launchpad-timeout` anyway. "Long before the budget is used up" thus means "before about half of it is used". Removing this cutoff would need a different budget rule for retries after a 75 (for example: retry whenever some minimum is left, capped by the timeout). That is not proposed here.
   - New D12: every exit 75 prints a `::warning::` with the attempt's duration against its timeout.
-  - D9, D10, §3.6, §5, §6, §7 (new cases, mutants M17–M21) and §10 are updated to match. §3.8 holds the evidence.
+  - D9, D10, §3.6, §5, §6, §7 (new cases, mutants M17–M22) and §10 are updated to match. §3.8 holds the evidence.
   - D13 writes down a broader, state-based rule as an option. It is **not** chosen.
 - **What stays:** D1–D4, D5a, D7, D8, D11, the defaults, and everything already built in `e089f48` except the lines this amendment changes.
 
@@ -183,6 +184,8 @@ Reasons:
   - The retry check `used + RETRY_DELAY + took ≤ BUILD_BUDGET` would then need `RETRY_DELAY + took ≤ 0`, which cannot hold, since `took ≥ left ≥ 1`.
   - snapcraft's late start, and its noticing the deadline up to one poll cycle late, only make `took` larger.
   - So the existing check alone separates the two cases. An early 75 is retried exactly when a retry of the same length still fits, and a real deadline never is.
+  - **The price of keeping the check unchanged:** in attempt 1, where `used ≈ took`, a retry fits only when `took ≤ (18000 − 15) / 2 ≈ 8992 s`. An early 75 after about 2 h 30 min is not retried, although budget remains (Amendment 1 list).
+  - The proof covers exit 75 only. With a very small `left` (less than snapcraft needs to push and create the builds), the deadline fires in `_check_timeout` inside `start_builds`, outside the `try` (`ca/commands/remote.py:162` vs `:164`). That is an internal error with no state line, which no rule retries: the same outcome as a deadline 75.
   - The one gap: the script reads the wall clock (`date +%s`) and snapcraft a monotonic clock. A backward wall-clock step of more than `RETRY_DELAY + left` seconds during the attempt would let a retry through. That is not handled.
 - An early 75 that took too long for another attempt of the same length is not retried either. It is the same check, with `::warning::not rebuilding … attempt N took Ns`.
 - Attempt 1 gets the timeout too. **This is an accepted trade, stated honestly.** Between about 5 h and 5 h 40 min, the old script could still have finished an attempt and uploaded it. With the timeout on attempt 1, it now exits 75 at 5 h and fetches nothing. That is accepted because it keeps the upload step and the gate reachable inside 6 h. Past about 5 h 40 min the old script lost the upload anyway, because GitHub killed the job.
@@ -199,11 +202,12 @@ Reasons:
 
 **D11. History is corrected forward, not rewritten.** bea5564 and ae00129 are already on `origin/fix/remote-build-fetch-recover`: PR #10's CI ran on ae00129. The W-24 card's remark that nothing is pushed yet is therefore not right, and amending bea5564 would rewrite pushed history. The implementation commit's message states what bea5564 got wrong. The PR #10 body is replaced (§8).
 
-**D12 (Amendment 1). Every exit 75 prints `::warning::attempt <n>: snapcraft exited 75 after <took>s of its <left>s --launchpad-timeout: <kind>`.** `<kind>` is `the deadline` when `took ≥ left`, and otherwise `a Launchpad call timed out, not the deadline`.
+**D12 (Amendment 1). Every exit 75 prints `::warning::attempt <n>: snapcraft exited 75 after <took>s of its <left>s --launchpad-timeout: <kind>`.** `<kind>` is `a Launchpad call timed out, not the deadline` when `took < left`, and otherwise `the deadline, or a timeout too close to it to tell`.
 Reasons:
 - The next occurrence then shows at once which case it was, without reading timestamps out of two logs (§3.8 had to).
 - The test is exact: the deadline cannot end an attempt shorter than `left` (D6), so `took < left` proves an early 75. The warning does not say which call timed out, because that is not proven (§10).
 - It is printed whether or not a retry follows, so a 75 on the last attempt is visible too.
+- `took ≥ left` does not prove the deadline. An early 75 can still come in the short window after `left` seconds and before the deadline, because snapcraft sets the deadline up to about 86 s after `t0`. Hence the label "or a timeout too close to it to tell". It changes nothing, because no retry fits there (`used ≥ BUILD_BUDGET`, D6).
 
 **D13 (an option, NOT chosen; for the maintainer's decision). A state-based rule: after an attempt that printed at least one state line, rebuild every missing arch that the last state line did not report `Stopped`, whatever snapcraft's exit code.**
 - What it would add: an attempt that ends on another error while monitoring would be retried too, for example a connection reset or a Launchpad 5xx (an internal error, not 75). The chosen rule does not retry it.
@@ -212,6 +216,7 @@ Reasons:
   - a crash in snapcraft while monitoring (a deterministic bug) would cost up to two more full builds and their Launchpad time;
   - the "at least one state line" condition must be pinned, so that an auth failure or an attempt that fails before building (`authfail`, `cutthenfail`) is still not retried. That means about three more tests and two more mutants.
 - Default: the maintainer's narrower rule, exit 75 only. Revisit if a run ends on an error other than 75 after `Building` lines.
+- Not covered by either rule: a `TimeoutError` in `start_builds`, before any build exists (the Launchpad API calls and the push), or its `_check_timeout` when `left` is very small. Both are outside the `try` (`ca/commands/remote.py:162` vs `:164`), so snapcraft ends with an internal error and no state line. The script then retries nothing, as for `authfail`. The connect-timeout hypothesis (§3.8) can strike there too.
 
 ## 5. Behaviour after the change
 
@@ -268,8 +273,9 @@ Arithmetic, 6 h = 21600 s:
 | `BUILD_BUDGET` = `0`, `-100`, `5h`; `MAX_ATTEMPTS=x` | `::warning::` and the default: call 1 gets `--launchpad-timeout=18000`; at most 3 calls |
 | `RETRY_DELAY=x` | `::warning::` and the default: the `sleep` stub records `15`; snaps=2; exit 0 (unvalidated, the script dies on `x: unbound variable` with no `snaps=` line) |
 | state lines on stderr (every `cut` case) | the rebuild happens only if stderr is captured (D5a ii) |
-| `timeout` stub: prints `Succeeded: amd64`, then exits 75 with `Timed out waiting for build` and nothing fetched; the budget is used up | exactly 1 call; no rebuild; snaps=0; `::warning::not rebuilding amd64,arm64: attempt 1 took 18000s` (after a 75 every missing arch is a candidate, so both are named); the D12 warning names `the deadline` |
-| `early75`, amd64+arm64, STUB_COST=869 (PR #10's second run) | 2 calls; call 2 `--build-for=amd64,arm64`; call 2's id ≠ call 1's (nothing was fetched, so only the marker can do that); call 2 `--launchpad-timeout=17131`; snaps=2; the D12 warning names `a Launchpad call timed out, not the deadline` |
+| `timeout` stub: prints `Succeeded: amd64`, then exits 75 with `Timed out waiting for build` and nothing fetched; the budget is used up | exactly 1 call; no rebuild; snaps=0; `::warning::not rebuilding amd64,arm64: attempt 1 took 18000s` (after a 75 every missing arch is a candidate, so both are named); the D12 warning names `the deadline, or a timeout too close to it to tell` |
+| `early75`, amd64+arm64, STUB_COST=869 (PR #10's second run) | 2 calls; call 2 `--build-for=amd64,arm64`; call 2's id ≠ call 1's, checked only when there are 2 calls (nothing was fetched, so only the marker can do that); call 2 `--launchpad-timeout=17131`; snaps=2; the D12 warning names `a Launchpad call timed out, not the deadline` |
+| `cutthen75`, amd64+arm64: call 1 cuts amd64 (arm64 arrives whole), call 2 is an early 75 | 3 calls; calls 2 and 3 `--build-for=amd64` (the valid arm64 is not rebuilt, D2); snaps=2 |
 | `early75stopped`, amd64+arm64 (amd64 `Stopped`, arm64 `Building`) | 2 calls; call 2 `--build-for=arm64`; snaps=1 |
 | `early75stopped`, amd64 only | 1 call; `::warning::not rebuilding amd64: Launchpad reported it Stopped in attempt 1` |
 | `alwaysearly75`, amd64+arm64 | exactly 3 calls; 3 distinct ids; snaps=0; exit 0; `::warning::still missing amd64,arm64 after 3 attempts` |
@@ -303,6 +309,7 @@ The suite must be **red on the current script** (ae00129) and green after. Amend
 | M19 do not keep snapcraft's exit code (`true` in place of `rc="${PIPESTATUS[0]}"`) | the same cases as M17 |
 | M20 drop the D12 warning | the two D12 warning checks |
 | M21 count `took = left` as early (`-le` in place of `-lt`) | `timeout`: the warning must name the deadline |
+| M22 after a 75, rebuild an arch that already has a valid snap (drop `have_arch` from `timeout_archs`) | `cutthen75`: call 3 builds amd64 only |
 
 Two more mutants survive and are equivalent, according to the plan review, so they need no test. X4: a `./*"$1"*` glob, because no real arch name is a substring of another. X8: dropping the `[ -d .git ]` guard, which differs only when `.git` is a file.
 
@@ -329,6 +336,7 @@ ae00129's channel-close fix and `snapcraft-close.test.sh` (D7); `prune_corrupt` 
   - What would prove it: a traceback, which snapcraft does not log for a caught `TimeoutError`; or a record, on the runner during the build, of its connections to the Launchpad API (for example `ss -tn state syn-sent` sampled every few seconds, or a packet capture of the SYNs), together with the runner's `tcp_syn_retries`.
   - D12's warning will show the next occurrence's timing at once, but not its cause.
 - **A retry after an early 75, against Launchpad,** is unproven, like the cut-download rebuild. If early 75s come from a recurring network fault between the runner and Launchpad, a retry can meet the same fault. `MAX_ATTEMPTS` and the budget bound it.
+- **A timeout before any build exists is not retried.** A `TimeoutError` in `start_builds` (the Launchpad API calls and the push), or its `_check_timeout` when `left` is very small, is outside the `try`. snapcraft ends with an internal error and no state line, and the script retries nothing (D13's last point). Whether that happens on the runner is unknown; it has not been seen in any run so far.
 - **A rebuild is not guaranteed to avoid another cut download.** The cut may be the idle second connection (§3.6) being dropped while the first ~1 GB file downloads. Both cuts hit under 1 MB into a file: 578594 and 763316 bytes read. **This is NOT PROVEN.**
   - If it is true, two-arch first attempts will often take the rebuild path, at about +25–30 min of Launchpad time per such run, and the single-arch retry (one connection) is likely to succeed.
   - If it is false, the cut is network luck and a retry may be cut again.
