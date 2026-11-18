@@ -71,14 +71,14 @@ jobs:
             echo "archs=$ARCHS"
           } >> "$GITHUB_OUTPUT"
 
-      # Builds + fetches every arch, retrying when a transient network error
-      # truncates the artifact DOWNLOAD (the Launchpad build itself succeeds).
-      # Validates each .snap, drops truncated ones, and re-fetches via --recover
-      # (no rebuild). Still tolerant of a genuine partial-arch build failure.
+      # Builds + fetches every arch. Validates each .snap and drops truncated ones.
+      # When Launchpad built an arch but its DOWNLOAD broke (PR 9, PR 10), or a Launchpad
+      # call timed out long before the deadline (exit 75; PR 10), starts a NEW remote
+      # build of just the missing archs: never --recover, which cannot find
+      # snapcraft's own Launchpad repository. At most 3 attempts, inside a 5 h
+      # budget (BUILD_BUDGET), so the upload below runs before the 6 h job limit.
+      # A genuine build failure or a real deadline is not rebuilt; it stays tolerated.
       # Writes steps.build.outputs.snaps=<valid-count>. See remote-build.test.sh.
-      # Frigate's build (ffmpeg/go2rtc/ML runtimes) is much heavier than a
-      # typical snap — this helper's retry/timeout behaviour is carried over
-      # UNCHANGED from the source pattern; see remote-build.sh's header note.
       - name: Remote-build all archs (retry transient fetch failures)
         id: build
         run: .github/scripts/remote-build.sh "${{ steps.meta.outputs.archs }}"

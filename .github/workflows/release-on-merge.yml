@@ -89,4 +89,7 @@ jobs:
           .github/scripts/release-arch.sh "$CHAN" latest/edge "$EDGE_ARCHS"
 
           echo ">> closing $CHAN"
-          snapcraft close "$SNAP" "$CHAN" --yes || echo "close failed (already gone?); ignoring"
+          # snapcraft 9 `close` has no --yes (only -h/-v); it never prompts. A failure
+          # stays non-fatal (the promotion above already happened) but prints its exit
+          # status as a job warning. Guarded by .github/scripts/snapcraft-close.test.sh.
+          snapcraft close "$SNAP" "$CHAN" || echo "::warning::snapcraft close $CHAN failed (exit $?; already closed or expired?); ignoring"
