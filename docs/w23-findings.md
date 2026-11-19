@@ -150,6 +150,42 @@ Also changed in the workflow:
 **First green CI run:** the orchestrator records its `Ran N tests … (skipped=M)` line here after the push. The local
 equivalent is in "Suite counts" below.
 
+**First CI run of PR #11 (head ca3164e): red at its first step, shellcheck.**
+- The runner installs shellcheck 0.11.0-2 from apt. That version flags SC2319 (`$?` read right after a `[ ]` test),
+  which the laptop's shellcheck 0.9.0 does not know.
+- Every local shellcheck result in this document before 19 Nov evening, including the "70 files passed" line above,
+  came from 0.9.0. They are not evidence for the runner.
+- The two findings:
+  - `tests/hub/ezviz-ledger.test.sh:54`, new on this branch;
+  - `tests/hub/ssh-exec.test.sh:73`, unchanged from origin/main, so main itself is red under 0.11.
+- Both became `"$([ -e f ] && echo 0 || echo 1)"`, with the same expected value (de3ec8c and 7490b46). The suites give
+  the same counts before and after (26 ok and 43 ok).
+- Because step 1 failed, none of the later steps ran in that CI run.
+
+**Run shellcheck with the runner's version.** 0.11.x, for example `shellcheck-py==0.11.0.1` (it prints
+`version: 0.11.0`) in a private venv such as `~/.cache/frigate-w23/shellcheck011`. Put only the `shellcheck` binary on
+PATH, through a directory holding just a symlink. The venv's `bin/` also holds a `python3`, which would shadow the
+system one and its `python3-yaml`: in a first replay this turned `discover -s tests` red and skipped the make-config
+cross-checks.
+
+**Local replay of the whole workflow** (19 Nov):
+- Setup: a fresh clone at 88f7ccf, an empty HOME (no `~/.cache`, so no snap file and no venvs), TMPDIR unset, the
+  system python3/python3.12 3.12.3 with `python3-yaml`, and shellcheck 0.11.0.
+- Step 1, shellcheck over 70 targets with the lint-test flags: rc 0 (rc 1 at 66fb66c, the two findings above).
+- Step 2, `.github/scripts` shellcheck: rc 0.
+- Step 3, `.github/scripts` unit tests: all six pass.
+- Step 4, the `tests/*.test.sh tests/*/*.test.sh` loop: all 32 files rc 0, 0 FAIL. Then `discover -s tests` 27 OK and
+  `discover -s tests/arm64-vm` 10 OK.
+  - Three suites SKIP, as on the runner, for lack of the local amd64 snap file: `serve-ezviz`, `hub/serve` and
+    `hub/make-clips`.
+- Step 5, the ezviz helper tests on the venv that `tests/ezviz/venv.sh` built from the hash lock (pip from the index,
+  in the empty HOME): `Ran 259 tests`, `OK (skipped=13)`.
+  - All 13 skips are `test_probe.py`'s fake-camera runs: "no real ffmpeg". They include the end-to-end regression
+    tests for this branch's reader fixes (`test_real_shape_camera_publishes`, `test_b2_descriptor_camera_publishes`,
+    `test_rtp_ts_stats_are_video_only`).
+  - So unless the runner has an ffmpeg on PATH (not checked here), CI proves those fixes only through the annexb unit
+    tests. The end-to-end proof stays the laptop run with the snap file's ffmpeg 8.0.
+
 ## Known pre-existing flake: `tests/hub/serve.test.sh` (clip mode)
 
 The whole-branch review saw `tests/hub/serve.test.sh` fail once in two runs on 5d46c3d: cam1 had 212 frames and 78
