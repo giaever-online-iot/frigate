@@ -33,6 +33,15 @@ I=$(snapctl get certsync.interval) || I=""
 D=$(snapctl get detector) || D=""
 [ -z "$D" ] || [ "$D" = ov ] || [ "$D" = coral ] || [ "$D" = cpu ] || fail "detector must be ov|coral|cpu"
 
+# W-23 D13: the disk guard's floor in GiB (default 20 when unset).
+G=$(snapctl get disk-floor-gib) || G=""
+[ -z "$G" ] || { case "$G" in *[!0-9]*) fail "disk-floor-gib must be an integer 1-10000";; esac
+                 [ "$G" -ge 1 ] && [ "$G" -le 10000 ] || fail "disk-floor-gib must be an integer 1-10000"; }
+
+# W-23 §4.2 / plan P6: clear a camera's latch on purpose: snap set frigate ezviz.<name>.unlatch=$(date +%s).
+# It acts once per new value (a seen-file), so a later, unrelated snap set never clears a new latch.
+"$SNAP/opt/ezviz-py/bin/python3.12" -I -B -m ezviz_source.unlatch || fail "ezviz unlatch failed"
+
 # Apply live: nginx (listen.conf/port/tls) + certsync (port/interval). No-op/absent-safe at
 # install time (services not yet started) via 2>/dev/null || true; frigate is left running.
 snapctl restart frigate.nginx frigate.certsync 2>/dev/null || true
