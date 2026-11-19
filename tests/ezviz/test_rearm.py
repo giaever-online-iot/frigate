@@ -155,6 +155,15 @@ class TestRound(RearmBase):
         run_round(Api("http://127.0.0.1:1"), ["cam1"], {}, lines.append)
         self.assertEqual(lines, [])
 
+    def test_env_proxies_are_ignored(self):
+        f = self.fake(get_body=json.dumps({"cam1": {}}).encode())
+        dead = "http://127.0.0.1:1"
+        with unittest.mock.patch.dict(os.environ, {"http_proxy": dead, "HTTP_PROXY": dead}):
+            api = Api(f.base)
+            self.assertEqual(api.get(), {"cam1"})
+            self.assertTrue(api.put("cam2"))
+        self.assertEqual(len(f.puts()), 1)
+
     def test_default_timeout_is_75(self):
         self.assertEqual(Api().timeout, 75)
 

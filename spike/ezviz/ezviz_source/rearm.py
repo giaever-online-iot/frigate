@@ -49,6 +49,11 @@ def names(camera_dir: Path) -> list:
     return out
 
 
+# One opener with an empty ProxyHandler and no other handler: http_proxy/HTTP_PROXY survive `python -I`,
+# and the loopback API must never be sent through (or its camera names leaked to) a proxy.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 class Api:
     def __init__(self, base: str = DEFAULT_BASE, *, timeout: float = 2 * STARTTIMEOUT_S + 15):
         self.base = base.rstrip("/")
@@ -60,7 +65,7 @@ class Api:
         self.refused = False
         try:
             req = urllib.request.Request(self.base + "/api/preload", method="GET")
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with _OPENER.open(req, timeout=self.timeout) as r:
                 if r.status != 200:
                     return None
                 body = json.loads(r.read())
@@ -79,7 +84,7 @@ class Api:
         try:
             req = urllib.request.Request("%s/api/preload?src=%s&video" % (self.base, name),
                                          method="PUT")
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with _OPENER.open(req, timeout=self.timeout) as r:
                 return r.status == 200
         except Exception:
             return False
