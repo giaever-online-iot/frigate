@@ -183,8 +183,13 @@ cross-checks.
   - All 13 skips are `test_probe.py`'s fake-camera runs: "no real ffmpeg". They include the end-to-end regression
     tests for this branch's reader fixes (`test_real_shape_camera_publishes`, `test_b2_descriptor_camera_publishes`,
     `test_rtp_ts_stats_are_video_only`).
-  - So unless the runner has an ffmpeg on PATH (not checked here), CI proves those fixes only through the annexb unit
-    tests. The end-to-end proof stays the laptop run with the snap file's ffmpeg 8.0.
+  - Fixed in 116ef51. The workflow now installs Ubuntu's `ffmpeg` before this step and fails the step unless
+    unittest's final verdict is a plain `OK`, so `OK (skipped=N)` is red. The step gets `timeout-minutes: 30`.
+  - Replay of that step's `run:` block, taken verbatim from the YAML and run under `bash -e`, on a fresh clone with an
+    empty HOME. The ffmpeg was Ubuntu noble's archive package `7:6.1.1-3ubuntu5`, unpacked without root from
+    `apt-get download`: `Ran 259 tests`, `OK`, 0 skipped, step rc 0, 586 s wall time including the venv build.
+  - Mutant, the same replay with ffmpeg hidden: unittest says `OK (skipped=13)`, and the step fails with rc 1 and
+    `::error::ezviz helper tests: verdict 'OK (skipped=13)', want a plain OK`.
 
 ## Known pre-existing flake: `tests/hub/serve.test.sh` (clip mode)
 
