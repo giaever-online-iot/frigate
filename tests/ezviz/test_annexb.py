@@ -1,8 +1,9 @@
 import _path
 import unittest
 
+from ezviz_source import annexb
 from ezviz_source.annexb import AccessUnits, Reassembler
-from fixtures import fu, hevc_nal, rtp_body
+from fixtures import SENTINEL, fu, hevc_nal, rtp_body
 
 SC = b"\0\0\0\1"
 VPS, SPS, PPS = hevc_nal(32, 24), hevc_nal(33, 40), hevc_nal(34, 12)
@@ -67,6 +68,65 @@ class ReassemblerTests(unittest.TestCase):
         self.assertEqual(r.push(rtp_body(104, 1, 0, b"\x01\x02\x03\x04\x05\x06")), [])
         self.assertEqual(r.pts_seen(), {104})
 
+    def test_runaway_fu_is_dropped_at_cap(self):
+        # review 1: a valid-start FU with continuous seq/ts that never ends must not grow without bound
+        with unittest.mock.patch.object(annexb, "FU_MAX_BYTES", 100):
+            r, out = Reassembler(), []
+            frags = fu(hevc_nal(19, 2000), 40)
+            for i, p in enumerate(frags[:10]):
+                out += r.push(rtp_body(96, 10 + i, 900, p))
+            self.assertEqual(out, [])
+            self.assertIsNone(r._active)
+            self.assertEqual(r.push(rtp_body(96, 99, 901, SPS)), [SC + SPS])
+
+    def test_zero_length_extension_keeps_trailer_rule(self):
+        # review 2: X=1 with a zero-length extension still has extension_profile set (rtp.py:440-451),
+        # so the 24 00 trailer is NOT stripped (packets.py:~177-181)
+        body = VPS + b"\x24\x00\x00\x08"
+        rtp = bytes([0x90, 96, 0, 1, 0, 0, 0, 0]) + SENTINEL + b"\0\0\0\0" + body
+        frame = b"\x0d" + rtp
+        got = Reassembler().push(len(frame).to_bytes(4, "little") + frame)
+        self.assertEqual(got, [SC + body])
+
+    def test_param_frame_body_skipped(self):
+        # packets.py:~262-265: bodies starting 00 01 / 00 02 are skipped, even after evidence
+        r = Reassembler()
+        r.push(rtp_body(96, 1, 0, VPS))
+        for lead in (b"\x00\x01", b"\x00\x02"):
+            self.assertEqual(r.push(rtp_body(96, 2, 0, lead + hevc_nal(1, 20)[2:])), [])
+
+    def test_wrapper_nal_at_offset_12(self):
+        # packets.py:297-300 / payloads.py:~800: 40 00 00 02 80 06 wrapper, NAL at offset 12
+        got = Reassembler().push(rtp_body(96, 1, 0, b"\x40\x00\x00\x02\x80\x06" + b"\0" * 6 + SPS))
+        self.assertEqual(got, [SC + SPS])
+
+    def test_descriptor_routing(self):
+        # rtp.py:508-544: 0x45 TLV = stream type, payload type. A non-HEVC descriptor on 96 rejects it
+        def with_desc(pt, seq, stream_type, desc_pt, payload):
+            rtp = bytes([0x90, pt, 0, seq, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" \
+                + bytes([0x45, 2, stream_type, desc_pt]) + payload
+            return len(rtp).to_bytes(4, "little") + rtp
+        r = Reassembler()
+        self.assertEqual(r.push(with_desc(96, 1, 0x1B, 96, VPS)), [])        # h264 owns PT 96
+        r = Reassembler()
+        self.assertEqual(r.push(with_desc(98, 1, 0x24, 98, VPS)), [SC + VPS])  # hevc on another PT
+        self.assertEqual(r.push(rtp_body(96, 2, 0, SPS)), [])                  # 96 is no longer a route
+
+    def test_evidence_gate_drops_vcl_before_parameter_sets(self):
+        r = Reassembler()
+        self.assertEqual(r.push(rtp_body(96, 1, 0, hevc_nal(19, 30))), [])
+        self.assertEqual(r.push(rtp_body(96, 2, 0, VPS)), [SC + VPS])
+        idr = hevc_nal(19, 30)
+        self.assertEqual(r.push(rtp_body(96, 3, 0, idr)), [SC + idr])
+
+    def test_implausible_assembled_nal_dropped(self):
+        # packets.py:352-359: an FU that reassembles to NAL type 41 (> 40) is dropped
+        nal = bytes([41 << 1, 1]) + b"\x80" + b"\x5a" * 20
+        r, out = Reassembler(), []
+        for i, p in enumerate(fu(nal, 10)):
+            out += r.push(rtp_body(96, i, 5, p))
+        self.assertEqual(out, [])
+
 
 class AccessUnitTests(unittest.TestCase):
     def test_access_units_split_and_idr(self):
@@ -79,6 +139,21 @@ class AccessUnitTests(unittest.TestCase):
         got = drain(AccessUnits(), [VPS, SPS, PPS, hevc_nal(21, 50), hevc_nal(1, 30)])
         self.assertEqual([f for _, f in got], [False, False])
         self.assertEqual(len(got), 2)
+
+    def test_runaway_au_is_dropped_at_cap(self):
+        with unittest.mock.patch.object(annexb, "AU_MAX_NALS", 3):
+            aus = AccessUnits()
+            out = []
+            for n in (VPS, SPS, PPS, hevc_nal(39, 10)):   # no VCL, so no boundary ever
+                out += aus.push(n)
+            self.assertEqual(out, [])
+            self.assertEqual(aus._nals, [])
+            idr = hevc_nal(19, 50)
+            self.assertEqual(drain(aus, [idr, hevc_nal(1, 30)]), [(SC + idr, True), (SC + hevc_nal(1, 30), False)])
+        with unittest.mock.patch.object(annexb, "AU_MAX_BYTES", 100):
+            aus = AccessUnits()
+            self.assertEqual(aus.push(hevc_nal(39, 200)), [])
+            self.assertEqual(aus._nals, [])
 
     def test_two_slices_one_picture(self):
         got = drain(AccessUnits(), [hevc_nal(19, 50), hevc_nal(19, 50, first_slice=False)])

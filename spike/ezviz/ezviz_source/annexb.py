@@ -2,6 +2,16 @@
 
 Replicates the HEVC branch of pyEzvizApi 2.0.0 with no decrypt step, incrementally. Library references
 are pyezvizapi/streaming/{local/packets.py, local/payloads.py, media/rtp.py} at 2.0.0.
+
+Accepted differences from the library (Task 9's byte-for-byte diff must not chase these):
+- no EOF flush of an active FU (the library appends it after its loop);
+- the 0x45 route map is progressive, the library uses the final map over all packets;
+- no PT-96 evidence promotion when descriptors exist, no hevc_evidence>=2 / conflicting-route checks,
+  no rtp_payload_video_codec != "h264" check;
+- no H.264 path;
+- no concatenated-frame or nested "00 10" aggregate splitting: one length-prefixed body per push;
+- caps: an FU over FU_MAX_BYTES, or a pending AU over AU_MAX_BYTES / AU_MAX_NALS, is dropped;
+- an AU is emitted one picture late; flush() returns the pending one at EOF.
 """
 START = b"\x00\x00\x00\x01"
 SENTINEL = b"\x55\x66\x77\x88"          # packets.py:42
@@ -11,6 +21,9 @@ TRAILER_PREFIX = b"\x24\x00"            # packets.py:57
 DEFAULT_PT = 96                         # session.py:2635, rtp.py:221-256 (legacy fallback route)
 HEVC_STREAM_TYPE = 0x24                 # rtp.py:88
 FU = 49
+FU_MAX_BYTES = 8 << 20                  # a FU that grows past this is dropped (never-ending FU)
+AU_MAX_BYTES = 16 << 20                 # a pending AU past this many bytes or NALs is dropped
+AU_MAX_NALS = 1024
 
 
 def _nal_type(nal: bytes) -> int:
@@ -50,10 +63,11 @@ def _strip_trailer(body: bytes) -> bytes:
 
 
 class _Rtp:
-    __slots__ = ("payload", "pt", "seq", "ts", "marker", "ext")
+    __slots__ = ("payload", "pt", "seq", "ts", "marker", "ext", "has_ext")
 
-    def __init__(self, payload, pt, seq, ts, marker, ext):
+    def __init__(self, payload, pt, seq, ts, marker, ext, has_ext):
         self.payload, self.pt, self.seq, self.ts, self.marker, self.ext = payload, pt, seq, ts, marker, ext
+        self.has_ext = has_ext          # library's extension_profile is not None (X bit), even if length 0
 
 
 def _parse_rtp(data: bytes):
@@ -78,7 +92,7 @@ def _parse_rtp(data: bytes):
             return None
         payload = payload[:-payload[-1]]
     return _Rtp(payload, data[1] & 0x7F, int.from_bytes(data[2:4], "big"),
-                int.from_bytes(data[4:8], "big"), bool(data[1] & 0x80), ext)
+                int.from_bytes(data[4:8], "big"), bool(data[1] & 0x80), ext, bool(data[0] & 0x10))
 
 
 def _header_size(frame: bytes):
@@ -173,7 +187,7 @@ class Reassembler:
         # packets.py:174-195 (_idmx_local_frame_media_body)
         if hs == 13 and len(frame) - 13 > WRAPPER_NAL_OFFSET and frame[13:].startswith(WRAPPER):
             media = frame[13:13 + WRAPPER_NAL_OFFSET] + pkt.payload
-        elif hs == 13 and not pkt.ext:
+        elif hs == 13 and not pkt.has_ext:
             media = _strip_trailer(pkt.payload)            # packets.py:329-342
         else:
             media = pkt.payload
@@ -214,6 +228,9 @@ class Reassembler:
         has_hdr = start or orig == _nal_type(bytes(act[0][:2])) or fh in (h0, h0 | 64)
         act[0].extend(payload[3:] if has_hdr else payload[2:])
         act[1], act[2] = pkt.seq, pkt.ts
+        if len(act[0]) > FU_MAX_BYTES:
+            self._active = None
+            return []
         if (has_hdr and fh & 64) or (not has_hdr and pkt.marker):
             nal, self._active = bytes(act[0]), None
             return [START + nal] if _plausible(nal) else []
@@ -241,6 +258,7 @@ class AccessUnits:
         self._nals = []
         self._has_vcl = False
         self._idr = False
+        self._size = 0
 
     def push(self, nal: bytes) -> list:
         nal = nal[4:] if nal.startswith(START) else nal      # Reassembler output carries the start code
@@ -252,6 +270,10 @@ class AccessUnits:
         if self._has_vcl and (t in (32, 33, 34, 35, 39) or first_slice):
             out = self.flush()
         self._nals.append(START + nal)
+        self._size += len(nal) + 4
+        if len(self._nals) > AU_MAX_NALS or self._size > AU_MAX_BYTES:
+            self._nals, self._has_vcl, self._idr, self._size = [], False, False, 0
+            return out
         if vcl:
             self._has_vcl = True
             self._idr = self._idr or t in (19, 20)
@@ -261,5 +283,5 @@ class AccessUnits:
         if not self._nals:
             return []
         au = (b"".join(self._nals), self._idr)
-        self._nals, self._has_vcl, self._idr = [], False, False
+        self._nals, self._has_vcl, self._idr, self._size = [], False, False, 0
         return [au]
