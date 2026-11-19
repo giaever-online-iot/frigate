@@ -141,6 +141,52 @@ class ReassemblerTests(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+class DropReasonTests(unittest.TestCase):
+    """GA A1 diagnosis: Reassembler.drop names the stage that turned a push into no NAL (None when a NAL came out).
+    The probe's --diag counters read it, so they count the real code path, not a copy of it."""
+
+    def test_reasons(self):
+        legacy = b"\xfa" + bytes([0x80, 96, 0, 1, 0, 0, 0, 0]) + SENTINEL + VPS     # 13-byte header, no RTP at 0/1
+        aud = bytes([35 << 1, 1, 0x50])
+        cases = [
+            ("frame", [], b"\x00\x01\x02"),
+            ("rtp", [], len(legacy).to_bytes(4, "little") + legacy),
+            ("param", [VPS], rtp_body(96, 2, 0, b"\x00\x01" + hevc_nal(1, 20)[2:])),
+            ("route", [], rtp_body(104, 1, 0, VPS)),
+            ("evidence", [], rtp_body(96, 1, 0, hevc_nal(19, 30))),
+            ("direct", [VPS], rtp_body(96, 2, 0, bytes([2, 0]) + b"\x80" * 8)),          # TID 0: not a NAL header
+            ("plausible", [VPS], rtp_body(96, 2, 0, bytes([49 << 1, 1, 0xC0 | 41]) + b"\x5a" * 8)),   # FU -> type 41
+            ("short", [VPS], rtp_body(96, 2, 0, bytes([49 << 1, 1]))),                 # an FU without its FU header
+            ("fu_gap", [VPS], rtp_body(96, 2, 0, fu(hevc_nal(19, 300), 100)[1])),      # a continuation, no start
+            ("fu_part", [VPS], rtp_body(96, 2, 0, fu(hevc_nal(19, 300), 100)[0])),     # a start: more to come
+            (None, [VPS], rtp_body(96, 2, 0, aud)),
+        ]
+        for want, before, body in cases:
+            r = Reassembler()
+            for i, b in enumerate(before):
+                self.assertEqual(r.push(rtp_body(96, 1, 0, b)), [SC + b])
+                self.assertIsNone(r.drop)
+            got = r.push(body)
+            self.assertEqual((r.drop, got == []), (want, want is not None), want)
+
+    def test_fu_cap_reason(self):
+        with unittest.mock.patch.object(annexb, "FU_MAX_BYTES", 100):
+            r = Reassembler()
+            drops = []
+            for i, p in enumerate(fu(hevc_nal(19, 2000), 40)[:10]):
+                r.push(rtp_body(96, 10 + i, 900, p))
+                drops.append(r.drop)
+            self.assertIn("fu_cap", drops)
+
+    def test_route_reason_after_a_b2_descriptor_on_another_pt(self):
+        rtp = bytes([0x90, 98, 0, 1, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" + bytes([0x45, 2, 0xB2, 98]) + VPS
+        r = Reassembler()
+        self.assertEqual(r.push(len(rtp).to_bytes(4, "little") + rtp), [SC + VPS])
+        self.assertEqual(r.descriptors(), {98: 0xB2})
+        self.assertEqual(r.push(rtp_body(96, 2, 0, SPS)), [])
+        self.assertEqual(r.drop, "route")
+
+
 class AccessUnitTests(unittest.TestCase):
     def test_access_units_split_and_idr(self):
         idr, trail = hevc_nal(19, 50), hevc_nal(1, 30)

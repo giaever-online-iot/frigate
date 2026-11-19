@@ -144,16 +144,32 @@ def _rtp_of(frame: bytes):
 
 
 class Reassembler:
-    """One library packet body -> zero or more Annex-B NALs (each starting b"\\0\\0\\0\\1"). Keeps FU state."""
+    """One library packet body -> zero or more Annex-B NALs (each starting b"\\0\\0\\0\\1"). Keeps FU state.
+
+    After each push(), `drop` names the stage that turned it into no NAL, or None when a NAL came out (GA A1 diagnosis;
+    read only by the probe's --diag counters, it changes no decision): frame (_frame_of), rtp (_rtp_of), param (an
+    00 01 / 00 02 carrier), route (not an HEVC payload type), evidence (no HEVC evidence yet), direct (not a direct HEVC
+    frame), short, plausible, fu_gap (a continuation that does not continue), fu_cap, fu_part (an FU fragment held for
+    more: not a loss).
+    """
 
     def __init__(self):
         self._pts = set()
         self._desc = {}                # payload type -> stream type, from 0x45 descriptors (rtp.py:508-544)
         self._active = None            # [data bytearray, last_seq, ts]   (packets.py:34-39)
         self._evidence = False         # payloads.py:~830 hevc_evidence_seen
+        self.drop = None               # the stage that dropped the last push (class docstring); diagnostics only
 
     def pts_seen(self) -> set:
         return set(self._pts)
+
+    def descriptors(self) -> dict:
+        """The 0x45 map learnt so far: payload type -> stream type."""
+        return dict(self._desc)
+
+    def _no(self, reason: str) -> list:
+        self.drop = reason
+        return []
 
     def _learn(self, ext: bytes) -> None:
         # rtp.py:520-544: walk the header-extension TLVs for 0x45 (stream type byte 2, payload type byte 3)
@@ -174,13 +190,14 @@ class Reassembler:
         return pt in hevc if hevc else (pt == DEFAULT_PT and pt not in self._desc)
 
     def push(self, body: bytes) -> list:
+        self.drop = None
         got = _frame_of(body)
         if got is None:
-            return []
+            return self._no("frame")
         frame, hs = got
         pkt = _rtp_of(frame)
         if pkt is None:
-            return []
+            return self._no("rtp")
         self._pts.add(pkt.pt)
         if pkt.ext:
             self._learn(pkt.ext)
@@ -193,32 +210,34 @@ class Reassembler:
             media = pkt.payload
         # packets.py:~262-265: bodies starting 00 01 / 00 02 are parameter-frame carriers, skipped (payloads.py:~802)
         if len(media) > 4 and media[:2] in (b"\x00\x01", b"\x00\x02"):
-            return []
+            return self._no("param")
         if not self._is_hevc_route(pkt.pt):
-            return []
+            return self._no("route")
         authoritative = any(st in HEVC_STREAM_TYPES for st in self._desc.values())
         if len(media) > WRAPPER_NAL_OFFSET and media.startswith(WRAPPER):    # packets.py:297-300 / payloads.py:~800
             self._evidence = True
             return self._payload(media[WRAPPER_NAL_OFFSET:], pkt)
-        if (authoritative or self._evidence or _evidence_frame(media)) and _direct_frame(media):
+        if not (authoritative or self._evidence or _evidence_frame(media)):
+            return self._no("evidence")
+        if _direct_frame(media):
             self._evidence = True                                           # payloads.py:~850-868
             return self._payload(media, pkt)
-        return []
+        return self._no("direct")
 
     def _payload(self, payload: bytes, pkt: _Rtp) -> list:
         """payloads.py:1263-1304 (_append_idmx_hevc_media_payload) without decrypt."""
         if len(payload) < 2:
-            return []
+            return self._no("short")
         t = (payload[0] >> 1) & 63
         if t != FU:
-            return [START + payload] if _plausible(payload) else []     # active FU is left untouched, as upstream
+            return [START + payload] if _plausible(payload) else self._no("plausible")   # active FU untouched, as upstream
         if len(payload) < 3:
-            return []
+            return self._no("short")
         fh = payload[2]
         start, orig = bool(fh & 128), fh & 63
         if not start and not self._continues(pkt):
             self._active = None            # seq gap or ts change drops the whole NAL (packets.py:204-222)
-            return []
+            return self._no("fu_gap")
         header = bytes([payload[0] & 129 | orig << 1, payload[1]])
         if start:
             self._active = [bytearray(header), pkt.seq, pkt.ts]
@@ -230,11 +249,11 @@ class Reassembler:
         act[1], act[2] = pkt.seq, pkt.ts
         if len(act[0]) > FU_MAX_BYTES:
             self._active = None
-            return []
+            return self._no("fu_cap")
         if (has_hdr and fh & 64) or (not has_hdr and pkt.marker):
             nal, self._active = bytes(act[0]), None
-            return [START + nal] if _plausible(nal) else []
-        return []
+            return [START + nal] if _plausible(nal) else self._no("plausible")
+        return self._no("fu_part")
 
     def _continues(self, pkt: _Rtp) -> bool:
         # packets.py:204-222 (_rtp_fragment_continues): same timestamp and seq == last + 1 (mod 2**16)
