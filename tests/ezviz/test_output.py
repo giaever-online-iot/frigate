@@ -5,7 +5,6 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -42,7 +41,7 @@ class Clock:
 
 class OutputTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = str(fixtures.tmpdir(self))
         self.outs = []
 
     def tearDown(self):

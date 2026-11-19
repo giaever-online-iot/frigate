@@ -1,19 +1,17 @@
 import _path
 import errno
 import os
-import tempfile
 import threading
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from fixtures import GOOD
+from fixtures import GOOD, tmpdir
 from ezviz_source import camfile
 from ezviz_source.camfile import CameraFileError, load
 
 
 def mk(text, mode=0o600):
-    d = Path(tempfile.mkdtemp())
+    d = tmpdir()
     f = d / "cam1.conf"
     f.write_text(text)
     f.chmod(mode)
@@ -34,7 +32,7 @@ class TestCamfile(unittest.TestCase):
         self.assertEqual(repr(load("cam1", mk(GOOD))), "Camera(cam1)")
 
     def test_missing(self):
-        self.assertEqual(self.cls(Path(tempfile.mkdtemp())), "missing")
+        self.assertEqual(self.cls(tmpdir(self)), "missing")
 
     def test_mode_644(self):
         self.assertEqual(self.cls(mk(GOOD, mode=0o644)), "mode")
@@ -81,7 +79,7 @@ class TestCamfile(unittest.TestCase):
     # ---- W-23 final wave (spec D7; T2/T6 parking) ----
     def test_fifo_does_not_hang(self):
         """A FIFO at the camera-file path: open must not block for a writer; it is not a regular file -> missing."""
-        d = Path(tempfile.mkdtemp())
+        d = tmpdir(self)
         os.mkfifo(d / "cam1.conf", 0o600)
         got = []
 

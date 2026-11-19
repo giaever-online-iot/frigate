@@ -2,13 +2,12 @@ import _path
 import errno
 import fcntl
 import os
-import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from unittest import mock
 
+from fixtures import tmpdir
 from ezviz_source import ledger
 from ezviz_source.ledger import Ledger, LedgerDamaged, LedgerIOError, parse
 
@@ -17,7 +16,7 @@ A = b'{"t":1,"ev":"attempt","dur":null}\n'
 
 class TestLedger(unittest.TestCase):
     def setUp(self):
-        self.d = Path(tempfile.mkdtemp())
+        self.d = tmpdir(self)
         self.p = self.d / "cam1.ledger"
 
     def evs(self):

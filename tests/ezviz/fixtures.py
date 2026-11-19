@@ -18,11 +18,22 @@ GOOD = "host=192.0.2.11\nport=8000\nserial=TESTCAM-0001\nlogin=QZCNRA\n"
 CANARIES = ("192.0.2.11", "TESTCAM-0001", "QZCNRA")
 
 
+def tmpdir(case=None, **kw) -> Path:
+    """A fresh temp dir that is removed afterwards: by case.addCleanup, or at the end of the test module (W-23 final wave:
+    the suite left fixture camera files, ledgers and trees in /tmp)."""
+    d = Path(tempfile.mkdtemp(**kw))
+    if case is not None:
+        case.addCleanup(shutil.rmtree, d, ignore_errors=True)
+    else:
+        unittest.addModuleCleanup(shutil.rmtree, d, ignore_errors=True)
+    return d
+
+
 class Tree:
     """A fake $SNAP_DATA / $SNAP_COMMON with a camera file for cam1."""
 
     def __init__(self, camfile: str = GOOD, mode: int = 0o600):
-        self.root = Path(tempfile.mkdtemp())
+        self.root = tmpdir()                       # removed at the end of the test module
         self.data, self.common = self.root / "data", self.root / "common"
         self.cams = self.data / "ezviz" / "cameras"
         self.state = self.common / "ezviz" / "state"
@@ -476,6 +487,5 @@ class HelperCase(unittest.TestCase):
     """A fresh tmp tree per test; every helper, fake camera and ffmpeg is killed before the tree is removed."""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="w23-helper-"))
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.addCleanup(Helper.close_all)
+        self.tmp = tmpdir(self, prefix="w23-helper-")
+        self.addCleanup(Helper.close_all)              # LIFO: the processes die before the tree is removed
