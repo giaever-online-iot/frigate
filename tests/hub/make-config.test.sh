@@ -11,7 +11,7 @@ has()   { grep -qF -- "$2" "$3"; check "$1" 0 $?; }
 hasnt() { grep -qF -- "$2" "$3"; check "$1" 1 $?; }
 M=tests/hub/make-config.sh; FX=$PWD/tests/hub/fixtures
 CA=QZCNRA; CB=QZCNRB; NC=QZNEVERREAD; IP1=192.0.2.11; IP2=192.0.2.12; ID1=TESTCAM-0001; ID2=TESTCAM-0002
-CANARIES=("$CA" "$CB" "$NC" "$IP1" "$IP2")
+CANARIES=("$CA" "$CB" "$NC" "$IP1" "$IP2" "$ID1" "$ID2")
 
 # argv+env recording shims for every external command the scripts use (resolved now, exec'd later)
 SH="$T/shim"; mkdir -p "$SH"; ENV_BIN=$(type -P env)
@@ -230,17 +230,18 @@ has   "ezviz: ezviz-check ok for cam1" "ezviz-check cam1: ok" "$(O e1)"
 has   "ezviz: ezviz-check ok for cam2" "ezviz-check cam2: ok" "$(O e1)"
 has   "ezviz: built line says 0 streams, days 1" "built: 2 cameras (ezviz), 0 go2rtc streams" "$(O e1)"
 check "ezviz: at most 12 output lines" 1 "$([ "$(wc -l < "$(O e1)")" -le 12 ] && echo 1 || echo 0)"
-has   "ezviz: camera files go on stdin only" "cat > /var/snap/frigate/current/ezviz/cameras/cam1.conf.m7c-new" "$T/e1/st/cmds"
+has   "ezviz: cam1 file on stdin only, under umask 077" "umask 077 && cat > /var/snap/frigate/current/ezviz/cameras/cam1.conf.m7c-new" "$T/e1/st/cmds"
+has   "ezviz: cam2 file on stdin only, under umask 077" "umask 077 && cat > /var/snap/frigate/current/ezviz/cameras/cam2.conf.m7c-new" "$T/e1/st/cmds"
 hasnt "ezviz: no code in any remote command" "$CA" "$T/e1/st/cmds"
 hasnt "ezviz: no camera serial in any remote command" "$ID1" "$T/e1/st/cmds"
 hasnt "ezviz: no camera address in any remote command" "$IP1" "$T/e1/st/cmds"
 hasnt "ezviz: no camera serial in the output" "$ID1" "$(O e1)"
 hasnt "ezviz: no camera serial in the ssh argv" "$ID2" "$T/e1/st/log"
 # the file must parse with the helper's own reader (camfile.load), as the venv python, in the test sandbox
-if PYV=$(bash tests/ezviz/venv.sh 2>/dev/null) && [ -x "$PYV" ]; then
+if PYV=$(W23_VENV="${W23_VENV:-$HOME/.cache/frigate-w23/venv-w23-build}" bash tests/ezviz/venv.sh 2>/dev/null) && [ -x "$PYV" ]; then
   check "ezviz: cam1.conf parses with camfile.load" "ok $IP1 8000 $ID1 $CA" "$("$PYV" -I -c 'import sys; from ezviz_source import camfile; c = camfile.load("cam1", sys.argv[1]); print("ok", c.host, c.port, c.serial, c.login)' "$T/e1/st/ezviz/cameras" 2>&1)"
   check "ezviz: cam2.conf parses with camfile.load" "ok $IP2 8000 $ID2 $CB" "$("$PYV" -I -c 'import sys; from ezviz_source import camfile; c = camfile.load("cam2", sys.argv[1]); print("ok", c.host, c.port, c.serial, c.login)' "$T/e1/st/ezviz/cameras" 2>&1)"
-else echo "SKIP - camfile.load check (no venv python)"; fi
+else check "ezviz: the venv python for the camfile.load check is available" present absent; fi
 # the snap's generator with 5 arguments: cam1, cam2 become exec streams and are preloaded
 if python3 -c 'import yaml' 2>/dev/null; then
   mkdir -p "$T/gene/cams"; : > "$T/gene/cams/cam1.conf"; : > "$T/gene/cams/cam2.conf"
@@ -255,6 +256,18 @@ check "ezviz: an existing ledger is kept" keep "$(cat "$T/e2/st/common-ezviz/sta
 run e3 M7C_SOURCE=ezviz MC_G2R_ACTIVE=1 --; check "ezviz: go2rtc active: exit 4" 4 "$(rc e3)"; hasnt "ezviz: go2rtc active: nothing written" "m7c-new" "$T/e3/st/cmds"
 check "ezviz: go2rtc active: no camera dirs made" 0 "$(find "$T/e3/st" -maxdepth 1 -name '*ezviz*' | wc -l)"
 run e4 M7C_SOURCE=ezviz MC_CHECK=0 --;    check "ezviz: ezviz-check fails: exit 11" 11 "$(rc e4)"; has "ezviz: check fails: says files were written" "camera files written but ezviz-check failed" "$(O e4)"; noleak e4
+has   "ezviz: check fails: shows the helper's class" "failed for cam1 (rc 1): mode" "$(O e4)"
+has   "ezviz: check fails: says what is left" "config.yml is already the ezviz config; re-run with M7C_SOURCE=ezviz, or roll back: remove /var/snap/frigate/current/ezviz, then restore config.yml.pre-h4 (/var/snap/frigate/current/config/config.yml.pre-h4)" "$(O e4)"
+run e14 M7C_SOURCE=ezviz MC_CAM_CORRUPT=cam2 --
+check "ezviz: cam2 damaged in transit: exit 7" 7 "$(rc e14)"
+check "ezviz: cam2 damaged: no .m7c-new left" 0 "$(find "$T/e14/st/ezviz" -name '*.m7c-new' | wc -l)"
+check "ezviz: cam2 damaged: cam2.conf absent" absent "$([ -e "$T/e14/st/ezviz/cameras/cam2.conf" ] && echo present || echo absent)"
+check "ezviz: cam2 damaged: cam1.conf was written" present "$([ -e "$T/e14/st/ezviz/cameras/cam1.conf" ] && echo present || echo absent)"
+has   "ezviz: cam2 damaged: names the camera" "camera file cam2 did not arrive intact" "$(O e14)"
+has   "ezviz: cam2 damaged: says what is left" "config.yml is already the ezviz config; re-run with M7C_SOURCE=ezviz, or roll back: remove /var/snap/frigate/current/ezviz, then restore config.yml.pre-h4 (/var/snap/frigate/current/config/config.yml.pre-h4)" "$(O e14)"
+noleak e14
+run e15 MC_P10=garble --;  check "P10: a garbled answer fails closed: exit 10" 10 "$(rc e15)"; hasnt "P10 garbled: nothing written" "m7c-new" "$T/e15/st/cmds"; has "P10 garbled: says it could not tell" "could not tell whether ezviz camera files are present" "$(O e15)"
+run e16 MC_P10=fail --;    check "P10: a failing probe fails closed: exit 10" 10 "$(rc e16)"; hasnt "P10 failed: nothing written" "m7c-new" "$T/e16/st/cmds"
 run e5 M7C_SOURCE=ezviz M7C_RETAIN_DAYS=3 --; check "retain 3 applied to all three (ezviz)" "3 3 3" "$(y e5 '[.record.continuous.days, .record.alerts.retain.days, .record.detections.retain.days] | map(tostring) | join(" ")')"
 has   "retain 3: built line says so" "continuous.days 3, alerts/detections retain.days 3" "$(O e5)"
 run e6 M7C_RETAIN_DAYS=0 --;  check "retain 0: exit 2" 2 "$(rc e6)"; run e7 M7C_RETAIN_DAYS=x --; check "retain x: exit 2" 2 "$(rc e7)"

@@ -5,7 +5,8 @@
 # appended to $STUB_ST/cmds. Knobs: MC_ACTIVE=1 (frigate.frigate active), MC_VALID=0 (validate fails and
 # echoes the camera URL with its login, as a careless error message would), MC_G2R_ACTIVE=1 (frigate.go2rtc
 # active), MC_CHECK=0 (frigate.ezviz-check reports "mode"). /var/snap/frigate/current/ezviz -> $STUB_ST/ezviz and
-# /var/snap/frigate/common/ezviz -> $STUB_ST/common-ezviz.
+# /var/snap/frigate/common/ezviz -> $STUB_ST/common-ezviz. MC_CAM_CORRUPT=camN (one byte appended to that camera
+# file's stdin), MC_P10=garble|fail (the camera-files probe answers garbage / fails).
 set -u
 st="${STUB_ST:?}"; fx=$(cd "$(dirname "$0")" && pwd)
 eval "set -- $1"
@@ -26,7 +27,13 @@ case "$cmd" in
     n=${cmd##* }; f=$st/ezviz/cameras/$n.conf
     if [ "${MC_CHECK:-1}" = 1 ] && [ -f "$f" ] && [ "$(stat -c %a "$f")" = 600 ]; then echo "ezviz-check $n: ok"; exit 0; fi
     echo "ezviz-check $n: mode"; exit 1 ;;
+  'if ls /var/snap/frigate/current/ezviz/cameras/*'*)
+    [ "${MC_P10:-}" = garble ] && { echo "???"; exit 0; }
+    [ "${MC_P10:-}" = fail ] && exit 7
+    c=${cmd//\/var\/snap\/frigate\/current\/ezviz/$st/ezviz}; sh -c "$c" ;;
   *) c=${cmd//\/var\/snap\/frigate\/current\/config/$st/hubcfg}
      c=${c//\/var\/snap\/frigate\/current\/ezviz/$st/ezviz}; c=${c//\/var\/snap\/frigate\/common\/ezviz/$st/common-ezviz}
-     PATH="$fx/stub/bin:$PATH" sh -c "$c" ;;
+     if [ -n "${MC_CAM_CORRUPT:-}" ] && [[ "$cmd" == *"cameras/$MC_CAM_CORRUPT.conf.m7c-new"* ]]; then
+       { cat; printf X; } | PATH="$fx/stub/bin:$PATH" sh -c "$c"
+     else PATH="$fx/stub/bin:$PATH" sh -c "$c"; fi ;;
 esac

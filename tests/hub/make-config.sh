@@ -102,8 +102,13 @@ hub SRC "if [ -f $C/config.yml.pre-h4 ]; then cat $C/config.yml.pre-h4; else cat
 shape=$(printf '%s\n' "$SRC" | yq -r '[(.cameras | keys | join(",")), (has("go2rtc") | tostring), (.detectors | keys | join(","))] | join(" ")' - 2>/dev/null)
 [ "$shape" = "testclip false coral" ] || die 5 "the source is not the rendered H4 config (want cameras=testclip, no go2rtc, detector coral)"
 # P10 (C19: before the clip block): in cameras and clip mode, camera files on the hub mean ezviz is installed.
-if [ "$SOURCE" != ezviz ] && hub _ 'ls /var/snap/frigate/current/ezviz/cameras/*.conf >/dev/null 2>&1'; then
-  die 10 "ezviz camera files present on the hub; remove /var/snap/frigate/current/ezviz first (rollback step)"
+# Fails closed: the hub must answer exactly "absent"; "present" or anything else (a timeout, a garbled reply) is exit 10.
+if [ "$SOURCE" != ezviz ]; then
+  hub P10 'if ls /var/snap/frigate/current/ezviz/cameras/*.conf >/dev/null 2>&1; then echo present; else echo absent; fi'; p10rc=$?
+  [ "$p10rc" = 0 ] && [ "$P10" = absent ] || {
+    [ "$P10" = present ] && die 10 "ezviz camera files present on the hub; remove /var/snap/frigate/current/ezviz first (rollback step)"
+    die 10 "could not tell whether ezviz camera files are present on the hub (rc $p10rc); nothing was written"
+  }
 fi
 if [ "$SOURCE" = clip ]; then
   hub CL "for f in $CLIP_MAIN $CLIP_SUB; do if [ -s $CLIPD/\$f ]; then sha256sum $CLIPD/\$f; else echo \"missing \$f\"; fi; done; if [ -x $CFF ]; then echo ffmpeg-ok; else echo ffmpeg-missing; fi" \
@@ -195,9 +200,10 @@ say "written: config.yml (root, 0600, sha256 matched)"
 
 # --- ezviz: camera files (secrets on stdin only), then the app's own check --------------------------------
 if [ "$SOURCE" = ezviz ]; then
+  PART="config.yml is already the ezviz config; re-run with M7C_SOURCE=ezviz, or roll back: remove /var/snap/frigate/current/ezviz, then restore config.yml.pre-h4 ($C/config.yml.pre-h4)"
   CD=/var/snap/frigate/current/ezviz; SD=/var/snap/frigate/common/ezviz   # the state dir is created, never emptied
   hub _ "umask 077 && mkdir -p $CD/cameras $SD/state && chown root:root $CD $CD/cameras $SD $SD/state && chmod 0700 $CD $CD/cameras $SD $SD/state" \
-    || die 7 "could not create the ezviz directories on the hub"
+    || die 7 "could not create the ezviz directories on the hub; $PART"
   for i in 0 1; do
     f=$CD/cameras/cam$((i + 1)).conf
     printf -v CONF '%s\nhost=%s\nport=8000\nserial=%s\nlogin=%s\n' "# written by tests/hub/make-config.sh (M7C_SOURCE=ezviz); root 0600; never print" "${IPS[$i]}" "${IDS[$i]}" "${PW[$i]}"
@@ -207,15 +213,18 @@ if [ "$SOURCE" = ezviz ]; then
     GOT=$(printf '%s\n' "$NEW" | awk 'NR == 1 { print $1 }')
     if [ "$wrc" != 0 ] || [ "$GOT" != "$WANT" ]; then
       hub _ "rm -f $f.m7c-new" || true
-      die 7 "camera file cam$((i + 1)) did not arrive intact (rc $wrc); removed it"
+      die 7 "camera file cam$((i + 1)) did not arrive intact (rc $wrc); removed it; $PART"
     fi
-    hub _ "mv -f $f.m7c-new $f" || die 7 "could not move camera file cam$((i + 1)) into place"
+    hub _ "mv -f $f.m7c-new $f" || { hub _ "rm -f $f.m7c-new" || true; die 7 "could not move camera file cam$((i + 1)) into place; $PART"; }
   done
   CONF=""
   say "camera files: 2 written (root, 0600, sha256 matched)"
   for c in cam1 cam2; do
     hub CK "snap run frigate.ezviz-check $c"; krc=$?
-    [ "$krc" = 0 ] && [ "$CK" = "ezviz-check $c: ok" ] || die 11 "camera files written but ezviz-check failed for $c (rc $krc)"
+    if ! { [ "$krc" = 0 ] && [ "$CK" = "ezviz-check $c: ok" ]; }; then
+      [[ "$CK" =~ ^ezviz-check\ cam[12]:\ [a-z_]+$ ]] || CK=""   # the helper's fixed class line only, never other text
+      die 11 "camera files written but ezviz-check failed for $c (rc $krc)${CK:+: ${CK#*: }}; $PART"
+    fi
     say "ezviz-check $c: ok"
   done
 fi
