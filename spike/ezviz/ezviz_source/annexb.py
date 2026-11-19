@@ -228,6 +228,11 @@ class Reassembler:
         return pt in hevc or (pt == DEFAULT_PT and self._promotable(hevc, h264) and self._ev96 >= PROMOTE_EVIDENCE)
 
     def push(self, body: bytes) -> list:
+        return [nal for nal, _ in self.push_ts(body)]
+
+    def push_ts(self, body: bytes) -> list:
+        """push(), with each NAL paired with the RTP ts of the packet it came from (held bodies keep their own ts):
+        [(nal, ts)]. TIMESTAMP_MODE "rtp" (W-23 T21) stamps the access units with it."""
         self.drop = None
         got = _frame_of(body)
         if got is None:
@@ -260,8 +265,8 @@ class Reassembler:
             held = list(self._held)
             self._held.clear()
             for m, k in held:
-                out += self._media(m, k)
-        out += self._media(media, pkt)
+                out += [(nal, k.ts) for nal in self._media(m, k)]
+        out += [(nal, pkt.ts) for nal in self._media(media, pkt)]
         if out:
             self.drop = None
         return out
@@ -333,8 +338,16 @@ class AccessUnits:
         self._has_vcl = False
         self._idr = False
         self._size = 0
+        self._ts = None                # the AU's ts: its first VCL NAL's (else its first NAL's), for push_ts
 
     def push(self, nal: bytes) -> list:
+        return [(au, idr) for au, idr, _ in self.push_ts(nal, None)]
+
+    def flush(self) -> list:
+        return [(au, idr) for au, idr, _ in self.flush_ts()]
+
+    def push_ts(self, nal: bytes, ts) -> list:
+        """push(), with the ts of each NAL in and the AU's ts out: [(annexb_bytes, is_idr, ts)] (W-23 T21)."""
         nal = nal[4:] if nal.startswith(START) else nal      # Reassembler output carries the start code
         t = _nal_type(nal)
         vcl = t < 32
@@ -342,20 +355,24 @@ class AccessUnits:
         out = []
         # new AU: VPS/SPS/PPS/AUD/prefix-SEI after a VCL NAL, or a first-slice VCL NAL after a VCL NAL
         if self._has_vcl and (t in (32, 33, 34, 35, 39) or first_slice):
-            out = self.flush()
+            out = self.flush_ts()
         self._nals.append(START + nal)
         self._size += len(nal) + 4
         if len(self._nals) > AU_MAX_NALS or self._size > AU_MAX_BYTES:
-            self._nals, self._has_vcl, self._idr, self._size = [], False, False, 0
+            self._nals, self._has_vcl, self._idr, self._size, self._ts = [], False, False, 0, None
             return out
+        if vcl and not self._has_vcl:
+            self._ts = ts                                     # the first VCL NAL's ts wins
+        elif len(self._nals) == 1:
+            self._ts = ts
         if vcl:
             self._has_vcl = True
             self._idr = self._idr or t in (19, 20)
         return out
 
-    def flush(self) -> list:
+    def flush_ts(self) -> list:
         if not self._nals:
             return []
-        au = (b"".join(self._nals), self._idr)
-        self._nals, self._has_vcl, self._idr, self._size = [], False, False, 0
+        au = (b"".join(self._nals), self._idr, self._ts)
+        self._nals, self._has_vcl, self._idr, self._size, self._ts = [], False, False, 0, None
         return [au]

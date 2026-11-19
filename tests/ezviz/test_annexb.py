@@ -277,6 +277,53 @@ class DropReasonTests(unittest.TestCase):
         self.assertEqual(r.drop, "route")
 
 
+class TimestampTests(unittest.TestCase):
+    """W-23 T21 (TIMESTAMP_MODE rtp): each NAL carries the RTP ts of the packet it came from, held bodies included, and
+    an access unit carries the ts of its first VCL NAL. push() and AccessUnits.push() are unchanged."""
+
+    def test_push_ts_gives_each_nal_its_packet_ts(self):
+        r = Reassembler()
+        self.assertEqual(r.push_ts(rtp_body(96, 1, 7000, VPS)), [(SC + VPS, 7000)])
+        idr = hevc_nal(19, 300)
+        frags = fu(idr, 100)
+        got = [x for i, f in enumerate(frags) for x in r.push_ts(rtp_body(96, 2 + i, 10600, f))]
+        self.assertEqual(got, [(SC + idr, 10600)])
+        self.assertEqual(r.push_ts(rtp_body(104, 9, 5, b"\xd5" * 20)), [])
+
+    def test_push_ts_keeps_held_bodies_own_ts(self):
+        rtp = bytes([0x90, 112, 0, 1, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" + bytes([0x45, 2, 0x24, 15])
+        r = Reassembler()
+        r.push_ts(len(rtp).to_bytes(4, "little") + rtp)
+        aud = bytes([35 << 1, 1, 0x50])
+        self.assertEqual(r.push_ts(rtp_body(96, 1, 100, aud)), [])                  # held
+        self.assertEqual(r.push_ts(rtp_body(96, 2, 3700, VPS)), [])                 # held
+        self.assertEqual(r.push_ts(rtp_body(96, 3, 3700, SPS)), [(SC + aud, 100), (SC + VPS, 3700), (SC + SPS, 3700)])
+
+    def test_push_is_push_ts_without_the_ts(self):
+        bodies = [rtp_body(96, 1, 0, VPS), rtp_body(96, 2, 0, SPS)] + \
+            [rtp_body(96, 3 + i, 3600, f) for i, f in enumerate(fu(hevc_nal(19, 300), 100))]
+        a, b = Reassembler(), Reassembler()
+        self.assertEqual([x for body in bodies for x in a.push(body)],
+                         [n for body in bodies for n, _ in b.push_ts(body)])
+
+    def test_access_unit_ts_is_its_first_vcl_ts(self):
+        aus = AccessUnits()
+        idr, trail = hevc_nal(19, 50), hevc_nal(1, 30)
+        out = []
+        suffix = hevc_nal(40, 12)                     # a suffix SEI stays in its picture's AU (no new AU)
+        for n, t in ((VPS, 90), (SPS, 90), (PPS, 90), (idr, 100), (suffix, 200), (trail, 3700), (hevc_nal(1, 30), 7300)):
+            out += aus.push_ts(n, t)
+        out += aus.flush_ts()
+        self.assertEqual([(f, t) for _, f, t in out], [(True, 100), (False, 3700), (False, 7300)])
+        self.assertEqual(out[0][0], SC + VPS + SC + SPS + SC + PPS + SC + idr + SC + suffix)
+
+    def test_push_is_push_ts_without_the_ts_for_access_units(self):
+        nals = [VPS, SPS, PPS, hevc_nal(19, 50), hevc_nal(1, 30), hevc_nal(1, 30)]
+        a, b = AccessUnits(), AccessUnits()
+        self.assertEqual(drain(a, nals),
+                         [(au, f) for n in nals for au, f, _ in b.push_ts(n, 0)] + [(au, f) for au, f, _ in b.flush_ts()])
+
+
 class AccessUnitTests(unittest.TestCase):
     def test_access_units_split_and_idr(self):
         idr, trail = hevc_nal(19, 50), hevc_nal(1, 30)
