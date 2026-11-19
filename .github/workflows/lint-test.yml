@@ -66,11 +66,32 @@ jobs:
             bash "$t" || exit 1
           done
 
+      # W-23: tests/ezviz/venv.sh (make-config.test.sh and the helper suite) builds the hash-locked venv with python3.12,
+      # the snap helper's interpreter. ubuntu-latest is ubuntu-26.04: system Python 3.14 and no python3.12 package in its
+      # archive, so setup-python takes 3.12 from the tool cache. update-environment false and a PATH directory holding
+      # only a python3.12 link keep python3 the system one (and its python3-yaml) for the other tests.
+      - name: Set up Python 3.12
+        id: py312
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          update-environment: false
+
+      - name: Put python3.12 (only) on PATH
+        env:
+          PY312: ${{ steps.py312.outputs.python-path }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/py312"
+          ln -sf "$PY312" "$RUNNER_TEMP/py312/python3.12"
+          echo "$RUNNER_TEMP/py312" >> "$GITHUB_PATH"
+
       - name: Run tests/*.test.sh and tests/test_*.py
         run: |
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
-          # W-23: tests/ezviz/venv.sh (used by make-config.test.sh and the helper suite) needs python3.12's venv.
-          python3.12 -c 'import ensurepip' 2>/dev/null || sudo apt-get install -y python3.12-venv
+          if ! python3.12 -c 'import ensurepip, sys; assert sys.version_info[:2] == (3, 12)' 2>/dev/null; then
+            echo "::error::python3.12 with ensurepip is not on PATH (tests/ezviz/venv.sh needs it; see 'Set up Python 3.12')"
+            exit 1
+          fi
           for t in tests/*.test.sh tests/*/*.test.sh; do
             echo "== $t"
             bash "$t" || exit 1
@@ -89,11 +110,15 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          PY=$(bash tests/ezviz/venv.sh)
-          "$PY" -m unittest discover -s tests/ezviz -p 'test_*.py' -v 2>&1 | tee "$RUNNER_TEMP/ezviz-unittest.log"
-          # No silent skip: unittest's final verdict must be a plain "OK"; "OK (skipped=N)" fails the step.
-          verdict=$(grep -E '^(OK|FAILED)( \(.*\))?$' "$RUNNER_TEMP/ezviz-unittest.log" | tail -n 1)
-          if [ "$verdict" != "OK" ]; then
-            echo "::error::ezviz helper tests: verdict '${verdict:-none}', want a plain OK (a skipped test counts as a failure here)"
+          PY=$(bash tests/ezviz/venv.sh) || { echo "::error::tests/ezviz/venv.sh could not build the helper venv"; exit 1; }
+          log="$RUNNER_TEMP/ezviz-unittest.log"
+          rc=0
+          "$PY" -m unittest discover -s tests/ezviz -p 'test_*.py' -v 2>&1 | tee "$log" || rc=$?
+          # No silent skip, nothing after the summary: rc 0, and the last two non-empty lines are unittest's own
+          # "Ran N tests in Xs" and a plain "OK". A skip, a failure, a late writer, an empty or a truncated log are red.
+          ran=$(grep -v '^[[:space:]]*$' "$log" | tail -n 2 | head -n 1 || true)
+          verdict=$(grep -v '^[[:space:]]*$' "$log" | tail -n 1 || true)
+          if [ "$rc" -ne 0 ] || ! [[ "$ran" =~ ^Ran\ [0-9]+\ tests?\ in\ [0-9.]+s$ ]] || [ "$verdict" != "OK" ]; then
+            echo "::error::ezviz helper tests: rc $rc, summary '${ran:-none}' then '${verdict:-none}'; want rc 0, 'Ran N tests in Xs', then a plain OK (a skipped test counts as a failure here)"
             exit 1
           fi
