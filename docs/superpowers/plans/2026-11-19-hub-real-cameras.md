@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12.16 (python-build-standalone 20261110) with pyEzvizApi 2.0.0 and its 13 hash-locked wheels; go2rtc 1.9.14; ffmpeg 8.0 (n8.1.1 tree); POSIX sh (snap wrappers, hooks); bash (tests, hub tools); snapcraft on core26; unittest; yq v4 (laptop).
 
-**Spec:** `docs/superpowers/specs/2026-11-16-hub-real-cameras-design.md` at `8f539284c8e3d39bfb80085cc7628c65eb731812`. It was approved by the maintainer on 19 Nov 2026 with OD1 = R1 (separate Python 3.12, about +28 MB), OD2 = 3 days, OD3 = file install as `x2`, held and stopped, and OD4 = video only. Read the spec first. Every task cites the D-numbers, T-END rows (E1–E17) and S-steps it implements. **Where this plan and the spec disagree, the spec wins, except for the plan decisions P1–P14 below, each of which says why.**
+**Spec:** `docs/superpowers/specs/2026-11-16-hub-real-cameras-design.md` at `8f539284c8e3d39bfb80085cc7628c65eb731812`. It was approved by the maintainer on 19 Nov 2026 with OD1 = R1 (separate Python 3.12, about +28 MB), OD2 = 3 days, OD3 = file install as `x2`, held and stopped, and OD4 = video only. Read the spec first. Every task cites the D-numbers, T-END rows (E1–E17) and S-steps it implements. **Where this plan and the spec disagree, the spec wins, except for the plan decisions P1–P15 below, each of which says why.**
 
 ---
 
@@ -3163,7 +3163,7 @@ OUT=$out python3 -I -c "$PY" "$SINCE" "$END"
 `watch.sh` and `observe.sh` are implemented to the interfaces above, in their existing style.
 
 - [ ] **Step 4: Run and see them pass.** Run on 19 Nov:
-  - `power-check.test.sh`: 13 ok;
+  - `power-check.test.sh`: 14 ok;
   - `ezviz-ledger.test.sh`: 12 ok;
   - `coverage.test.sh`: 12 ok;
   - shellcheck clean.
@@ -3231,7 +3231,7 @@ OUT=$out python3 -I -c "$PY" "$SINCE" "$END"
 
 - [ ] **Step 1: Write the failing static test** (`tests/w23-packaging.test.sh`, `t` style as in `tests/m9-packaging.test.sh`):
   - both pbs sha256 strings and the `20261110` / `3.12.16` names are present;
-  - `requirements.txt` equals `d5260d4`'s;
+  - `requirements.txt` has the sha256 literal `b3282719e5c607e53f5de0943244075708bc2948ec6b4aa130050ce033ab4921` (`d5260d4` is on no remote and CI checks out shallow, so this test never calls `git show`; SF5);
   - apps `ezviz-check` (no `plugs:` key) and `disk-guard` (`daemon: oneshot`, `timer: "00:00-24:00/144"`, no plugs) exist;
   - the `go2rtc` app is unchanged (`plugs: [network, network-bind]`, no `stop-mode`: D17 relies on the default `KillMode=control-group`);
   - the import-proof line names `pyezvizapi.streaming.local.session`;
@@ -3466,4 +3466,4 @@ Pass: `make-config: ok`, `camera files: 2 written (root, 0600, sha256 matched)`,
   | §10 row 25 | settled by source; evidence in Task 22 (N10) |
   | SF1–SF13, N1–N12 | marked where they land; SF6 checked and not applied (Task 20, with evidence) |
 - **Type consistency:** `admit` → `Admitted`; `decide` → `Decision`; `classify` → `str`; `Output.write_au(bytes, bool)`; the `Reassembler.push` and `AccessUnits.push` names are used the same way in Tasks 7, 9, 11 and 12.
-- **Proportion and code** *(SF13)*: full code for the lockout core and the hub checks, all of it run on 19 Nov (89 unit tests OK, 4 shell suites ok, 26 + 6 mutations red, 1 equivalent mutation explained). The protocol and plumbing modules get signatures and tests only; the header states this departure for the maintainer.
+- **Proportion and code** *(SF13)*: full code for the lockout core and the hub checks, all of it run on 19 Nov (95 unit tests OK, 4 shell suites ok, 26 + 6 mutations red, 1 equivalent mutation explained). The protocol and plumbing modules get signatures and tests only; the header states this departure for the maintainer.
