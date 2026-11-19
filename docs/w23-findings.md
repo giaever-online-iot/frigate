@@ -181,23 +181,28 @@ the branch head and a scratch copy of origin/main 9000f91 (`git archive`), so bo
 
 ## Suite counts
 
-Each count below is from a run on 19 Nov, under the suite lock, with `W23_VENV` naming a venv that
-`tests/ezviz/venv.sh` built from the hash lock. "At" names the fix wave 1 commit whose tree was run (the commit that
-last changed that row).
+These are the counts of the fix wave 1 final run: one run on 19 Nov of tree aac7821, under the suite lock, with
+`W23_VENV` naming a private venv that `tests/ezviz/venv.sh` built from the hash lock. The later commit 68a0080 changes
+only the plan document, which no test reads.
 
-| Suite | Result | At |
-|---|---|---|
-| `"$PY" -m unittest discover -s tests/ezviz -p 'test_*.py'` | `Ran 239 tests in 446.456s`, `OK`, 0 skipped (the local amd64 snap file was present, so `test_probe` ran) | N2 |
-| `bash tests/hub/make-config.test.sh` | 233 ok, 0 FAIL | S5 |
-| `bash tests/hub/watch.test.sh` | 98 ok, 0 FAIL | S5 |
-| `bash tests/hub/observe.test.sh` | 101 ok, 0 FAIL | S5 |
-| `bash tests/w23-packaging.test.sh` | 24 ok, 0 FAIL | S5 |
-| `bash tests/ezviz/probe-run.test.sh` | 71 ok, 0 FAIL (stub python and ffmpeg) | S5 |
-| `python3 -m unittest tests.test_go2rtc_config_gen` (system python3) | `Ran 23 tests`, `OK` | N1 |
+| Suite | Result |
+|---|---|
+| `"$PY" -m unittest discover -s tests/ezviz -p 'test_*.py'` | `Ran 240 tests`, `OK`, 0 skipped (the local amd64 snap file was present, so `test_probe` ran) |
+| `python3 -m unittest tests.test_go2rtc_config_gen` (system python3) | `Ran 23 tests`, `OK` |
+| `python3 -m unittest discover -s tests -p 'test_*.py'` (as CI) | `Ran 27 tests`, `OK` |
+| `bash tests/hub/make-config.test.sh` | 233 ok, 0 FAIL |
+| `bash tests/hub/watch.test.sh` / `observe.test.sh` | 98 ok / 101 ok, 0 FAIL |
+| `bash tests/hub/power-check.test.sh` / `ezviz-ledger.test.sh` / `coverage.test.sh` | 16 / 26 / 18 ok, 0 FAIL |
+| `bash tests/ezviz/probe-run.test.sh` | 71 ok, 0 FAIL (stub python and ffmpeg) |
+| `bash tests/ezviz/serve-ezviz.test.sh` (S2) | 53 ok, 0 FAIL |
+| `bash tests/w23-packaging.test.sh` / `go2rtc-run.test.sh` / `configure-ezviz.test.sh` | 25 / 8 / 13 ok, 0 FAIL |
+| `bash tests/disk-guard.test.sh sh` and `dash` | 21 ok each, 0 FAIL |
+| `bash tests/hub/serve.test.sh` (pre-existing clip test) | 20 ok, 4 FAIL in this run: the known pre-existing flake in the section above (cam1 74 and cam2 76 decoder error lines) |
+| every other `tests/*.test.sh`, `tests/*/*.test.sh` and `.github/scripts/*.test.sh` | rc 0, 0 FAIL |
+| shellcheck with the lint-test.yml flags and targets | 70 files clean; `.github/scripts` clean |
 
 **A stale baseline.** Earlier reports and briefs give `make-config.test.sh` as 157 ok. That number is stale; the
-real count today is 233 ok (the row above). `serve-ezviz.test.sh` (S2) was not rerun for this table; its counts are
-the S2 section's.
+real count is 233 ok, as in the row above.
 
 ## §10 row 25: go2rtc and `Pdeathsig` (research, read and not run)
 
