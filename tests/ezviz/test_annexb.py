@@ -181,6 +181,29 @@ class ReassemblerTests(unittest.TestCase):
         self.assertEqual(r.push(rtp_body(96, 2, 0, hevc_nal(1, 30))), [])
         self.assertEqual(r.drop, "held")
 
+    def test_promotion_hold_replays_several_bodies_in_order(self):
+        # re-review 2, S1: a hold of 3 bodies (AUD, SEI: no evidence; VPS: evidence 1), decided by the SPS. They come
+        # out in arrival order, as the library's final map gives them (payloads.py:1125-1157)
+        rtp = bytes([0x90, 112, 0, 1, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" + bytes([0x45, 2, 0x24, 15])
+        aud, sei = bytes([35 << 1, 1, 0x50]), hevc_nal(39, 12)
+        r = Reassembler()
+        r.push(len(rtp).to_bytes(4, "little") + rtp)
+        for seq, n in enumerate((aud, sei, VPS), 1):
+            self.assertEqual(r.push(rtp_body(96, seq, 0, n)), [])
+            self.assertEqual(r.drop, "held")
+        self.assertEqual(r.push(rtp_body(96, 4, 0, SPS)), [SC + aud, SC + sei, SC + VPS, SC + SPS])
+
+    def test_wrapper_frames_count_as_promotion_evidence(self):
+        # re-review 2, N3 (M11): payloads.py:1147-1149 counts the native wrapper (40 00 00 02 80 06, NAL at 12) as
+        # evidence too, so a wrapped PT-96 stream is promoted like a plain one
+        rtp = bytes([0x90, 112, 0, 1, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" + bytes([0x45, 2, 0x24, 15])
+        wrap = b"\x40\x00\x00\x02\x80\x06" + b"\0" * 6
+        r = Reassembler()
+        r.push(len(rtp).to_bytes(4, "little") + rtp)
+        self.assertEqual(r.push(rtp_body(96, 1, 0, wrap + VPS)), [])
+        self.assertEqual(r.drop, "held")
+        self.assertEqual(r.push(rtp_body(96, 2, 0, wrap + SPS)), [SC + VPS, SC + SPS])
+
     def test_promotion_hold_is_bounded(self):
         def desc():
             rtp = bytes([0x90, 112, 0, 1, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" + bytes([0x45, 2, 0x24, 15])
