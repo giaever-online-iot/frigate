@@ -23,31 +23,49 @@ def child_env() -> dict:
     return {"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": os.environ.get("EZVIZ_CHILD_LD_LIBRARY_PATH", "")}
 
 
-def _pdeathsig() -> None:
-    ctypes.CDLL(None).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+_libc = ctypes.CDLL(None, use_errno=True)  # loaded once, never dlopen after fork
+_prctl = _libc.prctl
+
+
+def _make_pdeathsig(ppid: int):
+    def _pdeathsig() -> None:
+        if _prctl(1, int(signal.SIGTERM), 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+            os._exit(127)
+        if os.getppid() != ppid:  # parent died before the prctl took effect
+            os._exit(1)
+    return _pdeathsig
 
 
 class Output:
+    """Owns the ffmpeg child. PR_SET_PDEATHSIG fires when the FORKING THREAD exits, so construct Output on the
+    main thread (P2: the login_ok hook runs on the main thread before the keepalive thread starts)."""
+
     def __init__(self, ffmpeg: str, url: str, *, mode: str = TIMESTAMP_MODE, now=time.monotonic):
         self._now = now
         self._first_idr = None
         self._reported = False
         self._proc = subprocess.Popen(child_argv(ffmpeg, url, mode), stdin=subprocess.PIPE,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                      env=child_env(), preexec_fn=_pdeathsig, close_fds=True, bufsize=0)
+                                      env=child_env(), preexec_fn=_make_pdeathsig(os.getpid()), close_fds=True, bufsize=0)
         self.pid = self._proc.pid
 
     def write_au(self, au: bytes, is_idr: bool) -> None:
         if self._proc.poll() is not None:
             raise FfmpegExited("ffmpeg exited with %s" % self._proc.returncode)
-        if self._first_idr is None:
-            if not is_idr:
-                return
-            self._first_idr = self._now()
+        first = self._first_idr is None
+        if first and not is_idr:
+            return
+        view = memoryview(au)
         try:
-            self._proc.stdin.write(au)
+            while len(view):
+                n = self._proc.stdin.write(view)
+                if not n:
+                    raise FfmpegExited("ffmpeg stdin accepted no bytes")
+                view = view[n:]
         except (BrokenPipeError, ValueError, OSError) as e:
             raise FfmpegExited("ffmpeg stdin closed") from e
+        if first:
+            self._first_idr = self._now()
 
     def published_due(self) -> bool:
         if self._reported or self._first_idr is None:

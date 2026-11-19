@@ -17,9 +17,10 @@ from ezviz_source import output
 def alive(pid):
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"  # a zombie is gone
+    except (ProcessLookupError, FileNotFoundError):
         return False
-    return True
 
 
 def wait_gone(pid, limit):
@@ -105,6 +106,25 @@ class OutputTest(unittest.TestCase):
         self.assertTrue(o.published_due())
         clock.t += 10
         self.assertFalse(o.published_due())
+
+    def test_short_writes_are_completed(self):
+        o = self.make()
+        got = []
+        real = o._proc.stdin
+
+        class Half:
+            def write(self, b):
+                n = max(1, len(b) // 2)
+                got.append(bytes(b[:n]))
+                return n
+
+            def close(self):
+                real.close()
+
+        o._proc.stdin = Half()
+        o.write_au(b"\x00\x00\x00\x01\x26abcdefgh", True)
+        self.assertEqual(b"".join(got), b"\x00\x00\x00\x01\x26abcdefgh")
+        self.assertGreater(len(got), 2)
 
     def test_exited_child_raises(self):
         o = self.make(fixtures.fake_ffmpeg(self.tmp, exit_after_s=0.5))
