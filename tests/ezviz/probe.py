@@ -23,7 +23,9 @@ camera. Ends follow the helper's SIG_EV: a clean end or SIGTERM/SIGINT in P3 is 
 P1 `net_fail`; `auth_fail` adds its latch. `published=1` in the output line means the record was written;
 first_irap_s is the time from the start of the camera session to the first IDR AU written (0.000 when no IDR AU was written).
 
-rtp_ts_*: per-picture RTP timestamps (packets of one picture share a timestamp), from annexb's own RTP parser.
+rtp_ts_*: per-picture RTP timestamps (packets of one picture share a timestamp), from annexb's own RTP parser, of the
+VIDEO only: packets whose payload type the reassembler routes as HEVC right after their push (GA run 2: the audio-like
+PT 104 and the descriptor PT 112 have their own timestamp bases and made these numbers meaningless).
 step = (ts - previous ts) mod 2**32; monotonic = fraction of steps in (0, 2**31); mode = the most common step;
 p99_dev = 99th percentile of |step - mode|.
 
@@ -266,9 +268,10 @@ def _run(name, minutes, form, count, ffmpeg, work, diag=False) -> int:
             for body in sess.packets():
                 got = annexb._frame_of(body)                       # the reassembler's own RTP parser
                 pkt = annexb._rtp_of(got[0]) if got else None
-                if pkt is not None and (not tss or tss[-1] != pkt.ts):
-                    tss.append(pkt.ts)
                 nals = reasm.push(body)
+                # video only: the PT the reassembler routes as HEVC after this push (the promoted PT 96 included)
+                if pkt is not None and reasm._is_hevc_route(pkt.pt) and (not tss or tss[-1] != pkt.ts):
+                    tss.append(pkt.ts)
                 now = time.monotonic()
                 if dg is not None:
                     dg.packet(now - t_start, body, reasm, nals)

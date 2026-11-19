@@ -95,6 +95,7 @@ def descriptor_ext(stream_type: int, pt: int = 96) -> bytes:
 REAL_FU_PAYLOAD = 1152 - 4 - 12           # body = 4-byte prefix + 12-byte RTP header + payload
 REAL_DESC_A = bytes([0x40, 18]) + bytes(18) + bytes([0x45, 2, 0x24, 15]) + bytes([0x41, 18]) + bytes(18)
 REAL_DESC_B = bytes([0x42, 14]) + bytes(14) + bytes([0x43, 6]) + bytes(6)
+REAL_TS112_BASE = 0x40000000              # PT 112 and PT 104 timestamps are not the video's (GA run 2)
 
 
 def tlv_ext(tlvs: bytes) -> bytes:
@@ -360,8 +361,9 @@ class Server:
         au = self.aus[k % len(self.aus)]
         out = b""
         if any((n[0] >> 1) & 0x3F == 32 for n in au):                    # a keyframe: the two PT-112 descriptor packets
-            out += media_frame(2 * k, k * TS_STEP, False, b"", tlv_ext(REAL_DESC_A), pt=112)
-            out += media_frame(2 * k + 1, k * TS_STEP, False, b"", tlv_ext(REAL_DESC_B), pt=112)
+            ts112 = REAL_TS112_BASE + k * TS_STEP                         # its own timestamp base, as on the camera
+            out += media_frame(2 * k, ts112, False, b"", tlv_ext(REAL_DESC_A), pt=112)
+            out += media_frame(2 * k + 1, ts112, False, b"", tlv_ext(REAL_DESC_B), pt=112)
         pkts = [p for nal in au for p in rtp_payloads(nal, REAL_FU_PAYLOAD)]
         out += b"".join(media_frame(seq + n, k * TS_STEP, n == len(pkts) - 1, p) for n, p in enumerate(pkts))
         out += media_frame(k, k * 320, True, b"\xd5" * 160, pt=104)        # audio-like, 8 kHz clock

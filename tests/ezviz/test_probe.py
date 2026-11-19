@@ -166,6 +166,18 @@ class Probe(ProbeCase):
         self.assertEqual(float(m["mono"]), 1.0)
         self.assertEqual(m["dev"], "0")
 
+    def test_rtp_ts_stats_are_video_only(self):
+        # GA run 2 on the real camera: the audio-like PT 104 and the descriptor PT 112 have their own timestamp bases;
+        # mixed into the list they gave monotonic 0.62 and a p99 deviation of 2.8e9. Task 21's TIMESTAMP_MODE reads
+        # these three numbers, so they describe the HEVC video route only (here the promoted PT 96)
+        ff = real_ffmpeg()
+        self.start_fake(ff, "--real-shape")
+        p = self.probe(ff, "0.2")
+        m = LINE.match(p.stdout.strip())
+        self.assertIsNotNone(m, p.stdout + p.stderr)
+        self.assertEqual(m["pts"], "[96, 104, 112]")
+        self.assertEqual((m["mono"], m["mode"], m["dev"]), ("1.0000", "3600", "0"), p.stdout)
+
     def test_three_clean_probe_runs_do_not_latch(self):                 # I2a: published makes a clean stop a P3 end
         ff = real_ffmpeg()
         self.start_fake(ff)
