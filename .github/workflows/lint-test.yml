@@ -78,9 +78,22 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_*.py' -v
           python3 -m unittest discover -s tests/arm64-vm -p 'test_*.py' -v
 
+      # W-23: test_probe.py's fake-camera runs (the real-shape and 0xB2 regression tests among them) decode with a real
+      # ffmpeg; without one they would SKIP, and the guard below makes any skip a failure.
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+
       # W-23: the helper suite on its own interpreter, from the hash lock (tests/ezviz is not a package, so the
       # discover above does not reach it). serve-ezviz.test.sh SKIPs above: no local snap file in CI.
       - name: ezviz helper tests (venv from the hash lock)
+        timeout-minutes: 30
         run: |
+          set -o pipefail
           PY=$(bash tests/ezviz/venv.sh)
-          "$PY" -m unittest discover -s tests/ezviz -p 'test_*.py' -v
+          "$PY" -m unittest discover -s tests/ezviz -p 'test_*.py' -v 2>&1 | tee "$RUNNER_TEMP/ezviz-unittest.log"
+          # No silent skip: unittest's final verdict must be a plain "OK"; "OK (skipped=N)" fails the step.
+          verdict=$(grep -E '^(OK|FAILED)( \(.*\))?$' "$RUNNER_TEMP/ezviz-unittest.log" | tail -n 1)
+          if [ "$verdict" != "OK" ]; then
+            echo "::error::ezviz helper tests: verdict '${verdict:-none}', want a plain OK (a skipped test counts as a failure here)"
+            exit 1
+          fi
