@@ -15,7 +15,9 @@ cp tests/ezviz/probe-run.sh "$TREE/tests/ezviz/"; cp tests/hub/lib-cameras.sh "$
 mkdir -p "$TREE/spike/ezviz"; cp -r spike/ezviz/ezviz_source "$TREE/spike/ezviz/"; rm -rf "$TREE/spike/ezviz/ezviz_source/__pycache__"
 cat > "$TREE/tests/ezviz/probe.py" <<'PYEOF'
 import os, stat, sys, time
-A = sys.argv[2:] if sys.argv[1:2] == ["--diag"] else sys.argv[1:]     # the real probe's optional first flag
+A = sys.argv[1:]
+while A[:1] in (["--diag"], ["--helper"]):                             # the real probe's optional leading flags
+    A = A[1:]
 out, n = os.environ["STUB_OUT"], A[2]
 with open(out + "/log", "a") as f:
     f.write("start " + n + "\n")
@@ -174,5 +176,14 @@ check "diag: state dir is the second argument" "$T/d1/envd/w23-probe-state" "$(s
 noleak d1
 run d2 PROBE_DIAG=yes -- cam1 3 extend
 check "diag: only the value 1 turns it on" "$T/d2/envd/w23-probe-state" "$(sed -n 1p "$T/d2/out/argv.cam1")"
+
+# Round 9: PROBE_HELPER=1 runs the probe's --helper mode (the production helper against the camera); PROBE_DIAG may join
+run h1 PROBE_HELPER=1 -- cam1 3 extend
+check "helper: exit 0" 0 "$(rc h1)"
+check "helper: argv is --helper, state, camdir, name, minutes, form, count, ffmpeg" "--helper 3 extend 100 /bin/true" \
+  "$(sed -n '1p;5,8p' "$T/h1/out/argv.cam1" | paste -sd' ')"
+noleak h1
+run h2 PROBE_HELPER=yes -- cam1 3 extend
+check "helper: only the value 1 turns it on" "$T/h2/envd/w23-probe-state" "$(sed -n 1p "$T/h2/out/argv.cam1")"
 
 [ "$fail" = 0 ] && echo "probe-run.test: all ok" || { echo "probe-run.test: FAILURES"; exit 1; }

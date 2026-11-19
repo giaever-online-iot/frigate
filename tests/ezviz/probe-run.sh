@@ -13,7 +13,8 @@ set +x +o xtrace   # first: no trace of any value, even under `bash -x` or an in
 # State: $M7C_ENV_DIR/w23-probe-state (0700, never deleted); probe.py puts the ledger in <state>/ezviz/state, the
 # helper's layout (C18), so the D4 budget applies across probe runs. Knobs for tests: PROBE_PYTHON, PROBE_FFMPEG,
 # PROBE_COUNT (keepalive count, default 4320), PROBE_DIAG=1 (probe.py --diag: the counters-only diagnostic on the same
-# line, GA A1 diagnosis), PROBE_STATUS_NOW (a fixed epoch for --status, honoured only with
+# line, GA A1 diagnosis), PROBE_HELPER=1 (probe.py --helper: the production helper against the camera, its ffmpeg child
+# a framemd5 consumer of its MPEG-TS; round 9), PROBE_STATUS_NOW (a fixed epoch for --status, honoured only with
 # PROBE_TEST=1). --status runs a stdlib-only python3 (PROBE_PYTHON or python3) over the state dir.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -94,6 +95,7 @@ fi
 
 names=(cam1 cam2); [ "$WHICH" = both ] || names=("$WHICH")
 DIAG=(); [ "${PROBE_DIAG:-}" = 1 ] && DIAG=(--diag)
+[ "${PROBE_HELPER:-}" = 1 ] && DIAG+=(--helper)
 rc=0
 for n in "${names[@]}"; do
   "$PY" -I -B "$HERE/probe.py" ${DIAG[@]+"${DIAG[@]}"} "$STATE" "$CAMD" "$n" "$MINUTES" "$FORM" "${PROBE_COUNT:-4320}" "$FF" &

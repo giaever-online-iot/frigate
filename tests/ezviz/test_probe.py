@@ -97,17 +97,18 @@ class ProbeCase(unittest.TestCase):
         f.chmod(0o600)
         return port
 
-    def probe_cmd(self, ffmpeg: str, minutes="0.5", name="cam1", count="300", diag=False):
-        return [_path.isolated_python(), "-I", "-B", str(PROBE), *(["--diag"] if diag else []), str(self.tmp / "common"),
-                str(self.cams), name, minutes, "extend", count, ffmpeg]
+    def probe_cmd(self, ffmpeg: str, minutes="0.5", name="cam1", count="300", diag=False, helper=False):
+        return [_path.isolated_python(), "-I", "-B", str(PROBE), *(["--diag"] if diag else []),
+                *(["--helper"] if helper else []), str(self.tmp / "common"), str(self.cams), name, minutes, "extend",
+                count, ffmpeg]
 
-    def probe(self, ffmpeg: str, minutes="0.5", name="cam1", count="300", diag=False):
+    def probe(self, ffmpeg: str, minutes="0.5", name="cam1", count="300", diag=False, helper=False):
         env = _path.child_env()
         for k in ("SNAP", "SNAP_DATA", "SNAP_COMMON"):
             env.pop(k, None)                      # the probe sets its own (C18)
         (self.tmp / "tmp").mkdir(exist_ok=True)
         env["TMPDIR"] = str(self.tmp / "tmp")     # so a leftover hash dir is this run's, and visible
-        p = subprocess.run(self.probe_cmd(ffmpeg, minutes, name, count, diag), env=env, stdin=subprocess.DEVNULL,
+        p = subprocess.run(self.probe_cmd(ffmpeg, minutes, name, count, diag, helper), env=env, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=180)
         return p
 
@@ -297,6 +298,33 @@ class Probe(ProbeCase):
         self.assertEqual(set(d["route_pt"]), {"104", "112"}, d["route_pt"])     # PT 96 is never dropped at route
         self.assertEqual((m["end"], m["published"], m["decode_errors"]), ("stop", "1", "0"), p.stdout)
         self.assertGreaterEqual(int(m["frames"]), 200, p.stdout)
+
+    HELPER_LINE = re.compile(
+        r"^probe-helper cam1: rc=(?P<rc>\d+) records=(?P<recs>[a-z_,]*) published=(?P<pub>[01]) "
+        r"published_s=(?P<pub_s>[\d.]+|-) frames=(?P<frames>\d+) decode_errors=(?P<derr>\d+) "
+        r"pts_step_mode_ms=(?P<mode>[\d.]+) pts_p99_dev_ms=(?P<dev>[\d.]+) child_f=(?P<cf>[a-z0-9]+|-) "
+        r"stderr_lines=(?P<sl>\d+) stderr_words=(?P<sw>[a-z_,]*)$")
+
+    def test_helper_mode_runs_the_production_path(self):              # round 9: the real helper, rtp mode, E13
+        ff = real_ffmpeg()
+        self.start_fake(ff)
+        p = self.probe(ff, "0.25", helper=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        lines = p.stdout.splitlines()
+        self.assertEqual(len(lines), 1, p.stdout + p.stderr)
+        m = self.HELPER_LINE.match(lines[0])
+        self.assertIsNotNone(m, lines[0])
+        self.assertEqual((m["rc"], m["recs"], m["pub"], m["cf"]), ("0", "attempt,login_ok,published,stop", "1", "mpegts"))
+        self.assertTrue(5.0 <= float(m["pub_s"]) < 10.0, lines[0])         # first IDR + 5 s (D22)
+        self.assertGreaterEqual(int(m["frames"]), 150, lines[0])           # 15 s at 25 fps, from the first IDR
+        self.assertEqual((m["derr"], m["mode"], m["dev"]), ("0", "40.000", "0.000"), lines[0])
+        self.assertLessEqual(set(m["sw"].split(",")), {"attempt", "login_ok", "published", "stop"}, lines[0])
+        self.assertEqual(int(m["sl"]), len(m["sw"].split(",")))
+        self.assertEqual(evs(self.ledger()), ["attempt", "login_ok", "published", "stop"])   # the helper's real gate
+        self.assertEqual(json.loads(self.stats.read_text())["logins_ok"], 1)
+        for marker in (*CANARIES, LOOPBACK, SERIAL, CODE):
+            self.assertNotIn(marker, p.stdout + p.stderr)
+        self.assertEqual(list((self.tmp / "tmp").iterdir()), [])          # the work dir is gone
 
     def test_non_idr_start_is_not_fed_until_the_first_idr(self):        # the IDR gate
         import fakecam

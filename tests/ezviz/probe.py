@@ -1,6 +1,14 @@
 """Item A's long-session probe (W-23 T12, plan P15, controller ruling C18). TEST TOOLING: never part of the snap.
 
-    probe.py [--diag] <state-dir> <camdir> <name> <minutes> <form> <count> <ffmpeg>
+    probe.py [--diag] [--helper] <state-dir> <camdir> <name> <minutes> <form> <count> <ffmpeg>
+
+--helper (round 9): the PRODUCTION path instead of the probe's own reader. The real helper (`python -I -B -m
+ezviz_source.main <name> rtsp://127.0.0.1:1/<name>`, as go2rtc's exec runs it; its own gate and ledger, in <state-dir>)
+with $SNAP a private tree whose usr/lib/ffmpeg/8.0/bin/ffmpeg is a consumer: `<ffmpeg> -f mpegts -i pipe:0` into
+framemd5 (packets, 90 kHz PTS, and decoded frames), so it reads exactly what the helper's ffmpeg child would. After
+<minutes> the helper gets SIGTERM by PID (E13); a SIGTERM to the probe is passed on. <form> and <count> are not used
+(the helper's constants apply). One line: `probe-helper <name>: rc= records= published= published_s= frames=
+decode_errors= pts_step_mode_ms= pts_p99_dev_ms= child_f= stderr_lines= stderr_words=` (class words only).
 
 One login to the camera named <name>, one CameraSession on build_plan(<form>, <count>), the access units into
 `ffmpeg -v error -f hevc -i pipe:0 -f framemd5 <tmp>/hashes` (hashes only, never an image; the hash dir is deleted),
@@ -46,6 +54,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -75,7 +84,8 @@ def _own_checkout(name: str) -> None:
 
 
 def _usage():
-    sys.stderr.write("probe: usage: probe.py [--diag] <state-dir> <camdir> <name> <minutes> <form> <count> <ffmpeg>\n")
+    sys.stderr.write("probe: usage: probe.py [--diag] [--helper] <state-dir> <camdir> <name> <minutes> <form> <count> "
+                     "<ffmpeg>\n")
     os._exit(EXIT_USAGE)
 
 
@@ -169,8 +179,11 @@ def ts_stats(tss: list):
 
 
 def main(argv: list) -> int:
-    diag = bool(argv) and argv[0] == "--diag"
-    argv = argv[1:] if diag else argv
+    flags = []
+    while argv and argv[0] in ("--diag", "--helper") and argv[0] not in flags:
+        flags.append(argv[0])
+        argv = argv[1:]
+    diag, helper = "--diag" in flags, "--helper" in flags
     if len(argv) != 7:
         _usage()
     state_dir, camdir, name, minutes, form, count, ffmpeg = argv
@@ -188,9 +201,68 @@ def main(argv: list) -> int:
     os.environ["SNAP_DATA"] = str(work / "data")
     os.environ["SNAP"] = str(work / "unused")
     try:
+        if helper:
+            return _run_helper(name, minutes_f, ffmpeg, work)
         return _run(name, minutes_f, form, count_i, ffmpeg, work, diag)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _run_helper(name, minutes, ffmpeg, work) -> int:
+    from ezviz_source import ledger, paths
+    if not (os.path.isfile(ffmpeg) and os.access(ffmpeg, os.X_OK)):
+        sys.stderr.write(f"probe {name}: config: ffmpeg is not an executable file\n")
+        return 78
+    q = shlex.quote
+    bindir = work / "snap" / "usr" / "lib" / "ffmpeg" / "8.0" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "ffmpeg").write_text(                                # the helper's child: record -f, then consume
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {q(str(work / 'child.argv'))}\n"
+        f"exec {q(ffmpeg)} -hide_banner -v error -f mpegts -i pipe:0 -map 0:v -c copy -f framemd5 "
+        f"{q(str(work / 'pk'))} -map 0:v -f framemd5 {q(str(work / 'fr'))} 2> {q(str(work / 'ff.err'))}\n")
+    (bindir / "ffmpeg").chmod(0o700)
+    os.environ["SNAP"] = str(work / "snap")
+    lp = paths.state_dir() / f"{name}.ledger"
+    read = (lambda: ledger.parse(lp.read_bytes()) if lp.exists() else [])
+    base = len(read())
+    with open(work / "helper.err", "wb") as err:
+        p = subprocess.Popen([sys.executable, "-I", "-B", "-m", "ezviz_source.main", name, f"rtsp://127.0.0.1:1/{name}"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, close_fds=True)
+    for sig in (signal.SIGTERM, signal.SIGINT):                     # a stop of the probe stops the helper (E13)
+        signal.signal(sig, lambda *_: os.kill(p.pid, signal.SIGTERM))
+    try:
+        rc = p.wait(minutes * 60)                                   # a refusal or a session end returns early
+    except subprocess.TimeoutExpired:
+        os.kill(p.pid, signal.SIGTERM)                              # by PID only
+        try:
+            rc = p.wait(30)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            rc = p.wait()
+    recs = read()[base:]
+    ev = [r["ev"] for r in recs]
+    t = {r["ev"]: r["t"] for r in recs}
+    pub_s = f"{t['published'] - t['attempt']:.3f}" if "published" in t and "attempt" in t else "-"
+    rows = lambda f: [ln for ln in f.read_text(errors="replace").splitlines() if ln and not ln.startswith("#")] \
+        if f.exists() else []
+    tb = next((ln.split(":", 1)[1].strip() for ln in (work / "pk").read_text().splitlines()
+               if ln.startswith("#tb 0:")), "1/90000") if (work / "pk").exists() else "1/90000"
+    ms = 1000 * int(tb.split("/")[0]) / int(tb.split("/")[1])
+    pts = [int(r.split(",")[2]) for r in rows(work / "pk")]
+    steps = [(b - a) * ms for a, b in zip(pts, pts[1:])]
+    mode = Counter(round(x, 3) for x in steps).most_common(1)[0][0] if steps else 0.0
+    devs = sorted(abs(x - 40.0) for x in steps)
+    p99 = devs[max(0, -(-99 * len(devs) // 100) - 1)] if devs else 0.0
+    argv = (work / "child.argv").read_text().splitlines() if (work / "child.argv").exists() else []
+    child_f = argv[argv.index("-i") - 1] if "-i" in argv and argv.index("-i") >= 1 else "-"
+    lines = (work / "helper.err").read_text(errors="replace").splitlines()
+    words = [m.group(1) if (m := re.match(rf"ezviz-source {name}: ([a-z_]+)", ln)) else "other" for ln in lines]
+    derr = len([ln for ln in rows(work / "ff.err")])
+    print(f"probe-helper {name}: rc={rc} records={','.join(ev)} published={int('published' in ev)} published_s={pub_s} "
+          f"frames={len(rows(work / 'fr'))} decode_errors={derr} pts_step_mode_ms={mode:.3f} pts_p99_dev_ms={p99:.3f} "
+          f"child_f={child_f if re.fullmatch(r'[a-z0-9]+', child_f) else '-'} stderr_lines={len(lines)} "
+          f"stderr_words={','.join(words)}", flush=True)
+    return 0 if rc == 0 else 75
 
 
 def _run(name, minutes, form, count, ffmpeg, work, diag=False) -> int:
