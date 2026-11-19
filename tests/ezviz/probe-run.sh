@@ -26,8 +26,8 @@ if [ "${1:-}" = "--status" ]; then
   now=$(date +%s)
   [ "${PROBE_TEST:-}" = 1 ] && [ -n "${PROBE_STATUS_NOW:-}" ] && now=$PROBE_STATUS_NOW   # a fixed clock, tests only (M2)
   # latched comes from the ledger the way the gate and ezviz-ledger.sh decide it: ledger.parse + policy.decide (stdlib
-  # only, so any python3 will do). Only the state dir is read: no key file, no camera.
-  PYTHONPATH="$HERE/../../spike/ezviz" "${PROBE_PYTHON:-python3}" -B -c '
+  # only, so any python3 >= 3.11 will do; -P keeps the cwd off sys.path). Only the state dir is read: no key file, no camera.
+  PYTHONPATH="$HERE/../../spike/ezviz" "${PROBE_PYTHON:-python3}" -P -B -c '
 import sys, datetime
 from pathlib import Path
 from ezviz_source import ledger, policy

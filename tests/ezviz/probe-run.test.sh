@@ -147,5 +147,9 @@ run t2 -- --status
 check "status with no state: exit 0" 0 "$(rc t2)"
 check "status with no state: none lines" "probe-state cam1: last_attempt=none age_s=- latched=0,probe-state cam2: last_attempt=none age_s=- latched=0" "$(paste -sd, "$T/t2.out")"
 check "status creates nothing" 0 "$([ -e "$T/t2/envd/w23-probe-state" ] && echo 1 || echo 0)"
+# W-23 final wave: python -c puts the cwd on sys.path; -P keeps a planted module in the cwd from shadowing the stdlib
+mkdir -p "$T/plant"; printf 'import sys\nsys.stderr.write("planted datetime ran\\n")\nraise SystemExit(9)\n' > "$T/plant/datetime.py"
+( cd "$T/plant" && run t5 -- --status )
+check "status: a datetime.py in the cwd is never imported (rc, planted lines)" "0 0" "$(rc t5) $(grep -c planted "$T/t5.err")"
 
 [ "$fail" = 0 ] && echo "probe-run.test: all ok" || { echo "probe-run.test: FAILURES"; exit 1; }
