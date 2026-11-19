@@ -209,5 +209,67 @@ PRE="$CLIPS; $LOCK" run c9 M7C_SOURCE=clip MC_VALID=0 "$(CX c9)" "$(CF c9)" --
 check "clip: invalid: exit 8" 8 "$(rc c9)"; has "clip: invalid: verdict" "make-config: validate-config rc=1 invalid" "$(O c9)"; noleak c9
 PRE="$CLIPS; $LOCK" BASHX="bash -x" run c10 M7C_SOURCE=clip "$(CX c10)" "$(CF c10)" --; check "clip: bash -x: exit 0" 0 "$(rc c10)"; noleak c10
 
+# --- M7C_SOURCE=ezviz (W-23 T18; §6, F5, P10, C19): no go2rtc streams, camera files on stdin only, retention ---
+run e1 M7C_SOURCE=ezviz --
+check "ezviz: exit 0" 0 "$(rc e1)"; check "ezviz: last line ok" "make-config: ok" "$(tail -n 1 "$(O e1)")"; noleak e1
+check "ezviz: no go2rtc streams" 0 "$(y e1 '(.go2rtc.streams // {}) | keys | length')"
+check "ezviz: cameras are cam1,cam2" "cam1,cam2" "$(y e1 '.cameras | keys | join(",")')"
+check "ezviz: cam1 one input detect+record" "rtsp://127.0.0.1:8554/cam1 detect,record" "$(y e1 '[.cameras.cam1.ffmpeg.inputs[] | .path + " " + (.roles | join(","))] | join(";")')"
+check "ezviz: cam2 one input detect+record" "rtsp://127.0.0.1:8554/cam2 detect,record" "$(y e1 '[.cameras.cam2.ffmpeg.inputs[] | .path + " " + (.roles | join(","))] | join(";")')"
+check "ezviz: restream preset, fps 5, no width/height (P11)" "preset-rtsp-restream 5 null null" "$(y e1 '[.cameras.cam1.ffmpeg.inputs[0].input_args, .cameras.cam1.detect.fps, .cameras.cam1.detect.width, .cameras.cam1.detect.height] | map(tostring) | join(" ")')"
+check "ezviz: loopback binds kept" "127.0.0.1:8554 127.0.0.1:8555" "$(y e1 '.go2rtc.rtsp.listen + " " + .go2rtc.webrtc.listen')"
+check "ezviz: no URL with a login" 0 "$(grep -c '://[^ ]*@' "$(HC e1)")"
+check "ezviz: cam1.conf mode 600" 600 "$(stat -c %a "$T/e1/st/ezviz/cameras/cam1.conf")"
+check "ezviz: cam1.conf content" "host=$IP1 port=8000 serial=$ID1 login=$CA" "$(grep -v '^#' "$T/e1/st/ezviz/cameras/cam1.conf" | tr '\n' ' ' | sed 's/ $//')"
+check "ezviz: cam2.conf is the second pair" "host=$IP2 port=8000 serial=$ID2 login=$CB" "$(grep -v '^#' "$T/e1/st/ezviz/cameras/cam2.conf" | tr '\n' ' ' | sed 's/ $//')"
+check "ezviz: camera dir 700" 700 "$(stat -c %a "$T/e1/st/ezviz/cameras")"
+check "ezviz: state dir 700, created" 700 "$(stat -c %a "$T/e1/st/common-ezviz/state")"
+check "ezviz: no .m7c-new left" 0 "$(find "$T/e1/st/ezviz" -name '*.m7c-new' | wc -l)"
+has   "ezviz: says 2 camera files written" "camera files: 2 written (root, 0600, sha256 matched)" "$(O e1)"
+has   "ezviz: ezviz-check ok for cam1" "ezviz-check cam1: ok" "$(O e1)"
+has   "ezviz: ezviz-check ok for cam2" "ezviz-check cam2: ok" "$(O e1)"
+has   "ezviz: built line says 0 streams, days 1" "built: 2 cameras (ezviz), 0 go2rtc streams" "$(O e1)"
+check "ezviz: at most 12 output lines" 1 "$([ "$(wc -l < "$(O e1)")" -le 12 ] && echo 1 || echo 0)"
+has   "ezviz: camera files go on stdin only" "cat > /var/snap/frigate/current/ezviz/cameras/cam1.conf.m7c-new" "$T/e1/st/cmds"
+hasnt "ezviz: no code in any remote command" "$CA" "$T/e1/st/cmds"
+hasnt "ezviz: no camera serial in any remote command" "$ID1" "$T/e1/st/cmds"
+hasnt "ezviz: no camera address in any remote command" "$IP1" "$T/e1/st/cmds"
+hasnt "ezviz: no camera serial in the output" "$ID1" "$(O e1)"
+hasnt "ezviz: no camera serial in the ssh argv" "$ID2" "$T/e1/st/log"
+# the file must parse with the helper's own reader (camfile.load), as the venv python, in the test sandbox
+if PYV=$(bash tests/ezviz/venv.sh 2>/dev/null) && [ -x "$PYV" ]; then
+  check "ezviz: cam1.conf parses with camfile.load" "ok $IP1 8000 $ID1 $CA" "$("$PYV" -I -c 'import sys; from ezviz_source import camfile; c = camfile.load("cam1", sys.argv[1]); print("ok", c.host, c.port, c.serial, c.login)' "$T/e1/st/ezviz/cameras" 2>&1)"
+  check "ezviz: cam2.conf parses with camfile.load" "ok $IP2 8000 $ID2 $CB" "$("$PYV" -I -c 'import sys; from ezviz_source import camfile; c = camfile.load("cam2", sys.argv[1]); print("ok", c.host, c.port, c.serial, c.login)' "$T/e1/st/ezviz/cameras" 2>&1)"
+else echo "SKIP - camfile.load check (no venv python)"; fi
+# the snap's generator with 5 arguments: cam1, cam2 become exec streams and are preloaded
+if python3 -c 'import yaml' 2>/dev/null; then
+  mkdir -p "$T/gene/cams"; : > "$T/gene/cams/cam1.conf"; : > "$T/gene/cams/cam2.conf"
+  python3 -I spike/bin/go2rtc-config-gen.py spike/config/go2rtc.yaml.in "$(HC e1)" /snap/frigate/x1 "$T/gene/go2rtc.yaml" "$T/gene/cams" 2> "$T/gene/err"
+  check "ezviz generator: streams cam1,cam2 + the 2 baseline ones" "cam1,cam2,test,testclip" "$(yq -r '.streams | keys | join(",")' - < "$T/gene/go2rtc.yaml")"
+  check "ezviz generator: cam1 and cam2 are exec lines" "true,true" "$(yq -r '[.streams.cam1, .streams.cam2] | map(test("^exec:")) | join(",")' - < "$T/gene/go2rtc.yaml")"
+  check "ezviz generator: preload holds cam1 and cam2" "cam1,cam2" "$(yq -r '.preload | keys | join(",")' - < "$T/gene/go2rtc.yaml")"
+  check "ezviz generator: rtsp.listen stays loopback" "127.0.0.1:8554" "$(yq -r '.rtsp.listen' - < "$T/gene/go2rtc.yaml")"
+else echo "SKIP - ezviz generator cross-check (no PyYAML on this host)"; fi
+PRE='mkdir -p "$T/$n/st/common-ezviz/state"; echo keep > "$T/$n/st/common-ezviz/state/cam1.ledger"' run e2 M7C_SOURCE=ezviz --
+check "ezviz: an existing ledger is kept" keep "$(cat "$T/e2/st/common-ezviz/state/cam1.ledger")"
+run e3 M7C_SOURCE=ezviz MC_G2R_ACTIVE=1 --; check "ezviz: go2rtc active: exit 4" 4 "$(rc e3)"; hasnt "ezviz: go2rtc active: nothing written" "m7c-new" "$T/e3/st/cmds"
+check "ezviz: go2rtc active: no camera dirs made" 0 "$(find "$T/e3/st" -maxdepth 1 -name '*ezviz*' | wc -l)"
+run e4 M7C_SOURCE=ezviz MC_CHECK=0 --;    check "ezviz: ezviz-check fails: exit 11" 11 "$(rc e4)"; has "ezviz: check fails: says files were written" "camera files written but ezviz-check failed" "$(O e4)"; noleak e4
+run e5 M7C_SOURCE=ezviz M7C_RETAIN_DAYS=3 --; check "retain 3 applied to all three (ezviz)" "3 3 3" "$(y e5 '[.record.continuous.days, .record.alerts.retain.days, .record.detections.retain.days] | map(tostring) | join(" ")')"
+has   "retain 3: built line says so" "continuous.days 3, alerts/detections retain.days 3" "$(O e5)"
+run e6 M7C_RETAIN_DAYS=0 --;  check "retain 0: exit 2" 2 "$(rc e6)"; run e7 M7C_RETAIN_DAYS=x --; check "retain x: exit 2" 2 "$(rc e7)"
+run e10 M7C_RETAIN_DAYS=31 --; check "retain 31: exit 2" 2 "$(rc e10)"
+check "retain errors send no hub command" 0 "$(cat "$T/e6/st/cmds" "$T/e7/st/cmds" "$T/e10/st/cmds" | wc -l)"
+run e11 M7C_RETAIN_DAYS=30 --; check "retain 30 (cameras mode): applied to all three" "30 30 30" "$(y e11 '[.record.continuous.days, .record.alerts.retain.days, .record.detections.retain.days] | map(tostring) | join(" ")')"
+has   "retain 30 (cameras mode): built line says so" "continuous.days 30, alerts/detections retain.days 30" "$(O e11)"
+PRE="$CLIPS; $LOCK" run e12 M7C_SOURCE=clip M7C_RETAIN_DAYS=2 "$(CX e12)" "$(CF e12)" --
+check "retain 2 (clip mode): applied to all three" "2 2 2" "$(y e12 '[.record.continuous.days, .record.alerts.retain.days, .record.detections.retain.days] | map(tostring) | join(" ")')"
+PRE='mkdir -p "$T/$n/st/ezviz/cameras"; : > "$T/$n/st/ezviz/cameras/cam1.conf"' run e8 M7C_SOURCE=clip "$(CX e8)" "$(CF e8)" --
+check "clip with camera files present: exit 10" 10 "$(rc e8)"; hasnt "exit 10: nothing written" "m7c-new" "$T/e8/st/cmds"; has "exit 10: names the rollback step" "remove /var/snap/frigate/current/ezviz first" "$(O e8)"
+PRE='mkdir -p "$T/$n/st/ezviz/cameras"; : > "$T/$n/st/ezviz/cameras/cam2.conf"' run e13 --
+check "cameras mode with camera files present: exit 10" 10 "$(rc e13)"; hasnt "cameras mode exit 10: nothing written" "m7c-new" "$T/e13/st/cmds"
+BASHX="bash -x" run e9 M7C_SOURCE=ezviz --; check "ezviz: bash -x: exit 0" 0 "$(rc e9)"; noleak e9
+hasnt "ezviz: bash -x: no code in the trace" "$CA" "$(O e9)"
+
 [ "$fail" = 0 ] && echo "make-config.test: all ok" || echo "make-config.test: FAILURES"
 exit "$fail"
