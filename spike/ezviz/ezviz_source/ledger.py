@@ -67,6 +67,24 @@ def _fsync_dir(d: Path) -> None:
         os.close(fd)
 
 
+def read_path(path) -> list:
+    """The records of the file the PATH names now (not a held fd's inode, which trim() may have replaced)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            chunks = []
+            while True:
+                b = os.read(fd, 65536)
+                if not b:
+                    break
+                chunks.append(b)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        raise LedgerIOError(type(e).__name__) from None
+    return parse(b"".join(chunks))
+
+
 class Ledger:
     """Context manager: holds flock(LOCK_EX) on the ledger file for its whole body."""
 
@@ -146,7 +164,9 @@ class Ledger:
         try:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             try:
-                os.write(fd, b"".join((json.dumps(r, separators=(",", ":")) + "\n").encode() for r in keep))
+                data = b"".join((json.dumps(r, separators=(",", ":")) + "\n").encode() for r in keep)
+                if os.write(fd, data) != len(data):    # B1: a partial file must never be renamed over the ledger
+                    raise OSError("short write")
                 os.fsync(fd)
             finally:
                 os.close(fd)

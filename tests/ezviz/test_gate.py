@@ -5,12 +5,53 @@ import os
 import re
 import signal
 import statistics
+import subprocess
+import sys
 import time
 import unittest
 
+from ezviz_source import ledger as ledger_mod, policy
 from fixtures import CANARIES, GOOD, Tree, gate_proc, run_gate
 
 NOW = time.time()
+
+# Fix wave 1, B1: the gate with one fault injected into the ledger trim, on the trim's .tmp file only.
+#   short   - os.write writes half the buffer (what a partial ENOSPC write returns)
+#   drop    - os.write silently leaves out the last record (a trim that "succeeds" but loses the attempt)
+#   fsync   - os.fsync of the .tmp fails with ENOSPC
+#   replace - os.replace of the .tmp fails with ENOSPC
+TRIM_FAULT_GATE = """
+import errno, os, sys
+from ezviz_source import gate, signals
+mode = sys.argv[2]
+real_write, real_fsync, real_replace = os.write, os.fsync, os.replace
+def is_tmp(fd):
+    return os.readlink("/proc/self/fd/%d" % fd).endswith(".ledger.tmp")
+def write(fd, b):
+    if is_tmp(fd):
+        b = bytes(b)
+        if mode == "short":
+            return real_write(fd, b[: len(b) // 2])
+        if mode == "drop":
+            real_write(fd, b[: b.rstrip(b"\\n").rfind(b"\\n") + 1])
+            return len(b)
+    return real_write(fd, b)
+def fsync(fd):
+    if mode == "fsync" and is_tmp(fd):
+        raise OSError(errno.ENOSPC, "full")
+    return real_fsync(fd)
+def replace(src, dst, **kw):
+    if mode == "replace" and str(src).endswith(".ledger.tmp"):
+        raise OSError(errno.ENOSPC, "full")
+    return real_replace(src, dst, **kw)
+os.write, os.fsync, os.replace = write, fsync, replace
+signals.install()
+try:
+    gate.admit(sys.argv[1])
+except gate.Refused as r:
+    gate.say(sys.argv[1], r.cls, next_in=r.next_in); sys.exit(r.code)
+print("ADMITTED", flush=True)
+"""
 
 
 def rec(dt, ev, **kw):
@@ -143,6 +184,40 @@ class TestGate(unittest.TestCase):
         events = [r["ev"] for r in ledger_mod.parse(t.ledger().read_bytes())]
         self.assertEqual(events, ["attempt"])
         self.assertEqual((p.returncode, out), (0, ""))
+
+    # --- fix wave 1, B1: a trim that fails after the attempt refuses; the attempt stays on disk and counts ---
+    def trim_fault(self, mode):
+        t = Tree()
+        old = [rec(-9 * 86400 + i, ev) for i, ev in enumerate(("attempt", "login_ok", "published", "stop"))]
+        t.seed(old)                                     # the first record is older than 7 d + 1 h: admit trims
+        before = t.ledger().read_bytes()
+        p = subprocess.run([sys.executable, "-c", TRIM_FAULT_GATE, "cam1", mode], env=t.env(),
+                           capture_output=True, text=True, timeout=30)
+        return t, before, p
+
+    def assert_refused_attempt_kept(self, mode):
+        t, before, p = self.trim_fault(mode)
+        self.assertEqual((p.returncode, p.stdout, p.stderr.strip()), (75, "", "ezviz-source cam1: ledger_io"))
+        after = t.ledger().read_bytes()
+        self.assertTrue(after.startswith(before), after)                # the old ledger intact, byte for byte
+        added = ledger_mod.parse(after[len(before):])
+        self.assertEqual([r["ev"] for r in added], ["attempt"], after)  # ...apart from the attempt
+        self.assertTrue(after.endswith(b"\n"))
+        d = policy.decide(ledger_mod.parse(after), time.time() + 1, latch_file=False)
+        self.assertEqual((d.allow, d.cls, d.attempts_in_window), (False, "budget_wait", 1))   # counted next time
+
+    def test_short_write_in_trim_refuses_and_keeps_the_attempt(self):
+        self.assert_refused_attempt_kept("short")
+
+    def test_enospc_at_trim_fsync_refuses_and_keeps_the_attempt(self):
+        self.assert_refused_attempt_kept("fsync")
+
+    def test_enospc_at_trim_replace_refuses_and_keeps_the_attempt(self):
+        self.assert_refused_attempt_kept("replace")
+
+    def test_trim_that_loses_the_attempt_refuses(self):
+        t, before, p = self.trim_fault("drop")
+        self.assertEqual((p.returncode, p.stdout, p.stderr.strip()), (75, "", "ezviz-source cam1: ledger_io"))
 
     def test_lines_carry_no_camera_value(self):
         t = Tree()

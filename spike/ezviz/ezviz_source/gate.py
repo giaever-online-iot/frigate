@@ -95,6 +95,12 @@ def admit(name: str, now=time.time, on_attempt=None) -> Admitted:
             recs = L.records()
             if recs and recs[0]["t"] < t - C.TRIM_KEEP_S - 3600:
                 L.trim(t, min(t - C.WINDOW_S, _row_start(recs)))   # last operation under the lock
+                # B1: no contact unless the file the path names now still ends in this attempt. A trim that raised
+                # left the old file (attempt included) and is refused below; this catches one that lost it silently.
+                # Read the PATH: trim() replaced the file, and L's fd still names the old inode.
+                last = ledger.read_path(lp)[-1:]
+                if [(r["ev"], r["t"]) for r in last] != [("attempt", t)]:
+                    raise ledger.LedgerIOError("trim lost the attempt")
     except ledger.LedgerDamaged:
         raise Refused("ledger_damaged", C.EXIT_TEMP) from None
     except ledger.LedgerIOError:
