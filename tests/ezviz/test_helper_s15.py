@@ -5,6 +5,7 @@ the harness moves every record 2 h into the past (fixtures.shift_ledger), so the
 """
 import _path  # noqa: F401
 import re
+import sys
 import time
 import unittest
 
@@ -144,6 +145,32 @@ class HelperS15(HelperCase):
         self.assertEqual(evs(recs)[-2:], ["attempt", "net_fail"])
         self.assertTrue(recs[-1].get("syn"))
         self.assertNotIn("latch", evs(recs))
+
+    def test_ffmpeg_spawn_failure_is_output_end(self):                  # ruling: FfmpegExited -> output_end (E9)
+        h = Helper(self.tmp, "cam1", [], ffmpeg=False, start=False)
+        h.ffmpeg_path.write_text("not a program: no interpreter line, no binary magic\n")
+        h.ffmpeg_path.chmod(0o755)                                       # X_OK passes; execve fails with ENOEXEC
+        h.start()
+        h.wait_exit(30)
+        self.assertEqual(h.rc, 75)
+        self.assertEqual(evs(h.ledger()), ["attempt", "login_ok", "output_end"])
+        self.assertNotIn("Traceback", h.stderr)
+
+    def test_E15_ffmpeg_exit_after_published_is_output_end(self):       # E15
+        h = Helper(self.tmp, "cam1", [], ffmpeg_knobs={"exit_after_s": 9})   # publish point ~5 s after the first IDR
+        h.wait_exit(40)
+        self.assertEqual(h.rc, 75)
+        self.assertEqual(evs(h.ledger()), ["attempt", "login_ok", "published", "output_end"])
+
+    def test_E8_stall_before_publish_is_session_end(self):              # E8: a stall > 10 s
+        h = Helper(self.tmp, "cam1", ["--stall-after-s", "1"])
+        h.wait_exit(40)
+        self.assertEqual(h.rc, 75)
+        recs = h.ledger()
+        self.assertEqual(evs(recs), ["attempt", "login_ok", "session_end"])
+        gap = recs[-1]["t"] - recs[1]["t"]
+        print(f"evidence - E8 stall: session_end {gap:.1f} s after login_ok", file=sys.stderr)
+        self.assertTrue(10.0 <= gap <= 16.0, gap)                        # 1 s of media + the 10 s socket timeout
 
 
 if __name__ == "__main__":

@@ -110,14 +110,29 @@ class HelperS1(HelperCase):
                 self.assertNotIn(marker.encode(), h.cmdline, f"{want}: {marker} in cmdline")
             self.assertNotIn(hostport, h.cmdline, f"{want}: host:port in cmdline")
 
-    def test_missing_ffmpeg_is_config_78_no_contact(self):              # R2-N4
-        h = Helper(self.tmp, "cam1", [], ffmpeg=False)
-        h.wait_exit(10)
-        self.assertEqual(h.rc, 78)
-        self.assertIn("ezviz-source cam1: config", h.stderr)
-        self.assertFalse(h.ledger_path.exists())
-        self.assertFalse((h.state / "cam1.session").exists())          # no lock taken either
-        self.assertEqual(h.stats()["connects"], 0)
+    def test_missing_ffmpeg_is_config_78_no_contact(self):              # R2-N4 (+ review fix 3)
+        cases = {}
+        cases["missing"] = Helper(self.tmp / "missing", "cam1", [], ffmpeg=False)
+        h = Helper(self.tmp / "mode0644", "cam1", [], ffmpeg=False, start=False)
+        h.ffmpeg_path.write_text("#!/bin/sh\nexit 0\n")
+        h.ffmpeg_path.chmod(0o644)                                       # a file, but not executable
+        cases["mode0644"] = h
+        h = Helper(self.tmp / "dir", "cam1", [], ffmpeg=False, start=False)
+        h.ffmpeg_path.mkdir(mode=0o755)                                  # X_OK holds for a directory
+        cases["dir"] = h
+        h = Helper(self.tmp / "nodata", "cam1", [], start=False)
+        del h.env["SNAP_DATA"]                                           # the ffmpeg is fine; the env is not
+        cases["no SNAP_DATA"] = h
+        for why, h in cases.items():
+            if h.proc is None:
+                h.start()
+            h.wait_exit(10)
+            self.assertEqual(h.rc, 78, f"{why}: {h.stderr}")
+            self.assertIn("ezviz-source cam1: config", h.stderr, why)
+            self.assertNotIn("Traceback", h.stderr, why)
+            self.assertFalse(h.ledger_path.exists(), why)
+            self.assertFalse((h.state / "cam1.session").exists(), why)     # no lock taken either
+            self.assertEqual(h.stats()["connects"], 0, why)
 
     def test_budget_wait_refusal_on_main_entry_fast_and_no_library_import(self):  # C17, N5
         now = time.time()

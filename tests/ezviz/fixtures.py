@@ -213,7 +213,7 @@ class Helper:
         self.cams.mkdir(parents=True, exist_ok=True)
         bindir = self.snap / "usr" / "lib" / "ffmpeg" / "8.0" / "bin"
         bindir.mkdir(parents=True, exist_ok=True)
-        ff = bindir / "ffmpeg"
+        ff = self.ffmpeg_path = bindir / "ffmpeg"
         if ff.exists() or ff.is_symlink():
             ff.unlink()
         if ffmpeg:

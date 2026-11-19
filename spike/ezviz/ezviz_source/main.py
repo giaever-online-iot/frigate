@@ -88,6 +88,13 @@ class Helper:
             return cls, (C.EXIT_AUTH if cls == "auth_fail" else C.EXIT_TEMP)
 
     # --- the end -----------------------------------------------------------------------------------------
+    def _term(self, ev: str, code: int):
+        """The end a first SIGTERM gives once run() has classified (ev, code): auth_fail keeps precedence (ruling),
+        so its latch is still written; any other end becomes the phase's SIGTERM record (E4, E7, E13). A SIGTERM
+        that lands while the library is still unwinding the login failure, before classify() returns, is
+        classed as E4 net_fail by main(); that window is accepted (the next wrong-code login latches)."""
+        return (ev, code) if ev == "auth_fail" else (SIG_EV[self.phase], C.EXIT_STOP)
+
     def _close(self) -> None:
         """The camera session only (R2-N3): ffmpeg is closed by end(), after the record (D17 order)."""
         signals.hook("pause_close")                          # L1 test: widen the window for a 2nd SIGTERM
@@ -114,7 +121,7 @@ class Helper:
                                 L.append({"t": t, "ev": "latch", "dur": None})
                     break
                 except signals.Terminating:                  # R2-N9: raised at most once (L1), before the section
-                    ev, code = SIG_EV[self.phase], C.EXIT_STOP
+                    ev, code = self._term(ev, code)
             gate.say(self.name, ev)
             if self.out is not None:                         # R2-N3: ffmpeg after the record, inside the alarm budget
                 rem = signal.getitimer(signal.ITIMER_REAL)[0]    # alarm(4) and ITIMER_REAL share the timer
@@ -131,34 +138,47 @@ class Helper:
             try:
                 self._close()
             except signals.Terminating:                      # the first SIGTERM arrived during the close
-                ev, code = SIG_EV[self.phase], C.EXIT_STOP
+                ev, code = self._term(ev, code)
             self.end(ev, code)
         except signals.Terminating:                          # ...or between the close and end()'s section
-            self.end(SIG_EV[self.phase], C.EXIT_STOP)
+            self.end(*self._term(ev, code))
 
 
 def main(argv: list) -> None:
     if len(argv) != 2 or not re.fullmatch(C.NAME_RE, argv[0]) or not argv[1].startswith("rtsp://127.0.0.1:"):
         sys.stderr.write("ezviz-source: usage: ezviz-source <name> <rtsp://127.0.0.1:...>\n")
         os._exit(C.EXIT_USAGE)
-    if "SNAP" not in os.environ or not os.access(paths.ffmpeg(), os.X_OK):   # R2-N4: no lock, no ledger, no contact
+    # R2-N4: the snap env and an executable ffmpeg FILE, checked before any lock, ledger or contact. With all three
+    # variables set here, paths.* can no longer raise KeyError inside gate.admit.
+    ff = paths.ffmpeg() if "SNAP" in os.environ else None
+    if (not all(k in os.environ for k in ("SNAP", "SNAP_DATA", "SNAP_COMMON"))
+            or not (os.path.isfile(ff) and os.access(ff, os.X_OK))):
         gate.say(argv[0], "config")
         os._exit(C.EXIT_CONFIG)
     h = Helper(*argv)
-    signals.install()
+    ev, code = None, None
     try:
+        signals.install()                                    # inside the try: a SIGTERM right after it is E1
         adm = gate.admit(h.name, on_attempt=h.on_attempt)
         h.cam = adm.cam
         gate.say(h.name, "attempt", attempt=adm.attempts_in_window)
         ev, code = h.run()
     except gate.Refused as r:
-        gate.say(h.name, r.cls, next_in=r.next_in)
-        os._exit(r.code)
+        try:
+            gate.say(h.name, r.cls, next_in=r.next_in)       # a first SIGTERM here must not skip the exit code
+        finally:
+            os._exit(r.code)
     except signals.Terminating:
         if h.phase == "P0":
             os._exit(C.EXIT_STOP)                            # E1: nothing written
         ev, code = SIG_EV[h.phase], C.EXIT_STOP
-    h.finish(ev, code)
+    try:
+        h.finish(ev, code)
+    except signals.Terminating:
+        # The bytecode-wide window between the handlers above and finish()'s own try (or end()'s): Terminating is
+        # raised at most once (L1), so this end() runs to its os._exit. ev is always bound here (run() returned it
+        # or the Terminating handler set it); the None check is only a guard.
+        h.end(*(h._term(ev, code) if ev is not None else (SIG_EV[h.phase], C.EXIT_STOP)))
 
 
 if __name__ == "__main__":

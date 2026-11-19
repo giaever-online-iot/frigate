@@ -169,11 +169,11 @@ class HelperS14(HelperCase):
         self.assertTrue(recs[-1].get("syn"))
 
     def test_R2N3_ffmpeg_ignoring_term_does_not_delay_the_stop_record(self):  # R2-N3, D17 order
-        # pause_close (1 s) + pause_end (2 s) put the record at ~3 s after the SIGTERM: closing ffmpeg first, with
-        # its old fixed 2 s wait, would push it to ~5 s, past the 4 s alarm (that mutant survived without the hooks).
-        h = Helper(self.tmp, "cam1", [], hooks="pause_close,pause_end", ffmpeg_knobs={"ignore_term": 1})
+        # The record must not wait for ffmpeg: closing ffmpeg first (2 s, it ignores SIGTERM) would put it >= 2 s late.
+        h = Helper(self.tmp, "cam1", [], ffmpeg_knobs={"ignore_term": 1})
         h.wait_ev("published", 30)
         ff = h.ffmpeg_pid()
+        t_term = time.time()
         h.term()
         h.wait_exit(10)
         self.assertEqual(h.rc, 0)
@@ -181,10 +181,35 @@ class HelperS14(HelperCase):
         recs = h.ledger()
         self.assertEqual(evs(recs), ["attempt", "login_ok", "published", "stop"])
         self.assertNoSyn(recs)
+        lag = recs[-1]["t"] - t_term
+        print(f"evidence - R2-N3 stop record {lag * 1000:.0f} ms after SIGTERM, exit {h.elapsed:.2f} s", file=sys.stderr)
+        self.assertLess(lag, 1.0)
         end = time.monotonic() + 3
         while Path(f"/proc/{ff}").exists() and time.monotonic() < end:
             time.sleep(0.02)
         self.assertFalse(Path(f"/proc/{ff}").exists(), "ffmpeg outlived the helper")
+
+    def test_auth_fail_keeps_precedence_over_a_later_sigterm(self):     # ruling: E2 wins over E4 once classified
+        h = Helper(self.tmp, "cam1", ["--reject"], hooks="pause_end")
+        h.wait_stderr("exception", 30)            # run() has classified auth_fail; end() now pauses before its section
+        h.term()
+        h.wait_exit(10)
+        self.assertEqual(h.rc, 77)
+        self.assertEqual(evs(h.ledger()), ["attempt", "auth_fail", "latch"])
+        self.assertTrue((h.state / "cam1.latch").exists())
+        self.assertNotIn("Traceback", h.stderr)
+
+    def test_sigterm_in_close_reclassifies_session_end_as_start_timeout(self):  # finish(): E7 over E8
+        h = Helper(self.tmp, "cam1", ["--close-after-s", "1"], hooks="pause_close")
+        h.wait_ev("login_ok", 30)
+        h.wait_stderr("exception", 30)            # run() returned session_end; finish() now pauses in _close()
+        h.term()
+        h.wait_exit(10)
+        self.assertEqual(h.rc, 0)
+        recs = h.ledger()
+        self.assertEqual(evs(recs), ["attempt", "login_ok", "start_timeout"])
+        self.assertNoSyn(recs)
+        self.assertNotIn("Traceback", h.stderr)
 
     def test_R2N9_sigterm_before_end_section_writes_the_phase_record(self):  # R2-N9
         h = Helper(self.tmp, "cam1", ["--close-after-s", "1"], hooks="pause_end")
