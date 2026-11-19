@@ -59,6 +59,60 @@ class OutputTest(unittest.TestCase):
                           "-f", "hevc", "-i", "pipe:0", "-c", "copy", "-an", "-f", "rtsp",
                           "-rtsp_transport", "tcp", "rtsp://127.0.0.1:8554/x"])
 
+    def test_argv_rtp(self):                                           # W-23 T21: TIMESTAMP_MODE "rtp"
+        self.assertEqual(output.child_argv("/f", "rtsp://127.0.0.1:8554/x", "rtp"),
+                         ["/f", "-hide_banner", "-loglevel", "error", "-f", "mpegts", "-i", "pipe:0", "-c", "copy", "-an",
+                          "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://127.0.0.1:8554/x"])
+        with self.assertRaises(ValueError):
+            output.child_argv("/f", "rtsp://127.0.0.1:8554/x", "pts")
+
+    def capture(self, o):
+        got, real = [], o._proc.stdin
+
+        class Keep:
+            def write(self, b):
+                got.append(bytes(b))
+                return len(b)
+
+            def close(self):
+                real.close()
+
+        o._proc.stdin = Keep()
+        return got
+
+    def test_rtp_mode_writes_mpegts_stamped_with_the_ts(self):
+        from test_mpegts import AUD, pes_list
+        o = self.make(mode="rtp")
+        got = self.capture(o)
+        o.write_au(b"\x00\x00\x00\x01\x02\x01", False, 1)                 # before the first IDR: nothing at all
+        idr, trail = b"\x00\x00\x00\x01\x26\x01\x80abc", b"\x00\x00\x00\x01\x02\x01\x80de"
+        base = (1 << 32) - 3600                                             # the second picture wraps the 32-bit ts
+        o.write_au(idr, True, base)
+        o.write_au(trail, False, (base + 3600) % (1 << 32))
+        o.write_au(trail, False, (base + 7200) % (1 << 32))
+        pes = pes_list(b"".join(got))
+        self.assertEqual([e["pts"] for e in pes], [base, base + 3600, base + 7200])
+        self.assertEqual([e["es"] for e in pes], [AUD + idr, AUD + trail, AUD + trail])
+
+    def test_rtp_mode_needs_the_ts(self):
+        o = self.make(mode="rtp")
+        got = self.capture(o)
+        with self.assertRaises(ValueError):
+            o.write_au(b"\x00\x00\x00\x01\x26\x01\x80", True)
+        self.assertEqual(got, [])
+
+    def test_rtp_mode_publish_point_is_unchanged(self):
+        clock = Clock()
+        o = self.make(now=clock, mode="rtp")
+        o.write_au(b"\x00\x00\x00\x01\x02\x01\x80", False, 0)
+        clock.t += 6.0
+        self.assertFalse(o.published_due())
+        o.write_au(b"\x00\x00\x00\x01\x26\x01\x80", True, 3600)
+        clock.t += 4.9
+        self.assertFalse(o.published_due())
+        clock.t += 0.1
+        self.assertTrue(o.published_due())
+
     def test_env_is_path_and_ld_library_path_only(self):
         with unittest.mock.patch.dict(os.environ, {"EZVIZ_CHILD_LD_LIBRARY_PATH": "/l", "CANARY_VAR": "x"}):
             self.assertEqual(output.child_env(), {"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": "/l"})
@@ -89,7 +143,7 @@ class OutputTest(unittest.TestCase):
 
     def test_no_publish_before_idr(self):
         clock = Clock()
-        o = self.make(now=clock)
+        o = self.make(now=clock, mode="wallclock")
         for _ in range(10):
             o.write_au(b"\x00\x00\x00\x01\x02", False)
         clock.t += 6.0
@@ -97,7 +151,7 @@ class OutputTest(unittest.TestCase):
 
     def test_publish_after_5s_alive(self):
         clock = Clock()
-        o = self.make(now=clock)
+        o = self.make(now=clock, mode="wallclock")
         o.write_au(b"\x00\x00\x00\x01\x26", True)
         clock.t += 4.9
         self.assertFalse(o.published_due())
@@ -107,7 +161,7 @@ class OutputTest(unittest.TestCase):
         self.assertFalse(o.published_due())
 
     def test_short_writes_are_completed(self):
-        o = self.make()
+        o = self.make(mode="wallclock")
         got = []
         real = o._proc.stdin
 
@@ -126,7 +180,7 @@ class OutputTest(unittest.TestCase):
         self.assertGreater(len(got), 2)
 
     def test_exited_child_raises(self):
-        o = self.make(fixtures.fake_ffmpeg(self.tmp, exit_after_s=0.5))
+        o = self.make(fixtures.fake_ffmpeg(self.tmp, exit_after_s=0.5), mode="wallclock")
         time.sleep(1.0)
         with self.assertRaises(output.FfmpegExited):
             o.write_au(b"\x00\x00\x00\x01\x26", True)

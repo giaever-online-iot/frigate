@@ -1,10 +1,15 @@
-"""The ffmpeg child and the publish point (W-23 P4, D22): scrubbed env, pdeathsig, first-IDR + 5 s."""
+"""The ffmpeg child and the publish point (W-23 P4, D22): scrubbed env, pdeathsig, first-IDR + 5 s.
+
+TIMESTAMP_MODE (spec §4.4, set by Task 21 from gate GA): "rtp" muxes each access unit into MPEG-TS whose PTS is the
+camera's RTP timestamp (mpegts.py: unwrapped, re-based on a jump) and ffmpeg reads `-f mpegts`; "wallclock" pipes raw
+HEVC and lets ffmpeg stamp by arrival time."""
 import ctypes
 import os
 import signal
 import subprocess
 import time
 
+from . import mpegts
 from .constants import PUBLISH_HOLD_S, TIMESTAMP_MODE
 
 
@@ -13,10 +18,14 @@ class FfmpegExited(Exception):
 
 
 def child_argv(ffmpeg: str, url: str, mode: str) -> list:
-    if mode != "wallclock":
+    if mode == "rtp":
+        src = ["-f", "mpegts", "-i", "pipe:0"]
+    elif mode == "wallclock":
+        src = ["-use_wallclock_as_timestamps", "1", "-f", "hevc", "-i", "pipe:0"]
+    else:
         raise ValueError("unsupported timestamp mode: %s" % mode)
-    return [ffmpeg, "-hide_banner", "-loglevel", "error", "-use_wallclock_as_timestamps", "1",
-            "-f", "hevc", "-i", "pipe:0", "-c", "copy", "-an", "-f", "rtsp", "-rtsp_transport", "tcp", url]
+    return [ffmpeg, "-hide_banner", "-loglevel", "error", *src, "-c", "copy", "-an", "-f", "rtsp",
+            "-rtsp_transport", "tcp", url]
 
 
 def child_env() -> dict:
@@ -44,17 +53,24 @@ class Output:
         self._now = now
         self._first_idr = None
         self._reported = False
-        self._proc = subprocess.Popen(child_argv(ffmpeg, url, mode), stdin=subprocess.PIPE,
+        argv = child_argv(ffmpeg, url, mode)                 # an unsupported mode raises before any spawn
+        self._clock, self._mux = (mpegts.RtpClock(), mpegts.TsMuxer()) if mode == "rtp" else (None, None)
+        self._proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                       env=child_env(), preexec_fn=_make_pdeathsig(os.getpid()), close_fds=True, bufsize=0)
         self.pid = self._proc.pid
 
-    def write_au(self, au: bytes, is_idr: bool) -> None:
+    def write_au(self, au: bytes, is_idr: bool, ts=None) -> None:
+        """`ts`: the access unit's RTP timestamp, required in "rtp" mode (the clock starts at the first IDR written)."""
+        if self._mux is not None and ts is None:
+            raise ValueError("TIMESTAMP_MODE rtp needs the access unit's RTP timestamp")
         if self._proc.poll() is not None:
             raise FfmpegExited("ffmpeg exited with %s" % self._proc.returncode)
         first = self._first_idr is None
         if first and not is_idr:
             return
+        if self._mux is not None:
+            au = self._mux.mux(au, self._clock.pts(ts), is_idr)
         view = memoryview(au)
         try:
             while len(view):
