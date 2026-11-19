@@ -9,6 +9,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import fixtures
 from fixtures import CANARIES, CODE, LOOPBACK, SERIAL, Helper, HelperCase, evs, rec
@@ -153,6 +154,66 @@ class HelperS1(HelperCase):
         print(f"evidence - budget_wait on the main entry: {', '.join(f'{t * 1000:.0f}' for t in times)} ms",
               file=sys.stderr)
         self.assertLess(min(times), 0.150)
+
+
+class KeepaliveFailedEndsTheSession(unittest.TestCase):
+    """T11 review mutant R3: the keepalive-failure end of Helper.run(), in-process with a stand-in camera session.
+
+    No process test reaches it (the library's keepalive reads no reply). The stand-in keeps yielding packets and
+    reports a failed keepalive; were the check skipped, its packets run out with an error that classifies as
+    protocol_fail, never session_end.
+    """
+
+    class Session:
+        made = []
+
+        def __init__(self, cam, *, plan, timeout, on_login_ok):
+            self.served, self.sampled, self.exited = 0, 0, False
+            type(self).made.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.exited = True
+
+        def packets(self):
+            while self.served < 200:
+                self.served += 1
+                yield b""                                       # no NAL: the reassembler returns nothing
+            raise RuntimeError("stand-in packets ran out")      # only reached when the keepalive check is skipped
+
+        def keepalive_failed(self):
+            self.sampled += 1
+            return True
+
+    class Out:
+        def write_au(self, au, idr):
+            raise AssertionError("no access unit expected")
+
+        def published_due(self):
+            return False
+
+    def end_in(self, phase):
+        from ezviz_source import camera, main
+        from ezviz_source import constants as C
+        self.Session.made = []
+        h = main.Helper("cam1", f"rtsp://{LOOPBACK}:8554/cam1")
+        h.phase, h.out = phase, self.Out()
+        with mock.patch.object(camera, "CameraSession", self.Session), \
+                mock.patch.object(camera, "build_plan", return_value=object()):
+            got = h.run()
+        (s,) = self.Session.made
+        self.assertEqual(got, ("session_end", C.EXIT_TEMP))
+        self.assertEqual(h.phase, phase)                         # no phase switch, so no record (P2 stays unpublished)
+        self.assertEqual((s.served, s.sampled, s.exited), (1, 1, True))   # the first sample ends it; the with exits
+        self.assertIs(h.sess, s)                                 # finish()'s close reaches the same session
+
+    def test_keepalive_failure_in_p2_is_session_end(self):
+        self.end_in("P2")
+
+    def test_keepalive_failure_in_p3_is_session_end(self):
+        self.end_in("P3")
 
 
 if __name__ == "__main__":
