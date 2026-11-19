@@ -151,14 +151,18 @@ Also changed in the workflow:
 equivalent is in "Suite counts" below.
 
 **First CI run of PR #11 (head ca3164e): red at its first step, shellcheck.**
-- The runner installs shellcheck 0.11.0-2 from apt. That version flags SC2319 (`$?` read right after a `[ ]` test),
-  which the laptop's shellcheck 0.9.0 does not know.
+- The runner is `ubuntu-latest` = ubuntu-26.04 (the job log says `Image: ubuntu-26.04`). Its image has shellcheck
+  0.11.0-2 preinstalled; the apt step only reports it as already the newest version. 0.11 flags SC2319 (`$?` read right
+  after a `[ ]` test), which the laptop's shellcheck 0.9.0 does not know.
 - Every local shellcheck result in this document before 19 Nov evening, including the "70 files passed" line above,
   came from 0.9.0. They are not evidence for the runner.
 - The two findings:
   - `tests/hub/ezviz-ledger.test.sh:54`, new on this branch;
-  - `tests/hub/ssh-exec.test.sh:73`, unchanged from origin/main, so main itself is red under 0.11.
-- Both became `"$([ -e f ] && echo 0 || echo 1)"`, with the same expected value (de3ec8c and 7490b46). The suites give
+  - `tests/hub/ssh-exec.test.sh:73`. This file is unchanged from origin/main, but main's CI never linted it: main's
+    shellcheck targets are `spike/bin/* snap/hooks/* tests/*.sh`, and its run of 16 Nov on the same image was green.
+    This branch's wider target list (C24, adding `tests/hub/*.sh` and `tests/ezviz/*.sh`) lints it, and the runner's
+    shellcheck 0.11 flags it.
+- Both became `"$([ -e f ] && echo 0 || echo 1)"`, with the same expected value (de3ec8c and 05b9499). The suites give
   the same counts before and after (26 ok and 43 ok).
 - Because step 1 failed, none of the later steps ran in that CI run.
 
@@ -168,7 +172,7 @@ PATH, through a directory holding just a symlink. The venv's `bin/` also holds a
 system one and its `python3-yaml`: in a first replay this turned `discover -s tests` red and skipped the make-config
 cross-checks.
 
-**Local replay of the whole workflow** (19 Nov):
+**Local replay of the whole workflow** (19 Nov, on this laptop's Ubuntu 24.04 noble userland, NOT the runner's 26.04):
 - Setup: a fresh clone at 88f7ccf, an empty HOME (no `~/.cache`, so no snap file and no venvs), TMPDIR unset, the
   system python3/python3.12 3.12.3 with `python3-yaml`, and shellcheck 0.11.0.
 - Step 1, shellcheck over 70 targets with the lint-test flags: rc 0 (rc 1 at 66fb66c, the two findings above).
@@ -183,13 +187,55 @@ cross-checks.
   - All 13 skips are `test_probe.py`'s fake-camera runs: "no real ffmpeg". They include the end-to-end regression
     tests for this branch's reader fixes (`test_real_shape_camera_publishes`, `test_b2_descriptor_camera_publishes`,
     `test_rtp_ts_stats_are_video_only`).
-  - Fixed in 116ef51. The workflow now installs Ubuntu's `ffmpeg` before this step and fails the step unless
-    unittest's final verdict is a plain `OK`, so `OK (skipped=N)` is red. The step gets `timeout-minutes: 30`.
+  - Fixed in fe1dfe8. The workflow now installs Ubuntu's `ffmpeg` before this step and fails the step unless
+    unittest's final verdict is a plain `OK`, so `OK (skipped=N)` is red. The step gets `timeout-minutes: 30`. The guard
+    was tightened in 58b4b93 (below).
   - Replay of that step's `run:` block, taken verbatim from the YAML and run under `bash -e`, on a fresh clone with an
     empty HOME. The ffmpeg was Ubuntu noble's archive package `7:6.1.1-3ubuntu5`, unpacked without root from
-    `apt-get download`: `Ran 259 tests`, `OK`, 0 skipped, step rc 0, 586 s wall time including the venv build.
+    `apt-get download`; that is noble's, not the runner's (resolute has `7:8.0.1-3ubuntu2`). Result: `Ran 259 tests`,
+    `OK`, 0 skipped, step rc 0, 586 s wall time including the venv build.
   - Mutant, the same replay with ffmpeg hidden: unittest says `OK (skipped=13)`, and the step fails with rc 1 and
     `::error::ezviz helper tests: verdict 'OK (skipped=13)', want a plain OK`.
+
+
+**The runner is ubuntu-26.04, not noble (round 6).**
+- Sources:
+  - the PR #11 job log (`Image: ubuntu-26.04`);
+  - the image's software list (`actions/runner-images`, `images/ubuntu/Ubuntu2604-Readme.md`: 26.04.1 LTS, image
+    20261111.196.1);
+  - packages.ubuntu.com for resolute.
+- What this means for each tool the workflow uses:
+  - `shellcheck`: 0.11.0-2, preinstalled, and in the archive.
+  - `python3-yaml`: not preinstalled; the archive has 6.0.3-1build1, for the system Python 3.14.4.
+  - `ffmpeg`: not preinstalled; the archive has 7:8.0.1-3ubuntu2.
+  - `python3.12` and `python3.12-venv`: NOT in resolute (the archive search gives no results), so the old
+    `apt-get install python3.12-venv` fallback could never work. 3.12.16 is only in the image's tool cache.
+  - The test scripts' other tools are in the image: jq, yq 4.54.3, curl, wget, openssl, sqlite3, binutils (readelf),
+    file, netcat, and coreutils/util-linux (timeout, sha256sum, setsid, flock).
+  - squashfs-tools and qemu are not in the image. The tests that would use them skip or stub without the snap file.
+- Fix in 58b4b93:
+  - `actions/setup-python@v7` (the latest release is v7.1.0) with `python-version: '3.12'` and
+    `update-environment: false`, then a step that links only `python3.12` into a directory on `$GITHUB_PATH`. That keeps
+    `python3` the system 3.14 with its `python3-yaml`.
+  - The test step fails with an `::error::` line if python3.12 with ensurepip is missing.
+  - The helper step's guard now captures unittest's rc, and needs rc 0 with unittest's own summary as the last two
+    non-empty lines: `Ran N tests in Xs`, then a plain `OK`. Every red path prints an `::error::` line.
+  - A 16-case harness, running the step verbatim under `bash -e`: only the two genuine passes are green. Against the
+    round-5 guard, 9 cases were wrong; one of them was a late writer's `OK` that turned a skip green.
+- Replay closer to the runner, still on the noble kernel and libc:
+  - Setup: a PATH made only of a symlink farm. It has the system binaries minus what 26.04 lacks (squashfs-tools, qemu)
+    and minus every python and ffmpeg. `python3` is a CPython 3.14.7 venv with PyYAML 6.0.3, standing in for the system
+    3.14 with `python3-yaml`. python3.12 is `/usr/bin/python3.12`, linked by the workflow's own step, standing in for
+    setup-python's 3.12.16. ffmpeg is 8.1.1 (the snap's build; resolute's 8.0.1 cannot run on noble). Plus shellcheck
+    0.11 and yq.
+  - Every `run:` step of the YAML, verbatim under `bash -e`, on a fresh clone at 58b4b93 with an empty HOME. Results:
+    - the shellcheck steps, the `.github/scripts` tests and the python3.12 link step: rc 0;
+    - the test loop: rc 0 in 149 s, with `discover -s tests` 27 OK and arm64-vm 10 OK under Python 3.14;
+    - the ezviz helper step: rc 0 in 603 s, `Ran 259 tests`, `OK`, 0 skipped.
+  - A first replay without yq failed `m7c-arch.test.sh`. That was my farm's error: the image has yq.
+- NOT verified here: the real 26.04 userland (glibc, resolute's ffmpeg 8.0.1, the system Python 3.14.4 itself), the
+  setup-python action, and the tool-cache 3.12.16. There was no container runtime without root on the laptop (no docker
+  or podman; LXD needs root). The first green CI run is the evidence for the runner.
 
 ## Known pre-existing flake: `tests/hub/serve.test.sh` (clip mode)
 
