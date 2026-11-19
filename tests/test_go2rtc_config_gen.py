@@ -1,6 +1,6 @@
 """Unit tests for spike/bin/go2rtc-config-gen.py (the snap's go2rtc config bridge). Run:
 python3 -m unittest discover -s tests -p 'test_*.py' -v"""
-import contextlib, importlib.util, io, os, re, subprocess, sys, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, os, re, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -198,8 +198,14 @@ class TestEzvizEmission(unittest.TestCase):
             self.assertIn("ERROR usage", err.getvalue())
 
     def test_no_dir_arg_is_unchanged(self):  # C3: D20 is unconditional
-        old_src = subprocess.run(["git", "show", "72e03be:spike/bin/go2rtc-config-gen.py"],
-                                 cwd=REPO, capture_output=True, text=True, check=True).stdout
+        # The generator before W-23 T13, frozen as a fixture so the test needs no git history (CI checks out at depth
+        # 1, and a squash merge or rewrite would drop the commit): tests/fixtures/go2rtc-config-gen.main-9000f91.py is
+        # byte for byte spike/bin/go2rtc-config-gen.py at origin/main 9000f91, the same blob as at 72e03be (the last
+        # branch commit before T13 changed it): git blob 0e9fe06e77c82d178867ddb8fb130907198178ab, checked below.
+        old_src = (REPO / "tests/fixtures/go2rtc-config-gen.main-9000f91.py").read_bytes()
+        self.assertEqual(hashlib.sha1(b"blob %d\0" % len(old_src) + old_src).hexdigest(),
+                         "0e9fe06e77c82d178867ddb8fb130907198178ab", "the frozen pre-T13 generator was edited")
+        old_src = old_src.decode()
         with tempfile.TemporaryDirectory() as d:
             old_py = Path(d, "old_gen.py"); old_py.write_text(old_src)
             base = Path(d, "go2rtc.yaml.in"); base.write_text(BASELINE)
