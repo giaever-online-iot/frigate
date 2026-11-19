@@ -24,6 +24,8 @@ t "D17: go2rtc app unchanged (plugs, no stop-mode)" sh -c "$(declare -f blk); Y=
 t "R1: import proof names pyezvizapi.streaming.local.session" grep -q 'import ezviz_source.main.*pyezvizapi.streaming.local.session.*print("ezviz-py import proof ok")' "$Y"
 t "SF7: pip install line does not start with env -i" sh -c "$(declare -f blk); Y=$Y; l=\$(blk parts ezviz-py | grep -- '-m pip install'); [ -n \"\$l\" ] && ! echo \"\$l\" | grep -qE '^ *env -i'"
 t "N11/N8: readelf presence guard fails closed"  grep -qF 'command -v readelf >/dev/null || { echo "ezviz-py: readelf missing" >&2; exit 1; }' "$Y"
+# S2 (fix wave 1): the exact readelf -d failure guard; a generic 'exit 1' grep also matches the arch case and the presence guard.
+t "N11/N8: readelf -d failure guard fails closed (exact line)" grep -qF 'NEEDED=$(readelf -d "$D/bin/python3.12") || { echo "ezviz-py: readelf -d failed" >&2; exit 1; }' "$Y"
 t "N11/N8: libpython rm only after readelf -d succeeded and lacks NEEDED libpython" sh -c "$(declare -f blk); Y=$Y; b=\$(blk parts ezviz-py); echo \"\$b\" | grep -q 'readelf -d \"\$D/bin/python3.12\"' && echo \"\$b\" | grep -q 'NEEDED.*libpython' && echo \"\$b\" | grep -q 'exit 1' && ! echo \"\$b\" | grep -qE 'readelf .*\|\| *rm'"
 t "R1: ezviz-source execs py3.12 -I -B -m ezviz_source.main" grep -qF 'exec "$SNAP/opt/ezviz-py/bin/python3.12" -I -B -m ezviz_source.main' spike/bin/ezviz-source
 t "R1: ezviz-source unsets LD_LIBRARY_PATH" grep -qE '^unset .*LD_LIBRARY_PATH' spike/bin/ezviz-source
