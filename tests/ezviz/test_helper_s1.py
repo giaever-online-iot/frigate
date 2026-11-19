@@ -139,7 +139,7 @@ class HelperS1(HelperCase):
         now = time.time()
         fixtures.seed_ledger(self.tmp, [rec(now - 10, "attempt"), rec(now - 9, "net_fail", 1.0)])
         h = Helper(self.tmp, "cam1", None, start=False)
-        argv = [sys.executable, "-I", "-B", "-X", "importtime", "-m", "ezviz_source.main", "cam1",
+        argv = [_path.isolated_python(), "-I", "-B", "-X", "importtime", "-m", "ezviz_source.main", "cam1",
                 "rtsp://127.0.0.1:1/x"]
         times = []
         for _ in range(3):

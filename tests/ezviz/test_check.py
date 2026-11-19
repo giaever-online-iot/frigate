@@ -84,7 +84,7 @@ class TestCheck(unittest.TestCase):
 
     def test_no_library_import(self):
         t = self.ready()
-        p = subprocess.run([sys.executable, "-I", "-B", "-X", "importtime", "-m", "ezviz_source.check", "cam1"],
+        p = subprocess.run([_path.isolated_python(), "-I", "-B", "-X", "importtime", "-m", "ezviz_source.check", "cam1"],
                            env=t.env(), capture_output=True, text=True, timeout=30)
         self.assertEqual((p.returncode, p.stdout.strip()), (0, "ezviz-check cam1: ok"), p.stderr[-1500:])
         self.assertIn("ezviz_source.ledger", p.stderr)          # control: importtime lines are there

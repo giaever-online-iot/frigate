@@ -84,7 +84,7 @@ class ProbeCase(unittest.TestCase):
         self.stats = self.tmp / "fake.stats.json"
         port_file = self.tmp / "fake.port"
         self.fake = subprocess.Popen(
-            [sys.executable, "-I", str(HERE / "fakecam.py"), "--code", CODE, "--es", str(clip), "--stats",
+            [_path.isolated_python(), "-I", str(HERE / "fakecam.py"), "--code", CODE, "--es", str(clip), "--stats",
              str(self.stats), "--port-file", str(port_file), *args],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         end = time.monotonic() + 15
@@ -98,7 +98,7 @@ class ProbeCase(unittest.TestCase):
         return port
 
     def probe_cmd(self, ffmpeg: str, minutes="0.5", name="cam1", count="300"):
-        return [sys.executable, "-I", "-B", str(PROBE), str(self.tmp / "common"), str(self.cams), name,
+        return [_path.isolated_python(), "-I", "-B", str(PROBE), str(self.tmp / "common"), str(self.cams), name,
                 minutes, "extend", count, ffmpeg]
 
     def probe(self, ffmpeg: str, minutes="0.5", name="cam1", count="300"):

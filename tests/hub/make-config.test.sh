@@ -237,8 +237,9 @@ hasnt "ezviz: no camera serial in any remote command" "$ID1" "$T/e1/st/cmds"
 hasnt "ezviz: no camera address in any remote command" "$IP1" "$T/e1/st/cmds"
 hasnt "ezviz: no camera serial in the output" "$ID1" "$(O e1)"
 hasnt "ezviz: no camera serial in the ssh argv" "$ID2" "$T/e1/st/log"
-# the file must parse with the helper's own reader (camfile.load), as the venv python, in the test sandbox
-if PYV=$(W23_VENV="${W23_VENV:-$HOME/.cache/frigate-w23/venv-w23-build}" bash tests/ezviz/venv.sh 2>/dev/null) && [ -x "$PYV" ]; then
+# the file must parse with the helper's own reader (camfile.load), as the venv python, in the test sandbox.
+# venv.sh's own default is per checkout (W-23 fix wave 1, S3); a fixed venv name here would retarget its .pth.
+if PYV=$(bash tests/ezviz/venv.sh 2>/dev/null) && [ -x "$PYV" ]; then
   check "ezviz: cam1.conf parses with camfile.load" "ok $IP1 8000 $ID1 $CA" "$("$PYV" -I -c 'import sys; from ezviz_source import camfile; c = camfile.load("cam1", sys.argv[1]); print("ok", c.host, c.port, c.serial, c.login)' "$T/e1/st/ezviz/cameras" 2>&1)"
   check "ezviz: cam2.conf parses with camfile.load" "ok $IP2 8000 $ID2 $CB" "$("$PYV" -I -c 'import sys; from ezviz_source import camfile; c = camfile.load("cam2", sys.argv[1]); print("ok", c.host, c.port, c.serial, c.login)' "$T/e1/st/ezviz/cameras" 2>&1)"
 else check "ezviz: the venv python for the camfile.load check is available" present absent; fi

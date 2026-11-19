@@ -140,7 +140,7 @@ def fake_ffmpeg(tmpdir, **knobs) -> str:
     exports = "".join("FAKEFF_%s=%s; export FAKEFF_%s\n" % (k.upper(), v, k.upper()) for k, v in knobs.items())
     script = Path(tmpdir) / "ffmpeg"
     script.write_text("#!/bin/sh\n%sexec %s -I %s \"$@\"\n"
-                      % (exports, sys.executable, Path(__file__).resolve().parent / "fakeffmpeg.py"))
+                      % (exports, _path.isolated_python(), Path(__file__).resolve().parent / "fakeffmpeg.py"))
     script.chmod(0o755)
     return str(script)
 
@@ -251,7 +251,7 @@ class Helper:
         extra = {"EZVIZ_TEST_HOOKS": hooks} if hooks else {}
         self.env = _path.child_env(SNAP=str(self.snap), SNAP_DATA=str(self.data), SNAP_COMMON=str(self.common),
                                    **extra)
-        self.argv = [sys.executable, "-I", "-B", "-m", "ezviz_source.main", name, self.url]
+        self.argv = [_path.isolated_python(), "-I", "-B", "-m", "ezviz_source.main", name, self.url]
         self.base = len(self.ledger())
         self.cmdline = b""
         if start:
@@ -267,7 +267,7 @@ class Helper:
         err = open(self.tmp / f"fake-{self.n}.err", "wb")
         self._files.append(err)
         self.fake = subprocess.Popen(
-            [sys.executable, "-I", str(HERE / "fakecam.py"), "--code", CODE, "--es", str(clip),
+            [_path.isolated_python(), "-I", str(HERE / "fakecam.py"), "--code", CODE, "--es", str(clip),
              "--stats", str(self.stats_path), "--port-file", str(port_file),
              "--ledger-at-accept", str(self.ledger_path), *args],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)

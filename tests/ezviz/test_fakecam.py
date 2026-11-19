@@ -65,7 +65,7 @@ class FakeCamTests(unittest.TestCase):
     def test_reject_raises_login_failed(self):
         # Through the CLI, as Tasks 11/15 run it: -I proves it needs nothing beyond stdlib + pycryptodome.
         stats, portf = self.tmp / "stats.json", self.tmp / "port"
-        p = subprocess.Popen([sys.executable, "-I", str(FAKECAM), "--port", "0", "--code", CODE, "--stats", str(stats),
+        p = subprocess.Popen([_path.isolated_python(), "-I", str(FAKECAM), "--port", "0", "--code", CODE, "--stats", str(stats),
                               "--es", str(self.es), "--reject", "--port-file", str(portf)],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: p.poll() is None and p.kill())

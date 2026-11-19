@@ -210,7 +210,7 @@ class TestNames(unittest.TestCase):
 class TestMain(RearmBase):
     def run_main(self, argv, env_extra=None):
         env = _path.child_env(**(env_extra or {}))
-        return subprocess.Popen([sys.executable, "-I", "-B", "-m", "ezviz_source.rearm"] + argv,
+        return subprocess.Popen([_path.isolated_python(), "-I", "-B", "-m", "ezviz_source.rearm"] + argv,
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def test_list_mode_prints_names_only(self):
