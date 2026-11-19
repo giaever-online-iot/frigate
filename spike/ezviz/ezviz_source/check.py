@@ -14,8 +14,7 @@ def check(name: str) -> str:
     except camfile.CameraFileError as e:
         return e.cls
     except OSError:
-        # camfile.load can still leak a non-CameraFileError OSError (e.g. an unreadable directory); the final
-        # wave fixes camfile itself. Until then: no traceback, report the file as missing.
+        # A guard only: since the W-23 final wave camfile.load wraps its own OSErrors (open, fstat, read).
         return "missing"
     state = paths.state_dir()
     try:

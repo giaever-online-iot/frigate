@@ -30,9 +30,14 @@ class Camera:
         return f"Camera({self.name})"
 
 
+_MAX = 4096                                    # bytes; a longer camera file is refused as shape
+
+
 def load(name: str, directory: Path) -> Camera:
+    """The caller validates `name` against constants.NAME_RE first (main, check; gate via main and the probe)."""
     try:
-        fd = os.open(Path(directory) / f"{name}.conf", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        # O_NONBLOCK: a FIFO at the path must not block the open waiting for a writer (it is refused below)
+        fd = os.open(Path(directory) / f"{name}.conf", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     except OSError:
         raise CameraFileError("missing") from None
     try:
@@ -43,9 +48,14 @@ def load(name: str, directory: Path) -> Camera:
             raise CameraFileError("owner")
         if stat.S_IMODE(st.st_mode) != 0o600:
             raise CameraFileError("mode")
-        raw = os.read(fd, 4096)
+        raw = os.read(fd, _MAX + 1)
+    except OSError:
+        # fstat or read failed on a file that opened: as unusable as one that cannot be opened -> missing
+        raise CameraFileError("missing") from None
     finally:
         os.close(fd)
+    if len(raw) > _MAX:
+        raise CameraFileError("shape")
     vals = {}
     try:
         text = raw.decode("ascii")

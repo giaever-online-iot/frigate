@@ -1,6 +1,8 @@
 import _path
+import errno
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -75,6 +77,53 @@ class TestCamfile(unittest.TestCase):
 
     def test_comment_and_crlf(self):
         self.assertEqual(load("cam1", mk("# x\r\n" + GOOD.replace("\n", "\r\n"))).port, 8000)
+
+    # ---- W-23 final wave (spec D7; T2/T6 parking) ----
+    def test_fifo_does_not_hang(self):
+        """A FIFO at the camera-file path: open must not block for a writer; it is not a regular file -> missing."""
+        d = Path(tempfile.mkdtemp())
+        os.mkfifo(d / "cam1.conf", 0o600)
+        got = []
+
+        def go():
+            try:
+                load("cam1", d)
+                got.append("loaded")
+            except CameraFileError as e:
+                got.append(e.cls)
+        t = threading.Thread(target=go, daemon=True)
+        t.start()
+        t.join(2.0)
+        if t.is_alive():                                   # unblock the reader so the test itself never hangs
+            os.close(os.open(d / "cam1.conf", os.O_WRONLY | os.O_NONBLOCK))
+            t.join(2.0)
+            self.fail("load() blocked on a FIFO for 2 s")
+        self.assertEqual(got, ["missing"])
+
+    @staticmethod
+    def padded(size):
+        """GOOD plus one comment line, `size` bytes in all; the first 4096 bytes alone are also a valid file."""
+        return GOOD + "#" + "x" * (size - len(GOOD) - 2) + "\n"
+
+    def test_4097_bytes_is_shape(self):
+        text = self.padded(4097)
+        self.assertEqual(len(text), 4097)
+        self.assertEqual(self.cls(mk(text)), "shape")
+
+    def test_4096_bytes_loads(self):
+        text = self.padded(4096)
+        self.assertEqual(len(text), 4096)
+        self.assertEqual(load("cam1", mk(text)).port, 8000)
+
+    def test_read_error_is_a_class_not_a_traceback(self):
+        d = mk(GOOD)
+        with mock.patch.object(camfile.os, "read", side_effect=OSError(errno.EIO, "test")):
+            self.assertEqual(self.cls(d), "missing")
+
+    def test_fstat_error_is_a_class_not_a_traceback(self):
+        d = mk(GOOD)
+        with mock.patch.object(camfile.os, "fstat", side_effect=OSError(errno.EIO, "test")):
+            self.assertEqual(self.cls(d), "missing")
 
 
 if __name__ == "__main__":
