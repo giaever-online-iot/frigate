@@ -228,6 +228,52 @@ maintainer can take. Until then the constants are the plan's defaults: `KEEPALIV
 `KEEPALIVE_COUNT=4320` (not yet capped by a measured render time), `STARTTIMEOUT_S=30` and
 `TIMESTAMP_MODE="wallclock"`.
 
+### A1 gave no video: why the helper might drop it (HYPOTHESES, not results)
+
+**The fact.** GA run A1 (cam1, form extend, 63 min, from the frozen 5d46c3d) printed `end=start_timeout login_ok=1
+published=0 session_s=3780.095 first_irap_s=0.000 keepalive_sent=755 keepalive_failed=0 frames=0 decode_errors=3
+rtp_ts_step_mode=3600 pts_seen=[96, 104, 112]`. Login and keepalives held for the whole hour, packets parsed as RTP on
+three payload types, and no IDR access unit ever reached ffmpeg. The W-20 T10 captures of 13 Nov fed the same packet
+bodies (the same generated multi-socket stream and `packet.body`) through the library's own
+`_decrypt_idmx_local_packets_to_annexb_with_codec` with an identity decrypt, and decoded 250 clean frames per camera.
+So the camera sends clear H.265 that the library's path accepts. What follows is a comparison of `annexb.py` with that
+path in pyEzvizApi 2.0.0, read in a private venv. It is offline reasoning plus synthetic checks. It is not a result
+from the camera.
+
+**How each was checked.** "Proven offline" means that the same synthetic bodies went through both the library path (with
+an identity decrypt, as T10 ran it) and `annexb.Reassembler`, and that the library gave 5 NALs where annexb gave 0. The
+scratch checks were not committed. H1 is also reproduced end to end by a fake-camera variant, and it is fixed.
+
+| # | Place (annexb vs library) | Can it drop ALL video? | Fits A1's line? | Rank |
+|---|---|---|---|---|
+| H1 | **0x45 stream type.** annexb knew only 0x24 as HEVC. The library (`rtp.py` `_IDMX_RTP_STREAM_TYPES`) maps **0x24 and 0xB2** to hevc. A 0xB2 descriptor on PT 96 made PT 96 a "foreign-owned" route, and every video packet was dropped at the route check. | **Yes, proven offline**: library 5 NALs, annexb 0. The fake-camera variant `--desc-stream-type 0xb2` reproduces A1's line field for field: `end=start_timeout login_ok=1 published=0 first_irap_s=0.000 frames=0 decode_errors=3 rtp_ts_step_mode=3600`. **Fixed in 92fe4ff.** | Yes | 1 |
+| H5 | **Legacy (non-RTP) IDMX records.** These are frames with a 13-byte header whose lead byte is not 0x0D (for example 0xFA), so there is no RTP at offset 0 or 1. annexb drops them at `_rtp_of`. The library reads PT, seq, ts and marker from header bytes 1–8 (`payloads.py` `_idmx_local_frame_transport_fields`) and uses `frame[13:]` as the body. This difference is NOT in annexb's accepted-differences list. | Yes, proven offline (library 5, annexb 0), if the video arrives as such records | Yes. `pts_seen` would then come from the other, RTP-shaped records. | 2 |
+| H4 | **Aggregate bodies.** One body can hold several IDMX frames (consecutive seq) or a nested `00 10` record. annexb's `_frame_of` takes only a body whose 4-byte prefix covers exactly the rest, so it drops the whole aggregate. The library splits it (`_iter_idmx_local_frames`). This is in the accepted-differences list. | Yes, proven offline (library 5, annexb 0), if the video arrives aggregated | Partly. Step mode 3600 says some 25 fps RTP was parsed singly, but that could be a non-video PT. | 3 |
+| H3 | **Keyframe type.** The probe and the helper publish at the first **IDR** (types 19/20, C16). If the camera's keyframes are CRA (21) or BLA, annexb emits NALs and AUs but no AU is ever `is_idr`, so nothing is fed. The library does not care about this. This is a publish-rule mismatch, not a reassembler one. The fake's own x265 clip shows that encoders do this: IDR_N_LP (20) first, then CRA (21). | Yes, for the probe and the helper | Yes | 4 |
+| H2 | **PT 96 evidence promotion.** Descriptors announce HEVC on a PT X that is never seen, while video flows on an unassigned PT 96. The library promotes 96 after at least 2 HEVC-evidence frames. annexb does not (accepted difference). | Yes, proven offline (library 5, annexb 0) | Only if X is outside {96, 104, 112}. If X were 104 or 112, the library would not promote either, and T10 would have failed too. | 5 |
+| — | **Evidence gate** (`_evidence_frame`, no descriptors): video waits for a layer-0 VPS/SPS/PPS, an FU or the wrapper. | No. A 1080p IDR does not fit one packet, so an FU comes within one GOP. | No | low |
+| — | **`00 01` / `00 02` parameter carriers**: skipped, as in the library. A TRAIL_N slice (type 0, TID 1) also starts `00 01` and is skipped in both. | No (it corrupts, it does not starve) | No | low |
+| — | **Header sizes 12/13, the 0x0D shim, the length prefix**: the same as the library for single frames (a 0x0D-shim body decodes in both). | No | — | low |
+| — | **The wrapper `40 00 00 02 80 06`**: NAL at offset 12, as in the decrypt path. | No | — | low |
+| — | **The `24 00` trailer strip**: annexb strips only HEVC-direct bodies. The library also strips H.264-looking bodies, which are not HEVC video anyway. | No | — | low |
+| — | **The headerless FU quirk, `_direct_frame`, `_plausible`, the FU continuity rule**: the same logic as the library. | No | — | low |
+| — | **Progressive route map** (the library uses the final map) and the **FU/AU caps** (8 MiB / 16 MiB) | No (transient, or not reached at these bitrates) | — | low |
+
+**What the 3-minute `--diag` run tells apart** (`PROBE_DIAG=1 tests/ezviz/probe-run.sh cam1 3 extend`, one login; the
+line's `diag=` JSON is described in `tests/ezviz/probe.py`):
+- H1: `desc` maps the video PT to 178 (0xB2). With 92fe4ff the run should then publish (`frames` > 0).
+- H5: `drop.rtp` > 0 and `rtp_rej` such as `{"13:fa": n}` with a large n.
+- H4: `multi` > 0 and `drop.frame` > 0.
+- H3: `nal` contains 21, and `au.idr` is 0.
+- H2: `desc` announces 0x24 or 0xB2 on a PT that is missing from `pt`, and `drop.route` covers PT 96 (`route_pt`).
+- None of these: the `first` sample (length, header size, PT, TLV ids, 2 payload bytes for 20 bodies) is the next lead.
+
+**Suites after the diagnosis wave** (tree c0332f9, 19 Nov, a private `W23_VENV`, heavy suites one at a time under the
+suite lock): `tests/ezviz` unittest `Ran 251 tests`, `OK`, 0 skipped (240 before, plus 11 new);
+`probe-run.test.sh` 76 ok, 0 FAIL (71 before, plus 5 new); `serve-ezviz.test.sh` (S2) 53 ok, 0 FAIL; CI python
+`discover -s tests` 27 OK and `tests.test_go2rtc_config_gen` 23 OK; shellcheck at the lint-test flags is clean on
+`probe-run.sh` and its test. The other suites in the table above were not re-run: this wave does not touch them.
+
 ## Gates (Task 22 steps 4–6): pending, orchestrator
 
 The two-arch CI build logs (`ezviz-py import proof ok`), the artifact sizes (`tests/w23-size.sh`, delta ≤ 35 MB), the
