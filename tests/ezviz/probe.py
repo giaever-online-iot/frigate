@@ -1,6 +1,6 @@
 """Item A's long-session probe (W-23 T12, plan P15, controller ruling C18). TEST TOOLING: never part of the snap.
 
-    probe.py <state-dir> <camdir> <name> <minutes> <form> <count> <ffmpeg>
+    probe.py [--diag] <state-dir> <camdir> <name> <minutes> <form> <count> <ffmpeg>
 
 One login to the camera named <name>, one CameraSession on build_plan(<form>, <count>), the access units into
 `ffmpeg -v error -f hevc -i pipe:0 -f framemd5 <tmp>/hashes` (hashes only, never an image; the hash dir is deleted),
@@ -26,8 +26,21 @@ first_irap_s is the time from the start of the camera session to the first IDR A
 rtp_ts_*: per-picture RTP timestamps (packets of one picture share a timestamp), from annexb's own RTP parser.
 step = (ts - previous ts) mod 2**32; monotonic = fraction of steps in (0, 2**31); mode = the most common step;
 p99_dev = 99th percentile of |step - mode|.
+
+--diag (GA A1 diagnosis; counters only): the same ONE line, followed by ` diag=` and compact JSON (no spaces):
+  pkts      packet bodies the library handed over;          per_min  bodies per minute, the first 5 minutes only
+  pt        RTP-parsed bodies per payload type;              drop     Reassembler.drop counts (annexb: frame, rtp, param,
+  route_pt  route drops per payload type                              route, evidence, direct, short, plausible, fu_gap,
+  rtp_rej   "<header size>:<lead byte>" of frames _rtp_of             fu_cap; fu_part = an FU fragment held, no loss)
+            refused (legacy, non-RTP IDMX records);          multi    bodies with more than one IDMX sentinel (aggregates)
+  desc      the 0x45 map, payload type -> stream type;       nal      NAL types out of the reassembler
+  au        access units: n, idr, vcl = first VCL NAL type per AU
+  first     the first 20 bodies: [length, header size, payload type, TLV ids in the RTP extension, first 2 payload
+            bytes as hex] (None where that stage was not reached)
+No payload beyond 2 bytes per packet for 20 packets, no video, nothing that names a camera.
 """
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -59,7 +72,7 @@ def _own_checkout(name: str) -> None:
 
 
 def _usage():
-    sys.stderr.write("probe: usage: probe.py <state-dir> <camdir> <name> <minutes> <form> <count> <ffmpeg>\n")
+    sys.stderr.write("probe: usage: probe.py [--diag] <state-dir> <camdir> <name> <minutes> <form> <count> <ffmpeg>\n")
     os._exit(EXIT_USAGE)
 
 
@@ -67,6 +80,79 @@ class _Ended(Exception):
     def __init__(self, ev):
         super().__init__(ev)
         self.ev = ev
+
+
+class Diag:
+    """The --diag counters. packet() is called once per body with the seconds since the session start, the
+    Reassembler (after its push) and the NALs that push returned; result() gives the JSON object."""
+
+    def __init__(self, annexb):
+        self.ax = annexb
+        self.pkts, self.multi = 0, 0
+        self.per_min = [0] * 5
+        self.pt, self.drop, self.route_pt, self.rtp_rej, self.nal = Counter(), Counter(), Counter(), Counter(), Counter()
+        self.first = []
+        self.aus = annexb.AccessUnits()
+        self.au_n, self.au_idr, self.au_vcl = 0, 0, Counter()
+
+    @staticmethod
+    def _tlv_ids(ext: bytes) -> list:
+        ids, o = [], 0
+        while o + 2 <= len(ext):
+            end = o + ext[o + 1] + 2
+            if end > len(ext):
+                break
+            ids.append(ext[o])
+            o = end
+        return ids
+
+    def packet(self, t: float, body: bytes, reasm, nals: list) -> None:
+        ax = self.ax
+        self.pkts += 1
+        if 0 <= t < 300:
+            self.per_min[int(t // 60)] += 1
+        if body.count(ax.SENTINEL) > 1:
+            self.multi += 1
+        got = ax._frame_of(body)
+        hs = pt = None
+        tlvs, b2 = [], ""
+        if got is not None:
+            frame, hs = got
+            pkt = ax._rtp_of(frame)
+            if pkt is None:
+                self.rtp_rej[f"{hs}:{frame[0]:02x}"] += 1
+                b2 = frame[hs:hs + 2].hex()
+            else:
+                pt, tlvs, b2 = pkt.pt, self._tlv_ids(pkt.ext), pkt.payload[:2].hex()
+                self.pt[str(pt)] += 1
+        if reasm.drop is not None:
+            self.drop[reasm.drop] += 1
+            if reasm.drop == "route" and pt is not None:
+                self.route_pt[str(pt)] += 1
+        if len(self.first) < 20:
+            self.first.append([len(body), hs, pt, tlvs, b2])
+        for nal in nals:
+            self.nal[str(ax._nal_type(nal[4:]))] += 1
+            for au, idr in self.aus.push(nal):
+                self._au(au, idr)
+
+    def _au(self, au: bytes, idr: bool) -> None:
+        self.au_n += 1
+        self.au_idr += idr
+        for n in au.split(self.ax.START):
+            if n and self.ax._nal_type(n) < 32:
+                self.au_vcl[str(self.ax._nal_type(n))] += 1
+                break
+
+    def result(self, reasm) -> dict:
+        for au, idr in self.aus.flush():
+            self._au(au, idr)
+        last = max((i for i, v in enumerate(self.per_min) if v), default=-1)
+        return {"pkts": self.pkts, "per_min": self.per_min[:last + 1], "pt": dict(self.pt), "drop": dict(self.drop),
+                "route_pt": dict(self.route_pt), "rtp_rej": dict(self.rtp_rej), "multi": self.multi,
+                "desc": {str(k): v for k, v in sorted(reasm.descriptors().items())} if reasm else {},
+                "nal": dict(self.nal), "au": {"n": self.au_n, "idr": self.au_idr, "vcl": dict(self.au_vcl)},
+                "first": self.first}
 
 
 def ts_stats(tss: list):
@@ -80,6 +166,8 @@ def ts_stats(tss: list):
 
 
 def main(argv: list) -> int:
+    diag = bool(argv) and argv[0] == "--diag"
+    argv = argv[1:] if diag else argv
     if len(argv) != 7:
         _usage()
     state_dir, camdir, name, minutes, form, count, ffmpeg = argv
@@ -97,12 +185,12 @@ def main(argv: list) -> int:
     os.environ["SNAP_DATA"] = str(work / "data")
     os.environ["SNAP"] = str(work / "unused")
     try:
-        return _run(name, minutes_f, form, count_i, ffmpeg, work)
+        return _run(name, minutes_f, form, count_i, ffmpeg, work, diag)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _run(name, minutes, form, count, ffmpeg, work) -> int:
+def _run(name, minutes, form, count, ffmpeg, work, diag=False) -> int:
     from ezviz_source import annexb, camera, gate, ledger, output, paths, signals
     from ezviz_source import constants as C
 
@@ -156,6 +244,7 @@ def _run(name, minutes, form, count, ffmpeg, work) -> int:
         return 0
     cam, ev, code = adm.cam, "session_end", 75
     sess = reasm = None
+    dg = Diag(annexb) if diag else None
     try:
         sess = camera.CameraSession(cam, plan=plan, timeout=C.SOCKET_TIMEOUT_S, on_login_ok=on_login_ok)
         reasm, aus = annexb.Reassembler(), annexb.AccessUnits()
@@ -178,7 +267,11 @@ def _run(name, minutes, form, count, ffmpeg, work) -> int:
                 pkt = annexb._rtp_of(got[0]) if got else None
                 if pkt is not None and (not tss or tss[-1] != pkt.ts):
                     tss.append(pkt.ts)
-                for nal in reasm.push(body):
+                nals = reasm.push(body)
+                now = time.monotonic()
+                if dg is not None:
+                    dg.packet(now - t_start, body, reasm, nals)
+                for nal in nals:
                     for au, idr in aus.push(nal):
                         feed(au, idr)
                 now = time.monotonic()
@@ -242,7 +335,8 @@ def _run(name, minutes, form, count, ffmpeg, work) -> int:
           f"session_s={t_end - S['t0']:.3f} first_irap_s={S['first_irap']:.3f} render_s={S['render']:.3f} "
           f"keepalive_sent={S['ka_sent']} keepalive_failed={S['ka_failed']} frames={frames} decode_errors={derr} "
           f"rtp_ts_monotonic={mono:.4f} rtp_ts_step_mode={mode} rtp_ts_step_p99_dev={dev} "
-          f"pts_seen={sorted(reasm.pts_seen()) if reasm else []}", flush=True)
+          f"pts_seen={sorted(reasm.pts_seen()) if reasm else []}"
+          + (" diag=" + json.dumps(dg.result(reasm), separators=(",", ":")) if dg is not None else ""), flush=True)
     return code
 
 

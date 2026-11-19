@@ -15,13 +15,14 @@ cp tests/ezviz/probe-run.sh "$TREE/tests/ezviz/"; cp tests/hub/lib-cameras.sh "$
 mkdir -p "$TREE/spike/ezviz"; cp -r spike/ezviz/ezviz_source "$TREE/spike/ezviz/"; rm -rf "$TREE/spike/ezviz/ezviz_source/__pycache__"
 cat > "$TREE/tests/ezviz/probe.py" <<'PYEOF'
 import os, stat, sys, time
-out, n = os.environ["STUB_OUT"], sys.argv[3]
+A = sys.argv[2:] if sys.argv[1:2] == ["--diag"] else sys.argv[1:]     # the real probe's optional first flag
+out, n = os.environ["STUB_OUT"], A[2]
 with open(out + "/log", "a") as f:
     f.write("start " + n + "\n")
 open(out + "/pid." + n, "w").write(str(os.getpid()))
 open(out + "/argv." + n, "w").write("\n".join(sys.argv[1:]) + "\n")
 open(out + "/env." + n, "wb").write(open("/proc/self/environ", "rb").read())
-camdir = sys.argv[2]
+camdir = A[1]
 open(out + "/camdir." + n, "w").write(camdir + "\n")
 with open(out + "/files." + n, "w") as f:
     f.write("dir %o\n" % stat.S_IMODE(os.stat(camdir).st_mode))
@@ -163,5 +164,15 @@ check "status creates nothing" 0 "$([ -e "$T/t2/envd/w23-probe-state" ] && echo 
 mkdir -p "$T/plant"; printf 'import sys\nsys.stderr.write("planted datetime ran\\n")\nraise SystemExit(9)\n' > "$T/plant/datetime.py"
 ( cd "$T/plant" && run t5 -- --status )
 check "status: a datetime.py in the cwd is never imported (rc, planted lines)" "0 0" "$(rc t5) $(grep -c planted "$T/t5.err")"
+
+# GA A1 diagnosis: PROBE_DIAG=1 puts --diag first in the probe's argv; anything else (or unset) leaves the argv as it was
+run d1 PROBE_DIAG=1 -- cam1 3 extend
+check "diag: exit 0" 0 "$(rc d1)"
+check "diag: argv is --diag, state, camdir, name, minutes, form, count, ffmpeg" "--diag 3 extend 100 /bin/true" \
+  "$(sed -n '1p;5,8p' "$T/d1/out/argv.cam1" | paste -sd' ')"
+check "diag: state dir is the second argument" "$T/d1/envd/w23-probe-state" "$(sed -n 2p "$T/d1/out/argv.cam1")"
+noleak d1
+run d2 PROBE_DIAG=yes -- cam1 3 extend
+check "diag: only the value 1 turns it on" "$T/d2/envd/w23-probe-state" "$(sed -n 1p "$T/d2/out/argv.cam1")"
 
 [ "$fail" = 0 ] && echo "probe-run.test: all ok" || { echo "probe-run.test: FAILURES"; exit 1; }

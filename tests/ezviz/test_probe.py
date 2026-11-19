@@ -97,17 +97,17 @@ class ProbeCase(unittest.TestCase):
         f.chmod(0o600)
         return port
 
-    def probe_cmd(self, ffmpeg: str, minutes="0.5", name="cam1", count="300"):
-        return [_path.isolated_python(), "-I", "-B", str(PROBE), str(self.tmp / "common"), str(self.cams), name,
-                minutes, "extend", count, ffmpeg]
+    def probe_cmd(self, ffmpeg: str, minutes="0.5", name="cam1", count="300", diag=False):
+        return [_path.isolated_python(), "-I", "-B", str(PROBE), *(["--diag"] if diag else []), str(self.tmp / "common"),
+                str(self.cams), name, minutes, "extend", count, ffmpeg]
 
-    def probe(self, ffmpeg: str, minutes="0.5", name="cam1", count="300"):
+    def probe(self, ffmpeg: str, minutes="0.5", name="cam1", count="300", diag=False):
         env = _path.child_env()
         for k in ("SNAP", "SNAP_DATA", "SNAP_COMMON"):
             env.pop(k, None)                      # the probe sets its own (C18)
         (self.tmp / "tmp").mkdir(exist_ok=True)
         env["TMPDIR"] = str(self.tmp / "tmp")     # so a leftover hash dir is this run's, and visible
-        p = subprocess.run(self.probe_cmd(ffmpeg, minutes, name, count), env=env, stdin=subprocess.DEVNULL,
+        p = subprocess.run(self.probe_cmd(ffmpeg, minutes, name, count, diag), env=env, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=180)
         return p
 
@@ -210,6 +210,66 @@ class Probe(ProbeCase):
         self.assertIsNotNone(m, p.stdout + p.stderr)
         self.assertEqual((m["login_ok"], m["published"], m["frames"]), ("1", "0", "0"), p.stdout)
 
+    def diag_of(self, p):
+        """--diag: the ONE line is the default line, then ` diag=` and compact JSON (no spaces)."""
+        lines = p.stdout.splitlines()
+        self.assertEqual(len(lines), 1, p.stdout + p.stderr)
+        head, sep, js = lines[0].partition(" diag=")
+        self.assertEqual(sep, " diag=", lines[0])
+        m = LINE.match(head)
+        self.assertIsNotNone(m, head)
+        self.assertNotIn(" ", js)
+        for marker in (*CANARIES, LOOPBACK, SERIAL, CODE):
+            self.assertNotIn(marker, p.stdout + p.stderr)
+        return m, json.loads(js)
+
+    def test_diag_counters_on_the_plain_fake(self):                     # GA A1 diagnosis: the output shape
+        ff = real_ffmpeg()
+        self.start_fake(ff)
+        p = self.probe(ff, "0.2", diag=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        m, d = self.diag_of(p)
+        self.assertEqual((m["end"], m["published"]), ("stop", "1"))
+        self.assertEqual(sorted(d), ["au", "desc", "drop", "first", "multi", "nal", "per_min", "pkts", "pt", "route_pt",
+                                     "rtp_rej"])
+        self.assertGreater(d["pkts"], 200)
+        self.assertEqual(sum(d["per_min"]), d["pkts"])
+        self.assertEqual(len(d["per_min"]), 1)                          # 0.2 minutes: the first minute only
+        self.assertEqual(d["pt"], {"96": d["pkts"]})
+        self.assertEqual((d["desc"], d["route_pt"], d["rtp_rej"], d["multi"]), ({}, {}, {}, 0))
+        self.assertLessEqual(set(d["drop"]), {"frame", "rtp", "param", "route", "evidence", "direct", "short",
+                                              "plausible", "fu_gap", "fu_cap", "fu_part"})
+        self.assertGreater(d["drop"].get("fu_part", 0), 0)               # the fake fragments its IDR pictures
+        self.assertEqual(sum(v for k, v in d["drop"].items() if k != "fu_part"), 0, d["drop"])
+        self.assertTrue({"32", "33", "34", "1"} <= set(d["nal"]), d["nal"])
+        idrs = d["nal"].get("19", 0) + d["nal"].get("20", 0)               # x265's clip: IDR_N_LP (20), then CRA (21)
+        self.assertGreater(idrs, 0, d["nal"])
+        self.assertGreater(d["au"]["n"], 100)
+        self.assertIn(d["au"]["idr"], (idrs - 1, idrs))                    # the last AU may still be pending at the stop
+        self.assertEqual(d["au"]["vcl"].get("21", 0) + d["au"]["vcl"].get("20", 0) + d["au"]["vcl"].get("19", 0),
+                         d["au"]["idr"] + d["au"]["vcl"].get("21", 0))
+        self.assertEqual(sum(d["au"]["vcl"].values()), d["au"]["n"])
+        self.assertEqual(len(d["first"]), 20)
+        for e in d["first"]:
+            self.assertEqual(len(e), 5, e)
+            ln, hs, pt, tlvs, b2 = e
+            self.assertIsInstance(ln, int)
+            self.assertEqual((hs, pt, tlvs), (12, 96, []))
+            self.assertRegex(b2, r"^[0-9a-f]{4}$")
+        self.assertEqual(d["first"][0][4], "4001")                        # VPS (type 32), layer 0, TID 1
+
+    def test_diag_names_the_route_drop(self):                            # 0x1B owns PT 96: every video packet at route
+        ff = real_ffmpeg()
+        self.start_fake(ff, "--desc-stream-type", "0x1b")
+        p = self.probe(ff, "0.2", diag=True)
+        m, d = self.diag_of(p)
+        self.assertEqual((m["published"], m["frames"]), ("0", "0"))
+        self.assertEqual(d["desc"], {"96": 0x1B})
+        self.assertEqual(d["drop"], {"route": d["pkts"]})
+        self.assertEqual(d["route_pt"], {"96": d["pkts"]})
+        self.assertEqual((d["nal"], d["au"]), ({}, {"n": 0, "idr": 0, "vcl": {}}))
+        self.assertEqual(d["first"][0][3], [0x45])                        # the descriptor rides on a picture's first packet
+
     def test_non_idr_start_is_not_fed_until_the_first_idr(self):        # the IDR gate
         import fakecam
         ff = real_ffmpeg()
@@ -247,6 +307,50 @@ class Probe(ProbeCase):
         self.assertEqual(p.returncode, 0, out + err)
         self.assertEqual(evs(self.ledger()), ["attempt", "login_ok", "published", "stop"])
         self.assertEqual(list((self.tmp / "tmp").iterdir()), [])           # the Terminating path removes the hash dir too
+
+
+class DiagUnit(unittest.TestCase):
+    """The counters without a camera or ffmpeg: per-minute bins (minutes=3 gives 3), the 20-packet sample, frames
+    that never reach RTP."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("w23_probe", PROBE)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+        from ezviz_source import annexb
+        self.annexb = annexb
+
+    def run_diag(self, bodies_at):
+        d, r = self.mod.Diag(self.annexb), self.annexb.Reassembler()
+        for t, body in bodies_at:
+            d.packet(t, body, r, r.push(body))
+        return d.result(r)
+
+    def test_per_minute_bins_for_a_three_minute_run(self):
+        body = fixtures.rtp_body(104, 1, 0, b"\x01\x02\x03\x04\x05")
+        res = self.run_diag([(t, body) for t in (0.0, 59.9, 60.0, 61.0, 125.0, 179.9)])
+        self.assertEqual(res["per_min"], [2, 2, 2])
+        self.assertEqual(res["pkts"], 6)
+        self.assertEqual((res["pt"], res["drop"], res["route_pt"]), ({"104": 6}, {"route": 6}, {"104": 6}))
+
+    def test_per_minute_bins_stop_at_five(self):
+        body = fixtures.rtp_body(104, 1, 0, b"\x01\x02\x03\x04\x05")
+        res = self.run_diag([(t * 30.0, body) for t in range(20)])   # 0 .. 570 s
+        self.assertEqual(res["per_min"], [2, 2, 2, 2, 2])
+        self.assertEqual(res["pkts"], 20)
+
+    def test_first_twenty_and_non_rtp_frames(self):
+        legacy = b"\xfa" + bytes([0x80, 96, 0, 1, 0, 0, 0, 0]) + b"\x55\x66\x77\x88" + b"\x40\x01\x0c"
+        lbody = len(legacy).to_bytes(4, "little") + legacy
+        agg = fixtures.rtp_body(96, 1, 0, b"\x40\x01\x0c\x01") + fixtures.rtp_body(96, 2, 0, b"\x42\x01\x01\x01")
+        res = self.run_diag([(0.0, lbody)] * 15 + [(1.0, b"\x00\x01\x02")] * 5 + [(2.0, agg)] * 3)
+        self.assertEqual(len(res["first"]), 20)
+        self.assertEqual(res["first"][0], [len(lbody), 13, None, [], "4001"])   # header size 13, no RTP, payload 40 01
+        self.assertEqual(res["first"][19], [3, None, None, [], ""])
+        self.assertEqual(res["rtp_rej"], {"13:fa": 15})
+        self.assertEqual(res["multi"], 3)                                        # two sentinels in one body
+        self.assertEqual(res["drop"], {"rtp": 15, "frame": 8})
 
 
 class ProbeCheckout(ProbeCase):

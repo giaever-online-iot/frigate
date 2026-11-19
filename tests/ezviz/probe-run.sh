@@ -12,7 +12,8 @@ set +x +o xtrace   # first: no trace of any value, even under `bash -x` or an in
 # tests/hub/serve.test.sh does; heavy: run under `flock -w 3600 /tmp/claude-1000/chim-suites.lock`).
 # State: $M7C_ENV_DIR/w23-probe-state (0700, never deleted); probe.py puts the ledger in <state>/ezviz/state, the
 # helper's layout (C18), so the D4 budget applies across probe runs. Knobs for tests: PROBE_PYTHON, PROBE_FFMPEG,
-# PROBE_COUNT (keepalive count, default 4320), PROBE_STATUS_NOW (a fixed epoch for --status, honoured only with
+# PROBE_COUNT (keepalive count, default 4320), PROBE_DIAG=1 (probe.py --diag: the counters-only diagnostic on the same
+# line, GA A1 diagnosis), PROBE_STATUS_NOW (a fixed epoch for --status, honoured only with
 # PROBE_TEST=1). --status runs a stdlib-only python3 (PROBE_PYTHON or python3) over the state dir.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -92,9 +93,10 @@ if [ -n "${PROBE_FFMPEG:-}" ]; then FF=$PROBE_FFMPEG; else
 fi
 
 names=(cam1 cam2); [ "$WHICH" = both ] || names=("$WHICH")
+DIAG=(); [ "${PROBE_DIAG:-}" = 1 ] && DIAG=(--diag)
 rc=0
 for n in "${names[@]}"; do
-  "$PY" -I -B "$HERE/probe.py" "$STATE" "$CAMD" "$n" "$MINUTES" "$FORM" "${PROBE_COUNT:-4320}" "$FF" &
+  "$PY" -I -B "$HERE/probe.py" ${DIAG[@]+"${DIAG[@]}"} "$STATE" "$CAMD" "$n" "$MINUTES" "$FORM" "${PROBE_COUNT:-4320}" "$FF" &
   pids+=("$!")
 done
 for p in "${pids[@]}"; do wait "$p" || { r=$?; [ "$rc" != 0 ] || rc=$r; }; done
