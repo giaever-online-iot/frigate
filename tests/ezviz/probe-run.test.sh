@@ -12,11 +12,13 @@ CANARIES=("$CA" "$CB" "$NC" "$IP1" "$IP2" "$ID1" "$ID2" "192.0.2.")
 # A copy of the tree the script needs, so the stub probe.py sits where the real one does.
 TREE=$T/tree; mkdir -p "$TREE/tests/ezviz" "$TREE/tests/hub"
 cp tests/ezviz/probe-run.sh "$TREE/tests/ezviz/"; cp tests/hub/lib-cameras.sh "$TREE/tests/hub/"
+mkdir -p "$TREE/spike/ezviz"; cp -r spike/ezviz/ezviz_source "$TREE/spike/ezviz/"; rm -rf "$TREE/spike/ezviz/ezviz_source/__pycache__"
 cat > "$TREE/tests/ezviz/probe.py" <<'PYEOF'
 import os, stat, sys, time
 out, n = os.environ["STUB_OUT"], sys.argv[3]
 with open(out + "/log", "a") as f:
     f.write("start " + n + "\n")
+open(out + "/pid." + n, "w").write(str(os.getpid()))
 open(out + "/argv." + n, "w").write("\n".join(sys.argv[1:]) + "\n")
 open(out + "/env." + n, "wb").write(open("/proc/self/environ", "rb").read())
 camdir = sys.argv[2]
@@ -26,7 +28,7 @@ with open(out + "/files." + n, "w") as f:
     for name in sorted(os.listdir(camdir)):
         f.write("file %s %o\n" % (name, stat.S_IMODE(os.stat(camdir + "/" + name).st_mode)))
         f.write(open(camdir + "/" + name).read())
-time.sleep(0.5)
+time.sleep(float(os.environ.get("STUB_SLEEP", "0.5")))
 with open(out + "/log", "a") as f:
     f.write("end " + n + "\n")
 print("probe %s: end=stop login_ok=1" % n)
@@ -44,7 +46,7 @@ mkenv() {  # synthetic env dir: pairs + env 0600, a CRLF key file
 run() {  # run NAME [env...] -- args
   local n=$1; shift; local -a e=(); while [ "$1" != -- ]; do e+=("$1"); shift; done; shift
   mkdir -p "$T/$n/out" "$T/$n/tmp"; [ -d "$T/$n/envd" ] || mkenv "$T/$n/envd"
-  env TMPDIR="$T/$n/tmp" STUB_OUT="$T/$n/out" M7C_ENV_DIR="$T/$n/envd" PROBE_PYTHON=python3 PROBE_FFMPEG=/bin/true \
+  env TMPDIR="$T/$n/tmp" XDG_RUNTIME_DIR="$T/$n/tmp" PROBE_TEST=1 STUB_OUT="$T/$n/out" M7C_ENV_DIR="$T/$n/envd" PROBE_PYTHON=python3 PROBE_FFMPEG=/bin/true \
     PROBE_COUNT=100 "${e[@]}" timeout 60 bash "$PR" "$@" > "$T/$n.out" 2> "$T/$n.err"; echo $? > "$T/$n.rc"
 }
 rc() { cat "$T/$1.rc"; }
@@ -86,13 +88,23 @@ check "single: form passed" "1 repeat" "$(sed -n '4,5p' "$T/s1/out/argv.cam2" | 
 check "single: camera dir gone after a non-zero exit" 0 "$([ -e "$(cat "$T/s1/out/camdir.cam2")" ] && echo 1 || echo 0)"
 noleak s1
 
-# --- a signal ends it: the trap still cleans up ---
-mkdir -p "$T/k1/out" "$T/k1/tmp"; mkenv "$T/k1/envd"
-env TMPDIR="$T/k1/tmp" STUB_OUT="$T/k1/out" M7C_ENV_DIR="$T/k1/envd" PROBE_PYTHON=python3 PROBE_FFMPEG=/bin/true \
-  bash "$PR" cam1 1 extend > /dev/null 2>&1 &
-kp=$!; for _ in $(seq 100); do [ -s "$T/k1/out/camdir.cam1" ] && break; sleep 0.05; done
-kill -TERM "$kp"; wait "$kp" 2> /dev/null
-check "SIGTERM: camera dir gone" 0 "$([ -e "$(cat "$T/k1/out/camdir.cam1")" ] && echo 1 || echo 0)"
+# --- a signal ends the probes too (I1) and the trap still cleans up: TERM -> 143, INT -> 130, HUP -> 129 ---
+for sg in TERM:143 INT:130 HUP:129; do
+  name=${sg%%:*}; want=${sg##*:}; k=k_$name
+  mkdir -p "$T/$k/out" "$T/$k/tmp"; mkenv "$T/$k/envd"
+  env TMPDIR="$T/$k/tmp" XDG_RUNTIME_DIR="$T/$k/tmp" STUB_SLEEP=60 STUB_OUT="$T/$k/out" M7C_ENV_DIR="$T/$k/envd" \
+    PROBE_PYTHON=python3 PROBE_FFMPEG=/bin/true python3 -c 'import os, signal, sys   # an async child starts with SIGINT ignored, which bash cannot trap
+signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp("bash", ["bash"] + sys.argv[1:])' "$PR" both 1 extend > /dev/null 2>&1 &
+  kp=$!; for _ in $(seq 100); do [ -s "$T/$k/out/pid.cam2" ] && [ -s "$T/$k/out/pid.cam1" ] && break; sleep 0.05; done
+  kill -"$name" "$kp"; wait "$kp" 2> /dev/null; r=$?
+  check "$name: exit $want" "$want" "$r"
+  check "$name: both probes are gone" "0 0" "$(for n in cam1 cam2; do kill -0 "$(cat "$T/$k/out/pid.$n")" 2>/dev/null && echo -n 1 || echo -n 0; [ $n = cam1 ] && echo -n ' '; done)"
+  check "$name: camera dir gone" 0 "$([ -e "$(cat "$T/$k/out/camdir.cam1")" ] && echo 1 || echo 0)"
+  check "$name: nothing left in the temp dir" 0 "$(find "$T/$k/tmp" -mindepth 1 | wc -l)"
+done
+
+# --- the camera files go under XDG_RUNTIME_DIR when it is set (M3) ---
+check "camera dir was under XDG_RUNTIME_DIR" "$T/b1/tmp" "$(dirname "$(dirname "$(cat "$T/b1/out/camdir.cam1")")")"
 
 # --- usage: exit 2, nothing read, nothing run ---
 for a in "" "cam3 1 extend" "cam1 0 extend" "cam1 abc extend" "cam1 1 sideways" "cam1 1" "--status x" "both -1 extend"; do
@@ -114,7 +126,7 @@ mkenv "$T/t1/envd"; S=$T/t1/envd/w23-probe-state/ezviz/state; mkdir -p "$S"
 printf '{"t":1699990000.25,"ev":"attempt","dur":null}\n{"t":1699990010,"ev":"net_fail","dur":10}\n{"t":1700000100.5,"ev":"attempt","dur":null}\n{"t":1700000110,"ev":"login_ok","dur":null}\n' > "$S/cam1.ledger"
 printf '{"t":1699999000,"ev":"attempt","dur":null}\n{"t":1699999001,"ev":"auth_fail","dur":1}\n{"t":1699999001,"ev":"latch","dur":null}\n' > "$S/cam2.ledger"; : > "$S/cam2.latch"
 chmod 000 "$T/t1/envd/keys.yaml" "$T/t1/envd/env" "$T/t1/envd/cameras.pairs"        # a key file at mode 000 must not matter
-run t1 PROBE_STATUS_NOW=1700000160 PROBE_PYTHON=/nonexistent -- --status
+run t1 PROBE_STATUS_NOW=1700000160 -- --status
 check "status: exit 0 (key file at mode 000)" 0 "$(rc t1)"
 check "status: cam1 line" "probe-state cam1: last_attempt=2023-11-14T22:15:00Z age_s=60 latched=0" "$(sed -n 1p "$T/t1.out")"
 check "status: cam2 line (latched)" "probe-state cam2: last_attempt=2023-11-14T21:56:40Z age_s=1160 latched=1" "$(sed -n 2p "$T/t1.out")"
@@ -122,6 +134,15 @@ check "status: exactly two lines" 2 "$(wc -l < "$T/t1.out")"
 check "status: no probe, no camera dir" 0 "$(ls "$T"/t1/out/argv.* 2>/dev/null | wc -l)"
 check "status: nothing in TMPDIR" 0 "$(find "$T/t1/tmp" -mindepth 1 | wc -l)"
 noleak t1
+run t3 M7C_ENV_DIR="$T/t1/envd" PROBE_STATUS_NOW=1700000160 PROBE_TEST= -- --status
+check "status: PROBE_STATUS_NOW is ignored without PROBE_TEST=1" 1 "$([ "$(sed -n 1p "$T/t3.out" | sed 's/.*age_s=\([0-9]*\).*/\1/')" -gt 1000000 ] && echo 1 || echo 0)"
+chmod 600 "$T/t1/envd/keys.yaml" "$T/t1/envd/env" "$T/t1/envd/cameras.pairs"
+# I2b: three P2 ends and no latch file are a latch for the gate, so the status says so
+S4=$T/t4/envd/w23-probe-state/ezviz/state; mkdir -p "$S4"; mkenv "$T/t4/envd"
+for t in 1700000000 1700000100 1700000200; do printf '{"t":%s,"ev":"attempt","dur":null}\n{"t":%s,"ev":"login_ok","dur":null}\n{"t":%s,"ev":"start_timeout","dur":5}\n' "$t" "$((t + 1))" "$((t + 5))"; done > "$S4/cam1.ledger"
+run t4 PROBE_STATUS_NOW=1700000300 -- --status
+check "status: 3 P2 ends, no latch file: latched=1" "probe-state cam1: last_attempt=2023-11-14T22:16:40Z age_s=100 latched=1" "$(sed -n 1p "$T/t4.out")"
+check "status: no latch file was created" 0 "$([ -e "$S4/cam1.latch" ] && echo 1 || echo 0)"
 run t2 -- --status
 check "status with no state: exit 0" 0 "$(rc t2)"
 check "status with no state: none lines" "probe-state cam1: last_attempt=none age_s=- latched=0,probe-state cam2: last_attempt=none age_s=- latched=0" "$(paste -sd, "$T/t2.out")"

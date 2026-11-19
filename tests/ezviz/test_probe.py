@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 import fixtures
+from ezviz_source import policy
 from fixtures import CANARIES, CODE, LOOPBACK, SERIAL, evs, rec
 
 HERE = Path(__file__).resolve().parent
@@ -76,8 +77,8 @@ class ProbeCase(unittest.TestCase):
             except ProcessLookupError:
                 pass
 
-    def start_fake(self, ffmpeg: str, *args) -> int:
-        clip = fixtures.make_es(ffmpeg, self.tmp / "clip.h265", 4)
+    def start_fake(self, ffmpeg: str, *args, clip=None) -> int:
+        clip = clip or fixtures.make_es(ffmpeg, self.tmp / "clip.h265", 4)
         self.stats = self.tmp / "fake.stats.json"
         port_file = self.tmp / "fake.port"
         self.fake = subprocess.Popen(
@@ -94,12 +95,17 @@ class ProbeCase(unittest.TestCase):
         f.chmod(0o600)
         return port
 
-    def probe(self, ffmpeg: str, minutes="0.5", name="cam1"):
+    def probe_cmd(self, ffmpeg: str, minutes="0.5", name="cam1", count="300"):
+        return [sys.executable, "-I", "-B", str(PROBE), str(self.tmp / "common"), str(self.cams), name,
+                minutes, "extend", count, ffmpeg]
+
+    def probe(self, ffmpeg: str, minutes="0.5", name="cam1", count="300"):
         env = _path.child_env()
         for k in ("SNAP", "SNAP_DATA", "SNAP_COMMON"):
             env.pop(k, None)                      # the probe sets its own (C18)
-        p = subprocess.run([sys.executable, "-I", "-B", str(PROBE), str(self.tmp / "common"), str(self.cams), name,
-                            minutes, "extend", "300", ffmpeg], env=env, stdin=subprocess.DEVNULL,
+        (self.tmp / "tmp").mkdir(exist_ok=True)
+        env["TMPDIR"] = str(self.tmp / "tmp")     # so a leftover hash dir is this run's, and visible
+        p = subprocess.run(self.probe_cmd(ffmpeg, minutes, name, count), env=env, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=180)
         return p
 
@@ -124,13 +130,14 @@ class Probe(ProbeCase):
         self.assertEqual(m["decode_errors"], "0")
         self.assertEqual(m["pts"], "[96]")
         self.assertGreaterEqual(float(m["session_s"]), 29.0)
-        self.assertEqual(evs(self.ledger()), ["attempt", "login_ok", "stop"])       # D4 applies across probe runs
+        self.assertLess(float(m["session_s"]), 0.5 * 60 + 15)                         # the deadline is the deadline
+        self.assertEqual(evs(self.ledger()), ["attempt", "login_ok", "published", "stop"])   # D22; D4 applies across runs
         self.assertEqual(self.fake.poll(), None)
         for where, data in (("stdout", p.stdout), ("stderr", p.stderr),
                             ("ledger", (self.tmp / "common/ezviz/state/cam1.ledger").read_text())):
             for marker in (*CANARIES, LOOPBACK, SERIAL, CODE):
                 self.assertNotIn(marker, data, f"{marker} in {where}")
-        self.assertEqual(list(Path(tempfile.gettempdir()).glob("w23-probe-hash*")), [])    # the hash file is gone
+        self.assertEqual(list((self.tmp / "tmp").iterdir()), [])    # the hash file is gone
 
     def test_probe_respects_budget(self):
         ff = real_ffmpeg()
@@ -156,6 +163,69 @@ class Probe(ProbeCase):
         self.assertEqual(m["mode"], "3600")
         self.assertEqual(float(m["mono"]), 1.0)
         self.assertEqual(m["dev"], "0")
+
+    def test_three_clean_probe_runs_do_not_latch(self):                 # I2a: published makes a clean stop a P3 end
+        ff = real_ffmpeg()
+        self.start_fake(ff)
+        for _ in range(3):
+            p = self.probe(ff, "0.2")
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("end=stop", p.stdout)
+            self.assertIn("published=1", p.stdout)
+            fixtures.shift_ledger(self.tmp, 120)                           # past the 60 s spacing
+        recs = self.ledger()
+        self.assertEqual(evs(recs), ["attempt", "login_ok", "published", "stop"] * 3)
+        d = policy.decide(recs, time.time(), latch_file=False)
+        self.assertNotEqual(d.cls, "latched")                              # three P2 ends would latch (row 3)
+        self.assertFalse(d.latch_now)
+
+    def test_pre_admit_checks_cost_no_attempt(self):                     # M1
+        ff = real_ffmpeg()
+        self.start_fake(ff)
+        p = self.probe(ff, count="1")                                      # build_plan needs >= 6
+        self.assertEqual(p.returncode, 64, p.stdout + p.stderr)
+        p = self.probe(str(self.tmp / "no-such-ffmpeg"))
+        self.assertEqual(p.returncode, 78, p.stdout + p.stderr)
+        self.assertFalse((self.tmp / "common/ezviz/state/cam1.ledger").exists())
+        self.assertEqual(json.loads(self.stats.read_text())["connects"], 0)
+
+    def test_non_idr_start_is_not_fed_until_the_first_idr(self):        # the IDR gate
+        import fakecam
+        ff = real_ffmpeg()
+        full = fixtures.make_es(ff, self.tmp / "full.h265", 4)
+        aus = fakecam.access_units(fakecam.split_nals(full.read_bytes()))
+        lead = 12                                                          # 12 P pictures (0.48 s at 25 fps) first
+        clip = [n for au in aus[1:1 + lead] + aus[:50] for n in au]
+        (self.tmp / "lead.h265").write_bytes(b"".join(b"\x00\x00\x00\x01" + n for n in clip))
+        self.start_fake(ff, clip=self.tmp / "lead.h265")
+        p = self.probe(ff, "0.2")
+        m = LINE.match(p.stdout.strip())
+        self.assertIsNotNone(m, p.stdout + p.stderr)
+        self.assertGreaterEqual(float(m["first_irap_s"]), 0.4, p.stdout)  # not at the first picture
+        self.assertEqual(m["published"], "1")
+
+    def test_sigterm_after_published_is_a_stop(self):                    # signals.install(): a SIGTERM is E13, rc 0
+        ff = real_ffmpeg()
+        self.start_fake(ff)
+        env = _path.child_env()
+        for k in ("SNAP", "SNAP_DATA", "SNAP_COMMON"):
+            env.pop(k, None)
+        (self.tmp / "tmp").mkdir(exist_ok=True)
+        env["TMPDIR"] = str(self.tmp / "tmp")
+        p = subprocess.Popen(self.probe_cmd(ff, "5"), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        end = time.monotonic() + 60
+        while "published" not in evs(self.ledger()):
+            self.assertLess(time.monotonic(), end, "never published")
+            if p.poll() is not None:
+                self.fail("probe ended before it published: " + p.communicate()[0])
+            time.sleep(0.1)
+        p.terminate()
+        out, err = p.communicate(timeout=20)
+        self.assertEqual(p.returncode, 0, out + err)
+        self.assertEqual(evs(self.ledger()), ["attempt", "login_ok", "published", "stop"])
+        self.assertEqual(list((self.tmp / "tmp").iterdir()), [])           # the Terminating path removes the hash dir too
 
 
 if __name__ == "__main__":
