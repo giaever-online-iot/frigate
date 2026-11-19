@@ -156,6 +156,26 @@ class TestBudget(unittest.TestCase):
         recs = P2(0, "start_timeout") + P1(7200) + P2(14400, "start_timeout") + P2(21600, "start_timeout")
         self.assertEqual(at(recs, 30000).cls, "latched")
 
+    def test_P1_net_fail_never_adds_to_latch_row(self):                # K2
+        recs = P1(0) + P1(7200) + P1(14400)
+        self.assertEqual(at(recs, 30000).cls, "ok")
+
+    def test_spacing_counts_from_the_latest_attempt(self):             # D4 >= 60 s
+        recs = P3(0, "stop", 20) + P3(100, "stop", 115)
+        d = at(recs, 120)
+        self.assertEqual((d.allow, d.next_allowed), (False, T0 + 160))
+
+    def test_unlatch_resets_ladder_when_cap_does_not_bind(self):       # P6
+        recs = P2(0, "start_timeout") + P2(1000, "start_timeout") + P2(2000, "start_timeout", end_after=1500)
+        d = at(recs + [R(3500, "latch"), R(3600, "unlatch")], 3700)   # k=3 would wait until 4400; cap free
+        self.assertTrue(d.allow)
+
+    def test_relatch_after_unlatch_writes_latch_again(self):           # P9
+        recs = [R(0, "attempt"), R(1, "auth_fail"), R(1, "latch"), R(4000, "unlatch"),
+                R(4100, "attempt"), R(4101, "auth_fail")]
+        d = at(recs, 4200)
+        self.assertEqual((d.cls, d.latch_now), ("latched", True))
+
 
 if __name__ == "__main__":
     unittest.main()
