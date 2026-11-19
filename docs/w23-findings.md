@@ -150,6 +150,35 @@ Also changed in the workflow:
 **First green CI run:** the orchestrator records its `Ran N tests … (skipped=M)` line here after the push. The local
 equivalent is in "Suite counts" below.
 
+## Known pre-existing flake: `tests/hub/serve.test.sh` (clip mode)
+
+The whole-branch review saw `tests/hub/serve.test.sh` fail once in two runs on 5d46c3d: cam1 had 212 frames and 78
+decode errors. Fix wave 1 (N8) ran it on 19 Nov, one run at a time under the suite lock. Each run alternated between
+the branch head and a scratch copy of origin/main 9000f91 (`git archive`), so both sides saw the same machine state.
+
+| Tree | Runs | Failed |
+|---|---|---|
+| origin/main 9000f91, unchanged | 32 | 3 |
+| branch head | 24 | 6 |
+| main with the branch's generator | 8 | 3 |
+| main with the branch's generator, D20 `base_path` only | 8 | 3 |
+| main with the branch's generator, D20 `local_auth` only | 8 | 4 |
+| main with the branch's generator minus both D20 keys (output byte-identical to main's) | 8 | 2 |
+
+- **Signature:** the same in every failure, on both sides. One camera stream (cam1 or cam2; once both) decodes too
+  few frames in 10 s and logs 74–88 decoder error lines, while the other streams are clean. This is the mid-GOP join
+  signature of S2-1, seen here in clip mode.
+- **What the test hands go2rtc:** this test never runs `go2rtc-run`, so the re-arm loop is not involved. It calls the
+  generator in its 4-argument form. In that form W-23 changes only the D20 keys `api.local_auth: false` and
+  `api.base_path: ''`.
+- **Conclusion:** the flake is pre-existing. Unchanged main failed 3 of 32 runs with the same signature, and so did
+  the control whose output is byte-identical to main's. Failures clustered in time: all 21 failures came in rounds 1–4
+  (main's three in round 4), and the last balanced round (main and head alternating, 10 runs each) failed 0 of 20.
+- **What the numbers do not settle:** in these runs the trees that write the D20 keys failed more often (16 of 48)
+  than the trees whose output equals main's (5 of 40). The clustering and the unbalanced ordering of the early rounds
+  make that comparison weak, and no mechanism was found. Both keys are default values that the re-arm needs (D20).
+- **What was done:** main's test was not changed. The flake is recorded here, with these numbers, for a follow-up.
+
 ## Suite counts
 
 Each count below is from a run on 19 Nov, under the suite lock, with `W23_VENV` naming a venv that
