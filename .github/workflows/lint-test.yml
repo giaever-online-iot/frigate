@@ -38,7 +38,8 @@ jobs:
           # list until it does.
           # M9: tests/*.sh covers spike-smoke.sh plus the rehearsal, the hermetic
           # *.test.sh suites and the libraries they source, with the same flags.
-          targets=(spike/bin/* snap/hooks/* tests/*.sh)
+          # W-23 (C24): the hub tools and the ezviz test scripts get the same flags; all pass them.
+          targets=(spike/bin/* snap/hooks/* tests/*.sh tests/hub/*.sh tests/ezviz/*.sh)
           # FINDING (task-6, CI adaptation, recorded in task-6-report.md): these two
           # codes pre-date this task and are owned by other milestones' scripts, not
           # by .github/ — Task 6 must not edit outside .github/, so they are excluded
@@ -68,9 +69,18 @@ jobs:
       - name: Run tests/*.test.sh and tests/test_*.py
         run: |
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+          # W-23: tests/ezviz/venv.sh (used by make-config.test.sh and the helper suite) needs python3.12's venv.
+          python3.12 -c 'import ensurepip' 2>/dev/null || sudo apt-get install -y python3.12-venv
           for t in tests/*.test.sh tests/*/*.test.sh; do
             echo "== $t"
             bash "$t" || exit 1
           done
           python3 -m unittest discover -s tests -p 'test_*.py' -v
           python3 -m unittest discover -s tests/arm64-vm -p 'test_*.py' -v
+
+      # W-23: the helper suite on its own interpreter, from the hash lock (tests/ezviz is not a package, so the
+      # discover above does not reach it). serve-ezviz.test.sh SKIPs above: no local snap file in CI.
+      - name: ezviz helper tests (venv from the hash lock)
+        run: |
+          PY=$(bash tests/ezviz/venv.sh)
+          "$PY" -m unittest discover -s tests/ezviz -p 'test_*.py' -v

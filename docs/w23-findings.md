@@ -97,3 +97,58 @@ they (re)connect to a preloaded camera stream. Expect those lines at S5 and in t
 - the arm64 binaries;
 - the real camera's login and stream, beyond what the fake models (spec §10 item 21);
 - Frigate itself as the consumer: the consumers are ffmpeg RTSP clients.
+
+## CI (Task 22)
+
+`.github/workflows/lint-test.yml` runs the W-23 work in two places:
+- the existing `tests/*.test.sh tests/*/*.test.sh` loop, which now also picks up `tests/ezviz/*.test.sh` and the new
+  `tests/hub/*.test.sh`, plus `tests/go2rtc-run.test.sh`, `tests/disk-guard.test.sh`, `tests/configure-ezviz.test.sh`
+  and `tests/w23-packaging.test.sh`;
+- a new step, "ezviz helper tests (venv from the hash lock)", which runs
+  `python -m unittest discover -s tests/ezviz` on the venv that `tests/ezviz/venv.sh` builds from
+  `spike/ezviz/requirements.txt`. The repo-wide `discover -s tests` does not reach `tests/ezviz`, which is not a package.
+
+Also changed in the workflow:
+- the shellcheck step's targets now include `tests/hub/*.sh` and `tests/ezviz/*.sh`, with the same flags. All 70 files
+  passed locally on 19 Nov.
+- the test step installs `python3.12-venv` if `ensurepip` is missing, because `make-config.test.sh` and the helper suite
+  both build the hash-locked venv.
+
+**What SKIPs in CI, and why:**
+- `tests/ezviz/serve-ezviz.test.sh` (S2): there is no local amd64 snap file on the runner, so there is no go2rtc or
+  ffmpeg 8.0. It prints a `SKIP` line and exits 0. S2's evidence is the laptop run above.
+- `test_probe.py`'s fake-camera runs need a real ffmpeg (`W23_REAL_FFMPEG`, the snap file or `ffmpeg` on PATH). They
+  SKIP with a reason when none is found.
+- `configure-ezviz.test.sh` SKIPs only if `python3 -m venv` is unavailable.
+
+**First green CI run:** the orchestrator records its `Ran N tests … (skipped=M)` line here after the push. The local
+equivalent on 19 Nov was `tests/ezviz`: 224 OK.
+
+## §10 row 25: go2rtc and `Pdeathsig` (research, read and not run)
+
+`PR_SET_PDEATHSIG` fires when the parent THREAD exits. A Go program can therefore kill its children early if a
+goroutine that locked its OS thread exits while holding it. Research on 19 Nov:
+- go2rtc tag v1.9.14 (the source tarball) and all 43 modules in its `go.mod`, at the pinned versions from
+  proxy.golang.org, were grepped for `LockOSThread`;
+- go2rtc itself has 0 hits;
+- the modules have hits only in a symbol table (`x/tools` `internal/stdlib/manifest.go`), in test files (`x/sys`
+  `unix/syscall_linux_test.go`) and in Windows-only code (`x/sys/windows`);
+- in the Go stdlib at go1.25.6, the only Linux use is `runtime/signal_unix.go` `ensureSigM`, a goroutine that never
+  exits;
+- go2rtc builds with `CGO_ENABLED=0` (`scripts/build.sh` L28).
+
+So no goroutine exits holding a locked thread, and `Pdeathsig` cannot fire early. The Go version of the release binary
+is inferred from `build.yml`, because the binaries are UPX-packed. S2 checks 2 and 4 show that the `Pdeathsig` SIGTERM
+arrives when go2rtc exits; they do not prove it never arrives earlier.
+
+## A (item A, the long-session probe): pending gate GA
+
+Task 21 has not run. It needs the probe lines from GA (runs A1/A1b, A2, A3), which only the orchestrator and the
+maintainer can take. Until then the constants are the plan's defaults: `KEEPALIVE_FORM="extend"`,
+`KEEPALIVE_COUNT=4320` (not yet capped by a measured render time), `STARTTIMEOUT_S=30` and
+`TIMESTAMP_MODE="wallclock"`.
+
+## Gates (Task 22 steps 4–6): pending, orchestrator
+
+The two-arch CI build logs (`ezviz-py import proof ok`), the artifact sizes (`tests/w23-size.sh`, delta ≤ 35 MB), the
+`unsquashfs -l` checks and the amd64 gate VM and arm64 TCG VM proofs are recorded here by the orchestrator.
