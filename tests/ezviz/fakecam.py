@@ -222,15 +222,16 @@ class Server:
                 continue
             except OSError:
                 return
+            # C2: look at the ledger right after accept() returns, before the connection thread exists or a byte is
+            # read, so an attempt written after the client connected cannot count as present at accept
+            seen = attempt_on_disk(self.ledger_at_accept) if self.ledger_at_accept else None
             sock.settimeout(None)
             with self._lock:
                 self._socks.add(sock)
-            self._spawn(self._conn, sock)
+            self._spawn(self._conn, sock, seen)
 
-    def _conn(self, sock) -> None:
+    def _conn(self, sock, seen) -> None:
         try:
-            # C2: look at the ledger before reading a byte from this connection
-            seen = attempt_on_disk(self.ledger_at_accept) if self.ledger_at_accept else None
             self._event("connects", attempt=seen)
             fields, body = read_frame(sock)
             if fields[0] == LOGIN_FAMILY:

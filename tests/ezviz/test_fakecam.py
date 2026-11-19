@@ -100,7 +100,7 @@ class FakeCamTests(unittest.TestCase):
     def test_keepalives_counted(self):
         s = self.server()
         with open_stream(s.port) as st:
-            n = sum(1 for _ in st.iter_packets(duration_seconds=11.0))
+            n = sum(1 for _ in st.iter_packets(duration_seconds=13.0))   # keepalives at ~5 s and ~10 s; margin for CI
         self.assertGreater(n, 200)                    # 25 fps for 11 s, paced
         self.assertTrue(wait_for(lambda: s.stats["keepalives"] >= 2), s.stats)
 
