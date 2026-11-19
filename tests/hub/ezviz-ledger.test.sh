@@ -51,7 +51,7 @@ check "C7 shape: the records before it are kept" "2 login_ok" "$(recs tn cam1)"
 PRE="{ L 0 attempt; L 2 login_ok; L 5 session_end; L 100 attempt; L 102 login_ok; L 105 session_end; L 400 attempt; L 402 login_ok; L 405 session_end; } > $S/cam1.ledger" run n6 --
 check "R2-N6: three P2 ends and no latch file: exit 1" 1 "$(rc n6)"
 check "R2-N6: latched=1 (policy.decide, T-END latch row)" 1 "$(O n6 | grep -c '^ledger cam1: .*latched=1 ')"
-check "R2-N6: the fixture has no latch file" 1 "$([ -e "$T/n6/st/common/ezviz/state/cam1.latch" ]; echo $?)"
+check "R2-N6: the fixture has no latch file" 1 "$([ -e "$T/n6/st/common/ezviz/state/cam1.latch" ] && echo 0 || echo 1)"
 PRE="{ L 0 attempt; echo '{\"t\":5}'; L 9 stop; } > $S/cam1.ledger; { L 0 attempt; L 2 login_ok; } > $S/cam2.ledger" run d2 --
 check "mid-file bad record: cam1 damaged, exit 1" "1 ledger cam1: damaged" "$(rc d2) $(O d2 | head -n 1)"
 check "a damaged cam1 does not hide cam2" 1 "$(O d2 | grep -c '^ledger cam2: attempts=1 login_ok=1 ')"
