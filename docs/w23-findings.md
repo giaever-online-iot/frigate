@@ -122,7 +122,27 @@ Also changed in the workflow:
 - `configure-ezviz.test.sh` SKIPs only if `python3 -m venv` is unavailable.
 
 **First green CI run:** the orchestrator records its `Ran N tests … (skipped=M)` line here after the push. The local
-equivalent on 19 Nov was `tests/ezviz`: 224 OK.
+equivalent is in "Suite counts" below.
+
+## Suite counts
+
+Each count below is from a run on 19 Nov, under the suite lock, with `W23_VENV` naming a venv that
+`tests/ezviz/venv.sh` built from the hash lock. "At" names the fix wave 1 commit whose tree was run (the commit that
+last changed that row).
+
+| Suite | Result | At |
+|---|---|---|
+| `"$PY" -m unittest discover -s tests/ezviz -p 'test_*.py'` | `Ran 238 tests in 441.039s`, `OK`, 0 skipped (the local amd64 snap file was present, so `test_probe` ran) | S5 |
+| `bash tests/hub/make-config.test.sh` | 233 ok, 0 FAIL | S5 |
+| `bash tests/hub/watch.test.sh` | 98 ok, 0 FAIL | S5 |
+| `bash tests/hub/observe.test.sh` | 101 ok, 0 FAIL | S5 |
+| `bash tests/w23-packaging.test.sh` | 24 ok, 0 FAIL | S5 |
+| `bash tests/ezviz/probe-run.test.sh` | 71 ok, 0 FAIL (stub python and ffmpeg) | S5 |
+| `python3 -m unittest tests.test_go2rtc_config_gen` (system python3) | `Ran 21 tests`, `OK` | S5 |
+
+**A stale baseline.** Earlier reports and briefs give `make-config.test.sh` as 157 ok. That number is stale; the
+real count today is 233 ok (the row above). `serve-ezviz.test.sh` (S2) was not rerun for this table; its counts are
+the S2 section's.
 
 ## §10 row 25: go2rtc and `Pdeathsig` (research, read and not run)
 

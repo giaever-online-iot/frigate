@@ -31,6 +31,19 @@ class TestRuntime(unittest.TestCase):
     def test_exit_codes(self):
         self.assertEqual((C.EXIT_STOP, C.EXIT_TEMP, C.EXIT_AUTH, C.EXIT_CONFIG, C.EXIT_USAGE), (0, 75, 77, 78, 64))
 
+    def test_ga_constants_are_marked_provisional(self):
+        """Fix wave 1, S5: the four GA constants are the plan's defaults until gate GA and Task 21; the header and
+        each assignment line say so, so a build before Task 21 cannot be read as final."""
+        src = (_path.PKG / "ezviz_source/constants.py").read_text()
+        header = src.split('"""')[1]
+        ga = ("KEEPALIVE_FORM", "KEEPALIVE_COUNT", "STARTTIMEOUT_S", "TIMESTAMP_MODE")
+        for word in ("PROVISIONAL", "gate GA", "Task 21") + ga:
+            self.assertIn(word, header)
+        for name in ga:
+            line = [ln for ln in src.splitlines() if ln.startswith(name + " = ")]
+            self.assertEqual(len(line), 1, name)
+            self.assertIn("PROVISIONAL", line[0], name)
+
     def test_paths_from_env(self):
         with mock.patch.dict(os.environ, {"SNAP": "/s", "SNAP_DATA": "/d", "SNAP_COMMON": "/c"}):
             self.assertEqual(str(paths.camera_dir()), "/d/ezviz/cameras")
