@@ -98,6 +98,32 @@ they (re)connect to a preloaded camera stream. Expect those lines at S5 and in t
 - the real camera's login and stream, beyond what the fake models (spec §10 item 21);
 - Frigate itself as the consumer: the consumers are ffmpeg RTSP clients.
 
+## Part B notes (the hub steps)
+
+These come from the plan; nothing here was run on the hub.
+
+**A clock behind at boot: a known open risk (plan, "What this plan cannot verify offline", N9).** The hub has no RTC
+battery, so after a cold boot its wall clock can be behind until NTP syncs. The helper's budget (the 3-per-3600 s cap
+and the 60 s spacing) counts `attempt` records by their own `t` stamps. The plan says: "A wall clock that is
+**behind** at boot (no RTC battery after a power loss, before NTP syncs): attempts are stamped in the past and leave
+the window early once NTP corrects the clock. No test covers it. The cap would then allow up to 3 more logins inside
+the real hour once. Follow-up for the maintainer *(N9)*." A clock that is **ahead** is covered: a future-dated record
+counts inside the window and the spacing (Task 4 `test_future_dated_attempt_counts_in_window_and_spacing`).
+- **What to look for at S11** (the cold boot): a jump in the ledger `t` values at boot. That is, records written
+  after the boot that are dated earlier than the last record before the reboot, or a forward jump between two
+  consecutive records soon after the boot (the moment NTP set the clock). Read the records themselves, for example
+  with P8's `X exec 'tail -n 2 /var/snap/frigate/common/ezviz/state/<name>.ledger; date +%s'`, and compare the
+  helpers' logins at boot with the real hour.
+- **Mitigation chosen by the plan:** none, a follow-up for the maintainer.
+
+**`ledger_damaged` (plan P8).** A damaged ledger line that is not the last one refuses with class `ledger_damaged`
+(exit 75, no camera contact) until an operator moves the file away (`sudo mv <ledger> <ledger>.damaged`; the next
+decision starts empty, and the latch file still applies). `ezviz-check` prints `ledger_damaged` and `ezviz-ledger.sh`
+prints `ledger <name>: damaged`, so the state is visible.
+- **The operator rule:** move a damaged ledger only when its newest record is 3600 s or more old. Check first with
+  `X exec 'tail -n 2 /var/snap/frigate/common/ezviz/state/<name>.ledger; date +%s'`. Otherwise the move forgets the
+  last hour's attempts (up to 3 more logins that hour) and the latch row.
+
 ## CI (Task 22)
 
 `.github/workflows/lint-test.yml` runs the W-23 work in two places:
