@@ -4,9 +4,10 @@
 #   go2rtc-config-gen.py -> the generated exec line `ezviz-source <name> {output}#killsignal=15#killtimeout=5` with
 #   its preload -> the real ezviz-source/ezviz-rearm wrappers on the W-23 venv -> tests/ezviz/fakecam.py, a fake
 #   camera on 127.0.0.1 serving a decodable 1080p25 H.265 clip (fixtures.make_es).
-# Checks 1-10 are the S2 clauses (F1, F2, N7, G1, E13, H1a, H1b, H2). 6m and 9m are the named mutations, applied
+# Checks 1-11 are the S2 clauses (F1, F2, N7, G1, E13, H1a, H1b, H2). 6m, 9m and 11m are the mutations, applied
 # with sed to this test's PRIVATE copies inside the fake $SNAP (C15: no switch in shipped code); each asserts that
-# the real check's own verdict is FAIL under the mutation, and that the mutation's effect is seen.
+# the real check's own verdict is FAIL under the mutation, and that the mutation's effect is seen. The last check
+# asserts the number of checks that ran, so a scenario that aborts early fails the run.
 # Test-only deviations, all inside the fake $SNAP or config.yml:
 #   - go2rtc-run is a private copy with ONE added line that moves the API from 127.0.0.1:1984 to a free loopback
 #     port after generation (the generator forces 1984, which may be taken here); the test asserts the diff;
@@ -169,7 +170,8 @@ listed() { [ "$(api "$1" | lq has - "$2")" = 1 ]; }
 has_ev() { [ "$(lq count "$(ledger "$1" "$2")" "$3" "${4:--inf}")" -ge 1 ]; }
 
 # mkenv ID MUTATION: a fake $SNAP, $SNAP_DATA and $SNAP_COMMON with private copies of the snap's scripts.
-#   MUTATION none | no_rearm (6m: go2rtc-run without the ezviz-rearm line) | no_api_override (9m: generator step 7 cut)
+#   MUTATION none | no_rearm (6m: go2rtc-run without the ezviz-rearm line) | no_api_override (9m: generator step 7
+#   cut) | no_killsignal (11m: the generator's exec line without #killsignal=15#killtimeout=5)
 mkenv() {
   local E=$T/$1 mut=$2 s
   s=$E/snap
@@ -188,6 +190,7 @@ mkenv() {
   if [ "$mut" = no_api_override ]; then
     sed -i '/^    # --- 7\. force the API settings/,/^    # --- 5\. write/{/^    # --- 5\. write/!d}' "$s/bin/go2rtc-config-gen.py"
   fi
+  if [ "$mut" = no_killsignal ]; then sed -i 's/ {output}#killsignal=15#killtimeout=5" % (/ {output}" % (/' "$s/bin/go2rtc-config-gen.py"; fi
   chmod 755 "$s/bin/go2rtc-run"
   printf 'go2rtc:\n  rtsp:\n    listen: 127.0.0.1:%s\n  webrtc:\n    listen: 127.0.0.1:%s\n    candidates: []\n  srtp:\n    listen: ""\n' \
     "$(cat "$E/pr")" "$(cat "$E/pw")" > "$E/data/config/config.yml"
@@ -202,7 +205,11 @@ mkenv() {
   hunks=$(diff spike/bin/go2rtc-config-gen.py "$s/bin/go2rtc-config-gen.py" | grep -c '^[0-9]')
   add=$(diff spike/bin/go2rtc-config-gen.py "$s/bin/go2rtc-config-gen.py" | grep -c '^>')
   del=$(diff spike/bin/go2rtc-config-gen.py "$s/bin/go2rtc-config-gen.py" | grep '^<' | head -1 | sed 's/^< //')
-  if [ "$mut" = no_api_override ]; then
+  if [ "$mut" = no_killsignal ]; then
+    local addl; addl=$(diff spike/bin/go2rtc-config-gen.py "$s/bin/go2rtc-config-gen.py" | grep '^>' | sed 's/^> //')
+    check "$1: private generator = the real one with only #killsignal=15#killtimeout=5 cut from the exec line (11m)" \
+      "1 1 1 1" "$hunks $add $(case "$del" in *'{output}#killsignal=15#killtimeout=5" % ('*) echo 1;; *) echo 0;; esac) $(case "$addl" in *'{output}" % ('*) echo 1;; *) echo 0;; esac)"
+  elif [ "$mut" = no_api_override ]; then
     check "$1: private generator = the real one minus step 7 (D20), one deleted hunk, nothing added (9m) [$(diff spike/bin/go2rtc-config-gen.py "$s/bin/go2rtc-config-gen.py" | grep -c '^<') lines cut]" \
       "1 0 1" "$hunks $add $(case "$del" in *"# --- 7. force the API settings"*) echo 1;; *) echo 0;; esac)"
   else
@@ -210,6 +217,7 @@ mkenv() {
   fi
   [ "$mut" != none ] && diff spike/bin/go2rtc-run "$s/bin/go2rtc-run" | sed 's/^/  diff go2rtc-run: /'
   [ "$mut" = no_api_override ] && diff spike/bin/go2rtc-config-gen.py "$s/bin/go2rtc-config-gen.py" | head -3 | sed 's/^/  diff generator: /'
+  [ "$mut" = no_killsignal ] && diff spike/bin/go2rtc-config-gen.py "$s/bin/go2rtc-config-gen.py" | sed 's/^/  diff generator: /'
   [ "$1" = A ] && diff spike/bin/go2rtc-run "$s/bin/go2rtc-run" | sed 's/^/  diff go2rtc-run: /'
   return 0
 }
@@ -244,15 +252,18 @@ consume() {
 }
 # rate ENV CAM PREFIX: checks 1 and 10. go2rtc has no GOP cache, so a consumer that joins the PRELOADED stream starts
 # mid-GOP and its decoder rejects the frames before the first IDR ("Could not find ref with POC"); that is the join,
-# not the stream. So this consumer decodes 13 s with showinfo and prints "frames10 errors_after_sync errors_before":
-# the frames whose pts lie in the 10 s after the first decoded frame, and the decoder error lines after/before it.
+# not the stream. So this consumer decodes 13 s with showinfo and prints "frames10 errors_after_sync errors_before
+# lead_in key0": the frames whose pts lie in the 10 s after the first decoded frame, the decoder error lines after and
+# before it, the first decoded frame's pts relative to the consumer's start (ffmpeg shifts the first packet to 0), and
+# whether that frame (n:0) is a keyframe (iskey:1).
 rate() {
   timeout 75 "$FF" -hide_banner -nostdin -loglevel info -rtsp_transport tcp -i "rtsp://127.0.0.1:$(cat "$1/pr")/$2" \
     -t 13 -map 0:v -vf showinfo -f null - 2> "$3.log"
   awk '/Parsed_showinfo/ && / pts_time:/ { match($0, / pts_time:[-0-9.]+/); t = substr($0, RSTART + 10, RLENGTH - 10) + 0
-         if (!seen) { first = t; seen = 1 } if (t < first + 10) n++; next }
+         if (!seen) { first = t; seen = 1; key = ($0 ~ / n: *0 / && $0 ~ / iskey:1 /) ? 1 : 0 }
+         if (t < first + 10) n++; next }
        /\[hevc @/ || /rror/ { if (seen) after++; else before++ }
-       END { printf "%d %d %d\n", n, after, before }' "$3.log"
+       END { printf "%d %d %d %.3f %d\n", n, after, before, seen ? first : 99, key }' "$3.log"
 }
 
 # ---------------------------------------------------------------- scenario A: checks 1, 5, 2, 3, 4, 7 (one camera)
@@ -263,11 +274,11 @@ scen_A() {
   L=$(ledger "$E" cam1); start_fake "$E" cam1
   t0=$(now); pg=$(start_g2r "$E" 1 "http://127.0.0.1:$(cat "$E/pa")")
   wait_until 60 has_ev "$E" cam1 published
-  local eb
-  read -r fr er eb < <(rate "$E" cam1 "$E/c1")
-  check "1: cam1 decoded >= 250 frames in 10 s with 0 decode errors once synced [frames=$fr errors after the first frame=$er (join errors before it=$eb) logins=$(st "$E" $S logins_ok) published +$(sub "$(lq last "$L" published)" "$t0") s after go2rtc-run started]" \
-    1 "$([ "${fr:-0}" -ge 250 ] && [ "$er" = 0 ] && echo 1 || echo 0)"
-  echo "evidence - 1: cam1 frames=$fr in 10 s"
+  local eb li k0
+  read -r fr er eb li k0 < <(rate "$E" cam1 "$E/c1")
+  check "1: cam1 decoded >= 250 frames in 10 s with 0 decode errors once synced, after a lead-in <= GOP 2 s + 1 s on a keyframe [frames=$fr errors after the first frame=$er (join errors before it=$eb) lead-in=$li s first frame key=$k0 logins=$(st "$E" $S logins_ok) published +$(sub "$(lq last "$L" published)" "$t0") s after go2rtc-run started]" \
+    1 "$([ "${fr:-0}" -ge 250 ] && [ "$er" = 0 ] && [ "$(le "$li" 3)" = 1 ] && [ "$k0" = 1 ] && echo 1 || echo 0)"
+  echo "evidence - 1: cam1 frames=$fr in 10 s, lead-in $li s"
   w=$(grep -c 'WARNING operator go2rtc stream cam1 replaced by the snap-owned ezviz camera' "$E/run.1.log")
   c=$( { logs "$E"; cat "$E/data/go2rtc.yaml"; } | grep -c S2OPCANARY)
   y=$(grep -c "^  cam1: exec:$E/snap/bin/ezviz-source cam1 {output}#killsignal=15#killtimeout=5\$" "$E/data/go2rtc.yaml")
@@ -310,7 +321,7 @@ scen_A() {
   l4=$(st "$E" $S logins_ok); gp=$(g2r_pid "$pg"); tt=$(now); kill -TERM "$gp"
   wait_until 10 no_helper "$pg" cam1; te=$(now)
   last=$(lq lastev "$L"); pd=$(sub "$(lq last "$L" stop)" "$tp")
-  check "4 (F1): SIGTERM to go2rtc -> the helper's ledger ends stop (a SIGTERM end; a SIGKILL writes none) [helper gone +$(sub "$te" "$tt") s; dur in record $(sub "$(lq last "$L" stop)" "$(lq last "$L" attempt)") s]" \
+  check "4: Pdeathsig on go2rtc SIGTERM (F1 via PR_SET_PDEATHSIG): the helper's ledger ends stop (a SIGTERM end; a SIGKILL writes none) [helper gone +$(sub "$te" "$tt") s; dur in record $(sub "$(lq last "$L" stop)" "$(lq last "$L" attempt)") s]" \
     "stop 1" "$last $(le "$(sub "$te" "$tt")" 6)"
   left=$(stop_group "$pg")
   tsr=$(now); pg=$(start_g2r "$E" 3 "http://127.0.0.1:$(cat "$E/pa")")
@@ -427,6 +438,35 @@ scen_9() {
   check "$id: teardown, groups empty" "0 0" "$left $lf"
 }
 
+# ---------------------------------------------------------------- 11 / 11m: go2rtc's OWN producer close (F1)
+# A SIGTERM to go2rtc only ends its main (the helper then dies by Pdeathsig, checks 2 and 4). Here go2rtc itself
+# closes the producer: DELETE /api/preload removes the only consumer, RemoveConsumer -> stopProducers -> the exec
+# producer's cmd.Close, whose cancel is Process.Signal(15) only because the exec line carries #killsignal=15
+# (Go's default cancel is SIGKILL). The next decision (our own PUT, refused by the 60 s spacing) must find no open
+# session to class, i.e. append no synthetic unknown_end.
+scen_11() {
+  local id=$1 mut=$2 E=$T/$1 L pg t0 ph code ts tg gone ls last unk pred info left lf
+  mkenv "$id" "$mut"; L=$(ledger "$E" cam1); start_fake "$E" cam1
+  t0=$(now); pg=$(start_g2r "$E" 1 "http://127.0.0.1:$(cat "$E/pa")")
+  wait_until 60 has_ev "$E" cam1 published; wait_until 10 listed "$E" cam1; sleep 1
+  ph=$(lq lastev "$L")
+  ts=$(now); code=$(curl -s --noproxy '*' -m 20 -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:$(cat "$E/pa")/api/preload?src=cam1")
+  wait_until 10 no_helper "$pg" cam1; tg=$(now); gone=$(sub "$tg" "$ts")
+  ls=$(listed "$E" cam1 && echo 1 || echo 0); last=$(lq lastev "$L")
+  curl -s --noproxy '*' -m 80 -o /dev/null -X PUT "http://127.0.0.1:$(cat "$E/pa")/api/preload?src=cam1&video"
+  sleep 1; unk=$(lq count "$L" unknown_end)
+  pred=$([ "$code $ls $last $unk" = "200 0 stop 0" ] && [ "$(le "$gone" 6)" = 1 ] && echo 1 || echo 0)
+  info="phase before=P3 ($ph); DELETE /api/preload -> HTTP $code; helper gone +$gone s; still listed=$ls; last own record=$last; unknown_end after the next decision=$unk; logins=$(st "$E" cam1 logins_ok); ledger: $(lq evs "$L" "$t0")"
+  if [ "$mut" = none ]; then
+    check "11 (F1): go2rtc's own producer close (DELETE of the only consumer, the preload) sends #killsignal=15 -> helper gone within close + 5 s, ledger ends the P3 SIGTERM record stop, no synthetic unknown_end [$info]" 1 "$pred"
+  else
+    check "11m: check 11's own verdict is FAIL without #killsignal=15#killtimeout=5 [$info]" 0 "$pred"
+    check "11m: without killsignal go2rtc SIGKILLs the helper: no own end record, the next decision writes a synthetic unknown_end (mutation detected) [last own record=$last unknown_end=$unk]" "1 1" "$([ "$last" != stop ] && echo 1 || echo 0) $([ "$unk" -ge 1 ] && echo 1 || echo 0)"
+  fi
+  left=$(stop_group "$pg"); lf=$(stop_group "$(cat "$E/pg.fake.cam1")")
+  check "$id: teardown, groups empty" "0 0" "$left $lf"
+}
+
 # ---------------------------------------------------------------- 10: both cameras at once
 scen_10() {
   local E=$T/10 pg f1 e1 f2 e2 h l1 l2 left lf1 lf2
@@ -436,11 +476,11 @@ scen_10() {
   rate "$E" cam1 "$E/c1" > "$E/c1.res" & local p1=$!
   rate "$E" cam2 "$E/c2" > "$E/c2.res" & local p2=$!
   wait "$p1" "$p2"
-  local b1 b2; read -r f1 e1 b1 < "$E/c1.res"; read -r f2 e2 b2 < "$E/c2.res"
+  local b1 b2 i1 i2 k1 k2; read -r f1 e1 b1 i1 k1 < "$E/c1.res"; read -r f2 e2 b2 i2 k2 < "$E/c2.res"
   h=$(pgrep -g "$pg" -f 'ezviz_source[.]main cam[12] ' | wc -l); l1=$(st "$E" cam1 logins_ok); l2=$(st "$E" cam2 logins_ok)
-  check "10: both cameras at once (two fakes) -> cam1 and cam2 each >= 250 frames in 10 s, 0 errors once synced, 1 login each [frames $f1/$f2 errors after sync $e1/$e2 (join errors $b1/$b2) logins $l1/$l2 helpers=$h]" \
-    "1 1 1 2" "$([ "${f1:-0}" -ge 250 ] && [ "$e1" = 0 ] && echo 1 || echo 0) $([ "${f2:-0}" -ge 250 ] && [ "$e2" = 0 ] && echo 1 || echo 0) $([ "$l1 $l2" = "1 1" ] && echo 1 || echo 0) $h"
-  echo "evidence - 10: cam1 frames=$f1 cam2 frames=$f2 in 10 s"
+  check "10: both cameras at once (two fakes) -> cam1 and cam2 each >= 250 frames in 10 s, 0 errors once synced, lead-in <= 3 s on a keyframe, 1 login each [frames $f1/$f2 errors after sync $e1/$e2 (join errors $b1/$b2) lead-in $i1/$i2 s key $k1/$k2 logins $l1/$l2 helpers=$h]" \
+    "1 1 1 2" "$([ "${f1:-0}" -ge 250 ] && [ "$e1" = 0 ] && [ "$(le "$i1" 3)" = 1 ] && [ "$k1" = 1 ] && echo 1 || echo 0) $([ "${f2:-0}" -ge 250 ] && [ "$e2" = 0 ] && [ "$(le "$i2" 3)" = 1 ] && [ "$k2" = 1 ] && echo 1 || echo 0) $([ "$l1 $l2" = "1 1" ] && echo 1 || echo 0) $h"
+  echo "evidence - 10: cam1 frames=$f1 cam2 frames=$f2 in 10 s, lead-in $i1/$i2 s"
   left=$(stop_group "$pg"); lf1=$(stop_group "$(cat "$E/pg.fake.cam1")"); lf2=$(stop_group "$(cat "$E/pg.fake.cam2")")
   check "10: teardown, groups empty" "0 0 0" "$left $lf1 $lf2"
 }
@@ -454,13 +494,20 @@ scen_8a > "$T/out.8a" 2>&1 & P8A=$!
 scen_8b > "$T/out.8b" 2>&1 & P8B=$!
 scen_9 9 none > "$T/out.9" 2>&1 & P9=$!
 scen_9 9m no_api_override > "$T/out.9m" 2>&1 & P9M=$!
-wait "$PA_" "$P6" "$P6M" "$P8A" "$P8B" "$P9" "$P9M"
+scen_11 11 none > "$T/out.11" 2>&1 & P11=$!
+scen_11 11m no_killsignal > "$T/out.11m" 2>&1 & P11M=$!
+wait "$PA_" "$P6" "$P6M" "$P8A" "$P8B" "$P9" "$P9M" "$P11" "$P11M"
 scen_10 > "$T/out.10" 2>&1
-for s in A 6 6m 8a 8b 9 9m 10; do cat "$T/out.$s"; done
+for s in A 6 6m 8a 8b 9 9m 11 11m 10; do cat "$T/out.$s"; done
 
 # --- nothing of ours is left: no process names the temp dir (every go2rtc, helper, ffmpeg, fake and proxy does) ---
 for pg in $(cat "$T/pgs"); do kill -KILL -- "-$pg" 2>/dev/null; done; sleep 0.5
 check "cleanup: no process left that names the test's temp dir" 0 "$(pgrep -fc -- "$T")"
+# M1: every check must have run (a scenario that aborts early leaves its checks out). 52 checks before this one:
+# 3 setup, A 9, 6 4, 6m 5, 8a 4, 8b 4, 9 4, 9m 5, 11 4, 11m 5, 10 4, cleanup 1.
+EXPECTED=52
+ran=$(($(grep -c '^ok' "$T/results") + $(grep -c '^FAIL' "$T/results")))
+check "check count: all $EXPECTED checks ran [ran=$ran]" "$EXPECTED" "$ran"
 oks=$(grep -c '^ok' "$T/results"); fails=$(grep -c '^FAIL' "$T/results")
 echo "serve-ezviz.test: $oks ok, $fails FAIL in $((SECONDS - TS)) s of scenarios"
 [ "$fails" = 0 ] && echo "serve-ezviz.test: all ok" || echo "serve-ezviz.test: FAILURES"

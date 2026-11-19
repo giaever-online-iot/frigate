@@ -7,9 +7,11 @@ loopback address (127.0.0.x); every camera id and login code is a made-up test c
 ## S2 (laptop, fake camera)
 
 **Test:** `tests/ezviz/serve-ezviz.test.sh` (W-23 T15), run under `flock -w 3600 /tmp/claude-1000/chim-suites.lock`
-on 2026-11-19. **Result: 43 ok, 0 FAIL** (192 s of scenarios, 3 min 17 s wall time). Two consecutive full runs gave
-the same 43 ok / 0 FAIL. The first run (before the frame-count fix described below) gave 41 ok / 2 FAIL (checks 1
-and 10).
+on 2026-11-19.
+- **After the review fix round: 53 ok, 0 FAIL** (192 s of scenarios, 3 min 17 s wall time). That is 52 checks plus
+  the check-count guard. This round added checks 11 and 11m and the lead-in assertions.
+- **Before it:** two consecutive runs gave 43 ok / 0 FAIL.
+- **The first run** (before the frame-count fix described below) gave 41 ok / 2 FAIL (checks 1 and 10).
 
 **Identities.**
 - Snap file: the local amd64 `frigate_0.18.2_amd64.snap`, sha256
@@ -26,10 +28,10 @@ and 10).
 
 | Check | Result | Evidence |
 |---|---|---|
-| 1 | ok | cam1 **251 frames** in 10 s, 0 decode errors after the first decoded frame (66 join errors before it, see below); 1 login |
+| 1 | ok | cam1 **251 frames** in 10 s, 0 decode errors after the first decoded frame (66 join errors before it, see below); 1 login (fix-round run: 251 frames, lead-in 0.72 s, first frame a keyframe) |
 | 2 | ok | kill -9 go2rtc: ledger `stop` (Pdeathsig, under 0.1 s); restart: 2 `budget_wait` refusals, 0 camera contacts, then exactly 1 login, 79.9 s after the previous attempt |
 | 3 | ok | consumer removed and re-added: logins 2 → 2, ledger records 7 → 7, same helper pid |
-| 4 | ok | SIGTERM to go2rtc: the ledger ends `stop` (a SIGKILL would write none), and the helper is gone under 0.2 s later |
+| 4 | ok | Pdeathsig on a go2rtc SIGTERM (F1 via PR_SET_PDEATHSIG): the ledger ends `stop` (a SIGKILL would write none), and the helper is gone under 0.2 s later |
 | 5 | ok | the operator `cam1` was dropped with 1 redacted warning; 0 canary hits; 1 helper, 1 login |
 | 6 | ok | the start-time preload fails in `budget_wait`; `GET /api/preload` lists cam1 at **+91.7 s** (limit 150 s); remove/re-add: 0 new logins |
 | 6m | ok | without the re-arm line, check 6's verdict is FAIL (never listed); the consumer remove/re-add costs 1 login |
@@ -38,7 +40,9 @@ and 10).
 | 8b | ok | PUT held 41.6 s, then 200; 0 requests while it was open; the next request came 30.0 s after the answer; 1 login |
 | 9 | ok | 1 warning each for local_auth, base_path and allow_paths; 0 value canaries in the logs; re-armed (listed, `armed`); 1 attempt |
 | 9m | ok | without step 7 of the generator, check 9's verdict is FAIL; `ezviz-rearm: api_refused`, 0 `armed`, 0 attempts |
-| 10 | ok | cam1 **250** and cam2 **251 frames** in 10 s, 0 errors after sync; 1 login each; 2 helpers |
+| 10 | ok | cam1 **250** and cam2 **251 frames** in 10 s, 0 errors after sync; 1 login each; 2 helpers (fix-round run: 250/250, lead-in 1.44/0.92 s, both on a keyframe) |
+| 11 | ok | go2rtc's own producer close (`DELETE /api/preload?src=cam1` drops the only consumer, HTTP 200): `#killsignal=15` makes the helper write `stop` (P3), gone under 0.2 s; the next decision writes no `unknown_end` |
+| 11m | ok | with `#killsignal=15#killtimeout=5` cut from the generator copy, check 11's verdict is FAIL: no own end record (last `published`), and the next decision writes a synthetic `unknown_end` |
 
 **Logins seen by the fake cameras:** scenario A (checks 1, 2, 3, 4, 5, 7): 3 in total, one per go2rtc start
 (1 → 2 at the restart of check 2, unchanged by check 3, 2 → 3 at the restart of check 7). Scenarios 6, 8a, 8b, 9:
@@ -60,13 +64,25 @@ lines (first run, checks 1 and 10).
 - The clip decodes cleanly on its own: 100 frames, 0 errors.
 - From the first decoded frame on, the stream had 0 errors at a full 25 fps.
 
-So checks 1 and 10 now decode 13 s with `showinfo`. They count the frames whose pts lie in the 10 s after the first
-decoded frame, and the decoder error lines after that frame (required: 0). The join errors before it are reported as
-evidence and not asserted.
+**The S2-1 ruling (T15 review).** Checks 1 and 10 decode 13 s with `showinfo` and count frames and errors from the
+first decoded frame:
+- (a) 0 decoder error lines after the first decoded frame. The join errors before it are reported as evidence and
+  not asserted.
+- (b) The lead-in is bounded and asserted. The first decoded frame's pts, relative to the consumer's start, must be
+  at most the fake's GOP (2 s) plus 1 s. That frame (`n:0`) must be a keyframe (`iskey:1`).
+- (c) The window is pts-based: the frames whose pts lie in the 10 s after the first decoded frame. ≥ 250 is required.
+
+**Jitter (a flake risk, no spec change now).** The pts come from the publisher's wallclock: the helper's ffmpeg runs
+with `-use_wallclock_as_timestamps 1`, and the frames are paced by the fake. The jitter is about 0.5 ms. A
+25 fps stream gives exactly 250 frames in a 10 s window, so the window can in principle count 249 with no frame
+dropped. The runs so far counted 250 or 251.
 
 The same join happens to Frigate's own ffmpeg on every restart of a preloaded stream (D2). It costs up to one GOP of
 frames and is not a login. tests/hub/serve.test.sh never saw it, because there every consumer started its own
 producer at an IDR.
+
+**Part B note.** Real Frigate consumers will log start-of-stream decode errors for up to one camera GOP each time
+they (re)connect to a preloaded camera stream. Expect those lines at S5 and in the soak. They are not a stream fault.
 
 **Test-only deviations** (inside the fake `$SNAP` and config.yml only):
 - the private go2rtc-run has one added line that moves the API from `127.0.0.1:1984` to a free loopback port after
