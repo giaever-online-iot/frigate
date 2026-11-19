@@ -396,6 +396,15 @@ class DiagUnit(unittest.TestCase):
         self.assertEqual(res["per_min"], [2, 2, 2, 2, 2])
         self.assertEqual(res["pkts"], 20)
 
+    def test_helper_child_import_guard(self):                          # round 9: S3 for the --helper child
+        self.assertEqual(self.mod.child_import_error(sys.executable), "")
+        fake = Path(fixtures.tmpdir(self)) / "python"
+        fake.write_text("#!/bin/sh\necho /elsewhere/spike/ezviz/ezviz_source/__init__.py\n")
+        fake.chmod(0o700)
+        self.assertIn("wrong_checkout", self.mod.child_import_error(str(fake)))
+        fake.write_text("#!/bin/sh\nexit 1\n")
+        self.assertIn("wrong_checkout", self.mod.child_import_error(str(fake)))
+
     def test_first_twenty_and_non_rtp_frames(self):
         legacy = b"\xfa" + bytes([0x80, 96, 0, 1, 0, 0, 0, 0]) + b"\x55\x66\x77\x88" + b"\x40\x01\x0c"
         lbody = len(legacy).to_bytes(4, "little") + legacy
@@ -449,6 +458,26 @@ class ProbeCheckout(ProbeCase):
         self.assertEqual((p.returncode, p.stdout, p.stderr), (2, "", "probe cam1: wrong_checkout\n"))
         self.assertEqual(connects, [])
         self.assertFalse((self.tmp / "common/ezviz/state/cam1.ledger").exists())   # the gate was never called
+
+    def test_helper_child_from_another_install_is_refused(self):       # round 9: the guard is wired into --helper
+        srv = socket.socket()
+        self.addCleanup(srv.close)
+        srv.bind((LOOPBACK, 0))
+        srv.listen(8)
+        f = self.cams / "cam1.conf"
+        f.write_text(f"host={LOOPBACK}\nport={srv.getsockname()[1]}\nserial={SERIAL}\nlogin={CODE}\n")
+        f.chmod(0o600)
+        env = _path.child_env()                                 # PYTHONPATH = this checkout: the probe's own import
+        for k in ("SNAP", "SNAP_DATA", "SNAP_COMMON"):         # passes, but a `-I` child of the base interpreter has no
+            env.pop(k, None)                                    # venv .pth, so it cannot import this checkout
+        cmd = [sys._base_executable, "-B", str(PROBE), "--helper", str(self.tmp / "common"), str(self.cams), "cam1",
+               "0.5", "extend", "300", "/bin/true"]
+        p = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (2, "", "probe cam1: wrong_checkout\n"))
+        srv.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            srv.accept()                                        # no connect
+        self.assertFalse((self.tmp / "common/ezviz/state/cam1.ledger").exists())
 
 
 if __name__ == "__main__":

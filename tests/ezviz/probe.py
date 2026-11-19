@@ -83,6 +83,19 @@ def _own_checkout(name: str) -> None:
         os._exit(2)
 
 
+def child_import_error(python: str) -> str:
+    """S3 for the --helper child: a `python -I` child ignores PYTHONPATH and imports ezviz_source through the venv's
+    .pth, which can name another checkout; this checks, without the camera, that `python -I` imports THIS checkout's
+    package (as _own_checkout requires of the probe). "" when it does, else a `wrong_checkout` text (no path)."""
+    own = Path(__file__).resolve().parents[2] / "spike" / "ezviz" / "ezviz_source"
+    try:
+        out = subprocess.run([python, "-I", "-B", "-c", "import ezviz_source; print(ezviz_source.__file__)"],
+                             capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    return "" if out and Path(out).resolve().parent == own else "wrong_checkout"
+
+
 def _usage():
     sys.stderr.write("probe: usage: probe.py [--diag] [--helper] <state-dir> <camdir> <name> <minutes> <form> <count> "
                      "<ffmpeg>\n")
@@ -213,6 +226,10 @@ def _run_helper(name, minutes, ffmpeg, work) -> int:
     if not (os.path.isfile(ffmpeg) and os.access(ffmpeg, os.X_OK)):
         sys.stderr.write(f"probe {name}: config: ffmpeg is not an executable file\n")
         return 78
+    py = sys.executable
+    if child_import_error(py):                                      # before the gate, the ledger, any contact
+        sys.stderr.write(f"probe {name}: wrong_checkout\n")
+        return 2
     q = shlex.quote
     bindir = work / "snap" / "usr" / "lib" / "ffmpeg" / "8.0" / "bin"
     bindir.mkdir(parents=True)
@@ -226,7 +243,7 @@ def _run_helper(name, minutes, ffmpeg, work) -> int:
     read = (lambda: ledger.parse(lp.read_bytes()) if lp.exists() else [])
     base = len(read())
     with open(work / "helper.err", "wb") as err:
-        p = subprocess.Popen([sys.executable, "-I", "-B", "-m", "ezviz_source.main", name, f"rtsp://127.0.0.1:1/{name}"],
+        p = subprocess.Popen([py, "-I", "-B", "-m", "ezviz_source.main", name, f"rtsp://127.0.0.1:1/{name}"],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, close_fds=True)
     for sig in (signal.SIGTERM, signal.SIGINT):                     # a stop of the probe stops the helper (E13)
         signal.signal(sig, lambda *_: os.kill(p.pid, signal.SIGTERM))
