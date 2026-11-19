@@ -137,9 +137,13 @@ def deep_merge(base: dict, over: dict) -> dict:
 def list_camera_names(cameras_dir: str) -> list:
     """Names of the snap-owned ezviz cameras: regular files `<name>.conf`, by name only.
     The files are never opened (they hold camera logins). A symlink, a directory or any
-    other file type is not a camera. A missing/unreadable dir means no cameras."""
+    other file type is not a camera. A missing/unreadable dir means no cameras. A missing dir
+    (ENOENT) is the normal state of an install without ezviz cameras and logs nothing; any
+    other error logs one fixed-form warning (W-23 fix wave 1, N1)."""
     try:
         entries = sorted(os.listdir(cameras_dir))
+    except FileNotFoundError:
+        return []
     except OSError as e:
         log("WARNING ezviz cameras dir unreadable (%s); no ezviz cameras emitted"
             % e.__class__.__name__)

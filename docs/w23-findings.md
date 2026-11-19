@@ -164,7 +164,7 @@ last changed that row).
 | `bash tests/hub/observe.test.sh` | 101 ok, 0 FAIL | S5 |
 | `bash tests/w23-packaging.test.sh` | 24 ok, 0 FAIL | S5 |
 | `bash tests/ezviz/probe-run.test.sh` | 71 ok, 0 FAIL (stub python and ffmpeg) | S5 |
-| `python3 -m unittest tests.test_go2rtc_config_gen` (system python3) | `Ran 21 tests`, `OK` | S5 |
+| `python3 -m unittest tests.test_go2rtc_config_gen` (system python3) | `Ran 23 tests`, `OK` | N1 |
 
 **A stale baseline.** Earlier reports and briefs give `make-config.test.sh` as 157 ok. That number is stale; the
 real count today is 233 ok (the row above). `serve-ezviz.test.sh` (S2) was not rerun for this table; its counts are

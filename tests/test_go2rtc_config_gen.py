@@ -157,12 +157,38 @@ class TestEzvizEmission(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(set(out["preload"]), {"cam1", "cam2"})
 
-    def test_missing_cameras_dir_is_no_cameras(self):
+    def test_missing_cameras_dir_is_no_cameras(self):  # fix wave 1, N1: the normal state without ezviz cameras
         rc, out, err = run_main5(BASELINE, None, [], cams_dir_missing=True)
         self.assertEqual(rc, 0)
         self.assertNotIn("preload", out)
-        self.assertIn("WARNING", err)
+        self.assertNotIn("WARNING", err)
+        self.assertNotIn("cameras dir", err)
         self.assertNotIn("Traceback", err)
+
+    def test_missing_cameras_dir_logs_nothing(self):  # fix wave 1, N1: ENOENT is silent
+        with tempfile.TemporaryDirectory() as d:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                names = g2r.list_camera_names(str(Path(d, "absent")))
+        self.assertEqual((names, err.getvalue()), ([], ""))
+
+    def test_other_cameras_dir_errors_still_warn(self):  # fix wave 1, N1: only ENOENT is silent
+        with tempfile.TemporaryDirectory() as d:
+            notdir = Path(d, "cameras")
+            notdir.write_text("")
+            cases = {"NotADirectoryError": (str(notdir), None),
+                     "PermissionError": (d, PermissionError(13, "denied", "QZSECRETPATH"))}
+            for cls, (path, exc) in cases.items():
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    if exc is None:
+                        names = g2r.list_camera_names(path)
+                    else:
+                        with mock.patch.object(g2r.os, "listdir", side_effect=exc):
+                            names = g2r.list_camera_names(path)
+                self.assertEqual((names, err.getvalue()),
+                                 ([], f"go2rtc-config-gen: WARNING ezviz cameras dir unreadable ({cls}); "
+                                      "no ezviz cameras emitted\n"), cls)
 
     def test_main_argument_counts(self):
         for argv in (["g"], ["g", "a", "b", "c"], ["g"] + ["a"] * 6):
