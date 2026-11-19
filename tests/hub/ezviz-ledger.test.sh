@@ -16,8 +16,8 @@ run() {  # run NAME -- args; PRE seeds $T/$n/st/common/ezviz/state
 rc() { cat "$T/$1.rc"; }; O() { cat "$T/$1.out"; }; S='$T/$n/st/common/ezviz/state'
 PRE="{ L 0 attempt; L 2 login_ok; L 9 published; L 3000 stop; L 3010 attempt; L 3012 login_ok; L 3020 published; } > $S/cam1.ledger; { L 0 attempt; L 1 net_fail; L 100 attempt; L 102 login_ok; L 110 published; } > $S/cam2.ledger" run a -- --since $((E + 3005))
 check "two healthy ledgers: exit 0" 0 "$(rc a)"
-check "cam1 line" "ledger cam1: attempts=2 login_ok=2 published=2 ends=stop:1 latched=0 max_attempts_any_60min=2 attempts_since=1 login_ok_since=1 last=published@2026-11-06T22:10:20Z" "$(O a | head -n 1)"
-check "cam2 line" "ledger cam2: attempts=2 login_ok=1 published=1 ends=net_fail:1 latched=0 max_attempts_any_60min=2 attempts_since=0 login_ok_since=0 last=published@2026-11-06T21:21:50Z" "$(O a | tail -n 1)"
+check "cam1 line" "ledger cam1: attempts=2 login_ok=2 published=2 ends=stop:1 open=P3 latched=0 max_attempts_any_60min=2 attempts_since=1 login_ok_since=1 last=published@2026-11-06T22:10:20Z" "$(O a | head -n 1)"
+check "cam2 line" "ledger cam2: attempts=2 login_ok=1 published=1 ends=net_fail:1 open=P3 latched=0 max_attempts_any_60min=2 attempts_since=0 login_ok_since=0 last=published@2026-11-06T21:21:50Z" "$(O a | tail -n 1)"
 PRE="{ L 0 attempt; L 1 net_fail; L 61 attempt; L 62 net_fail; L 400 attempt; L 401 net_fail; L 3599 attempt; } > $S/cam1.ledger" run b --
 check "4 attempts inside one rolling hour: exit 1" 1 "$(rc b)"; check "says 4" 1 "$(O b | grep -c 'max_attempts_any_60min=4')"
 PRE="{ L 0 attempt; L 1 auth_fail; L 1 latch; } > $S/cam1.ledger; : > $S/cam1.latch" run c --
@@ -40,7 +40,7 @@ recs() { O "$1" | awk -v c="$2:" '$1 == "ledger" && $2 == c { n = 0; last = ""
 PRE="{ L 0 attempt; L 2 login_ok; printf '{\"t\":'; } > $S/cam1.ledger; { L 0 attempt; L 2 login_ok; L 9 published; } > $S/cam2.ledger" run t --
 check "C5: torn cam1 and healthy cam2: exit 0" 0 "$(rc t)"
 check "C5: cam1 parsed with the torn line dropped" 1 "$(O t | grep -c '^ledger cam1: attempts=1 login_ok=1 published=0 .*last=login_ok@2026-11-06T21:20:02Z$')"
-check "C5: cam2 present and correct" "ledger cam2: attempts=1 login_ok=1 published=1 ends=- latched=0 max_attempts_any_60min=1 attempts_since=1 login_ok_since=1 last=published@2026-11-06T21:20:09Z" "$(O t | grep '^ledger cam2:')"
+check "C5: cam2 present and correct" "ledger cam2: attempts=1 login_ok=1 published=1 ends=- open=P3 latched=0 max_attempts_any_60min=1 attempts_since=1 login_ok_since=1 last=published@2026-11-06T21:20:09Z" "$(O t | grep '^ledger cam2:')"
 PRE="{ L 0 attempt; L 2 login_ok; L 9 published; L 70 stop; L 200 attempt; L 201 net_fail; } > $S/cam1.ledger" run lc --
 loc=$(python3 -I -B -c 'import sys; sys.path.insert(0, sys.argv[1]); from ezviz_source.ledger import parse
 r = parse(open(sys.argv[2], "rb").read()); print(len(r), r[-1]["ev"])' spike/ezviz "$T/lc/st/common/ezviz/state/cam1.ledger")
@@ -55,6 +55,10 @@ check "R2-N6: the fixture has no latch file" 1 "$([ -e "$T/n6/st/common/ezviz/st
 PRE="{ L 0 attempt; echo '{\"t\":5}'; L 9 stop; } > $S/cam1.ledger; { L 0 attempt; L 2 login_ok; } > $S/cam2.ledger" run d2 --
 check "mid-file bad record: cam1 damaged, exit 1" "1 ledger cam1: damaged" "$(rc d2) $(O d2 | head -n 1)"
 check "a damaged cam1 does not hide cam2" 1 "$(O d2 | grep -c '^ledger cam2: attempts=1 login_ok=1 ')"
+# m1: the open session's phase (policy.phase_of_open_session); two P2 ends + an open P2 latch at the next decision
+PRE="{ L 0 attempt; L 2 login_ok; L 5 session_end; L 100 attempt; L 102 login_ok; L 105 start_timeout; L 400 attempt; L 402 login_ok; } > $S/cam1.ledger; { L 0 attempt; L 1 net_fail; } > $S/cam2.ledger" run op --
+check "two P2 ends and an open P2: open=P2 latched=1, exit 1" "1 1" "$(rc op) $(O op | grep -c '^ledger cam1: .* open=P2 latched=1 ')"
+check "no open session: open=-" 1 "$(O op | grep -c '^ledger cam2: .* open=- latched=0 ')"
 PRE="{ L 0 attempt; echo '== cam2'; L 9 stop; } > $S/cam1.ledger" run m --
 check "a ledger line that looks like a header: malformed answer, no counts, exit 1" "1 0" "$(rc m) $(O m | grep -c '^ledger ')"
 [ "$fail" = 0 ] && echo "ezviz-ledger.test: all ok" || echo "ezviz-ledger.test: FAILURES"

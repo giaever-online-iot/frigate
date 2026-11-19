@@ -8,7 +8,10 @@
 # prefix on :5001: fastapi_app.py L151 includes record.router without one and app.py L621-640 runs uvicorn on
 # 127.0.0.1:5001 with no root_path (the plan's /api/<camera>/... is the nginx path). The laptop clips to the window.
 # Usage: M7C_HUB_SOCK=<socket> M7C_HUB_TARGET=<target> tests/hub/coverage.sh --since <epoch> [--hours 24]
-# Exit: 0 every camera >= 99 %; 1 otherwise or unreadable; 2 usage; 3 the master is gone.
+# Percentages have two decimals and the verdict is on the printed value (98.99 fails, 99.00 passes). A window that
+# is not over yet (since + hours > now) is refused before anything is sent.
+# Exit: 0 every camera >= 99 %; 1 otherwise, unreadable, or the window not over; 2 usage; 3 the master is gone.
+# Test hook: M7C_COVERAGE_CLOCK (prints epoch seconds), as watch.sh's M7C_WATCH_CLOCK.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); EXEC="$HERE/ssh-exec.sh"
 usage() { echo "usage: coverage.sh --since <epoch> [--hours H]" >&2; exit 2; }
@@ -19,6 +22,9 @@ done
 case "$SINCE" in ''|*[!0-9]*) usage ;; esac
 case "$H" in ''|*[!0-9]*|0) usage ;; esac
 END=$((SINCE + H * 3600))
+NOW=$(if [ -n "${M7C_COVERAGE_CLOCK:-}" ]; then "$M7C_COVERAGE_CLOCK"; else date +%s; fi)
+case "$NOW" in ''|*[!0-9]*) echo "coverage: cannot read the clock" >&2; exit 2 ;; esac
+[ "$END" -gt "$NOW" ] && { echo "coverage: window not over (ends $(date -u -d "@$END" +%Y-%m-%dT%H:%M:%SZ))"; exit 1; }
 read -r -d '' REMOTE_PY <<EOF
 import json, urllib.request
 for cam in ("cam1", "cam2"):
@@ -55,8 +61,8 @@ for line in os.environ["OUT"].splitlines():
         else:
             cur_e = max(cur_e, b)
     covered += (cur_e - cur_s) if cur_e is not None else 0.0
-    pct = 100.0 * covered / (e - s)
-    print(f"coverage {cam}: {pct:.1f} %")
+    pct = round(100.0 * covered / (e - s), 2)    # the verdict is on the printed two-decimal value
+    print(f"coverage {cam}: {pct:.2f} %")
     bad = bad or pct < 99.0
 for cam in sorted({"cam1", "cam2"} - seen):
     print(f"coverage {cam}: unreadable"); bad = 1

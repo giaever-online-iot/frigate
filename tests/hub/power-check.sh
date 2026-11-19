@@ -2,7 +2,8 @@
 # W-23 P12 / SF10: read-only check that the hub kernel logged no "Undervoltage detected" line since a time.
 # It reads journald's KERNEL transport across ALL boots since the time (`journalctl -k` would imply -b, the
 # current boot only, and miss an undervoltage that crashed or rebooted the hub, as on 18 Nov). It also
-# counts boots in the window ("Linux version" kernel lines) and proves the journal reaches back to the time.
+# counts boots in the window ("Linux version" kernel lines) and proves the journal reaches back to the time: one
+# KERNEL-transport entry at or before it (the counted stream itself, so a per-user journal file cannot satisfy it).
 # One command on the hub through tests/hub/ssh-exec.sh (the operator's existing master only).
 # Usage: M7C_HUB_SOCK=<socket> M7C_HUB_TARGET=<target> tests/hub/power-check.sh --since <epoch> [--allow-boots N]
 # Exit: 0 PASS (0 undervoltage, boots <= N); 1 FAIL; 2 usage; 3 the master is gone; 4 INCONCLUSIVE (the journal
@@ -23,7 +24,7 @@ case "$ALLOW" in ''|*[!0-9]*) usage ;; esac
 ISO=$(date -u -d "@$SINCE" +%Y-%m-%dT%H:%M:%SZ)
 # shellcheck disable=SC2016  # expanded on the hub, not here
 REMOTE='k=$(journalctl _TRANSPORT=kernel --since @'"$SINCE"' --no-pager -q -o cat 2>/dev/null); krc=$?
-c=$(journalctl --until @'"$SINCE"' -r -n 1 --no-pager -q -o short-unix 2>/dev/null | wc -l)
+c=$(journalctl _TRANSPORT=kernel --until @'"$SINCE"' -r -n 1 --no-pager -q -o short-unix 2>/dev/null | wc -l)
 printf "krc=%s\ncover=%s\nuv=%s\nboots=%s\n" "$krc" "$c" "$(printf "%s\n" "$k" | grep -c "Undervoltage detected")" "$(printf "%s\n" "$k" | grep -c "Linux version")"'
 out=$("$EXEC" exec "$REMOTE" 2>&1 </dev/null); rc=$?
 [ "$rc" = 3 ] && { echo "power-check: MASTER GONE; nothing was read" >&2; exit 3; }

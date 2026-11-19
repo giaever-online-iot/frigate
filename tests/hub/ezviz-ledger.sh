@@ -6,6 +6,8 @@
 # each camera's bytes with the repo's own ezviz_source.ledger.parse (spike/ezviz; stdlib only) and decides
 # `latched` with policy.decide(records, now, latch_file=...), so the torn-line rule and the T-END latch row are the
 # helper's own code, never a second parser here.
+# open=<P1|P2|P3|-> is the phase of a session with no end record yet (policy.phase_of_open_session); `latched`
+# already counts it as policy.decide will at the camera's next start (an open P2 adds one to the latch row).
 # Usage: M7C_HUB_SOCK=<socket> M7C_HUB_TARGET=<target> tests/hub/ezviz-ledger.sh [--since <epoch>]
 # Exit: 0 ok; 1 a camera is latched, its ledger is damaged, a rolling 60 min holds > 3 attempts, or the hub's
 #       answer is incomplete; 2 usage; 3 the master is gone.
@@ -34,7 +36,7 @@ import collections, datetime, re, sys, time
 sys.path.insert(0, sys.argv[1])
 from ezviz_source import constants as C
 from ezviz_source.ledger import LedgerDamaged, parse
-from ezviz_source.policy import decide
+from ezviz_source.policy import decide, phase_of_open_session
 since = float(sys.argv[2])
 with open(sys.argv[3], "rb") as f:
     data = f.read()
@@ -65,6 +67,7 @@ for name in order:
         bad = 1
         continue
     latched = decide(recs, now, latch_file=c["latch"]).cls == "latched"   # T-END latch row, auth_fail, latch file
+    op = phase_of_open_session(recs) or "-"   # an open session is classed by T-END only at the next decision
     att = sorted(r["t"] for r in recs if r["ev"] == "attempt")
     mx = max((sum(1 for b in att if a <= b < a + 3600) for a in att), default=0)
     n = lambda ev, t0=float("-inf"): sum(1 for r in recs if r["ev"] == ev and r["t"] >= t0)
@@ -74,7 +77,7 @@ for name in order:
         ts = datetime.datetime.fromtimestamp(recs[-1]["t"], datetime.timezone.utc)
         last = recs[-1]["ev"] + "@" + ts.strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"ledger {name}: attempts={len(att)} login_ok={n('login_ok')} published={n('published')} "
-          f"ends={','.join(f'{k}:{v}' for k, v in sorted(ends.items())) or '-'} latched={int(latched)} "
+          f"ends={','.join(f'{k}:{v}' for k, v in sorted(ends.items())) or '-'} open={op} latched={int(latched)} "
           f"max_attempts_any_60min={mx} attempts_since={n('attempt', since)} login_ok_since={n('login_ok', since)} last={last}")
     bad = bad or latched or mx > 3
 sys.exit(1 if bad else 0)

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Fake hub for tests/hub/power-check.test.sh (the stub ssh's $STUB_RESPONDER). Every remote command is logged to
-# $STUB_ST/cmds. Knobs: PC_KRC (journalctl rc, default 0), PC_COVER (1 = the journal reaches back, default 1),
-# PC_UV (undervoltage lines, default 0), PC_BOOTS (boots in the window, default 0), PC_GARBLE=1 (unparsable answer).
+# $STUB_ST/cmds and then RUN FOR REAL under /bin/sh with fixtures/power-stub first on PATH (a fake journalctl that
+# parses its argv and answers only the forms power-check.sh must send; see its header for the knobs PC_KRC, PC_COVER,
+# PC_UV, PC_BOOTS, PC_GARBLE). PC_RAW=<text>: answer <text> instead of running the command (a hub whose shell
+# answer cannot be parsed).
 set -u
-st="${STUB_ST:?}"
+st="${STUB_ST:?}"; fx=$(cd "$(dirname "$0")" && pwd)
 eval "set -- $1"
 [ "$1 $2 $3 $4" = "sudo -n sh -c" ] || { echo "responder: not a sudo -n sh -c call: $*" >&2; exit 99; }
 printf '%s\n' "$5" >> "$st/cmds"
-[ "${PC_GARBLE:-0}" = 1 ] && { echo "journalctl: command not found"; exit 0; }
-printf 'krc=%s\ncover=%s\nuv=%s\nboots=%s\n' "${PC_KRC:-0}" "${PC_COVER:-1}" "${PC_UV:-0}" "${PC_BOOTS:-0}"
+[ -n "${PC_RAW:-}" ] && { printf '%s\n' "$PC_RAW"; exit 0; }
+PATH="$fx/power-stub:$PATH" exec sh -c "$5"

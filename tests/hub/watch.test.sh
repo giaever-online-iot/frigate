@@ -133,6 +133,9 @@ run uv2 W_UV="0 1" -- "${B[@]}" --samples 2 --act; check "undervoltage --act: fr
 run uv3 W_UV="unreadable" -- "${B[@]}" --samples 3
 check "kuv unreadable: exit 0, no TRIP" 0 "$(rc uv3)"; has "kuv unreadable: INFO line" "INFO: kernel journal unreadable" "$(O uv3)"
 has "the sample reads the kernel transport across boots" "journalctl _TRANSPORT=kernel --since @" "$(C uv3)"
+# The window starts at the watcher's own start (the fake clock's first value, 1000000), never earlier: --since @0
+# would count every old undervoltage and --act would stop frigate on the first sample.
+check "the sample pins the watcher's start epoch" 3 "$(grep -cF 'journalctl _TRANSPORT=kernel --since @1000000 --no-pager' "$(C uv3)")"
 hasnt "never journalctl -k" "journalctl -k" "$(C uv3)"
 
 [ "$fail" = 0 ] && echo "watch.test: all ok" || echo "watch.test: FAILURES"
