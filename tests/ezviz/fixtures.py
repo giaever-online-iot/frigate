@@ -96,3 +96,22 @@ def fu(nal: bytes, size: int) -> list:
         hdr = ((nal[0] >> 1) & 0x3F) | (0x80 if n == 0 else 0) | (0x40 if n == len(chunks) - 1 else 0)
         out.append(indicator + bytes([hdr]) + chunk)
     return out
+
+
+# ---- the fake camera's clip (W-23 T8) ----
+def _annexb(*nals: bytes) -> bytes:
+    return b"".join(b"\x00\x00\x00\x01" + n for n in nals)
+
+
+# A tiny made-up Annex-B H.265 stream: VPS, SPS, PPS, IDR (type 19), TRAIL (type 1), dummy payloads. Two access
+# units; the IDR is large enough to need FU fragments at the fake's 1400-byte limit. Valid for the reassembler,
+# not decodable.
+SYNTH_ES = _annexb(hevc_nal(32, 24), hevc_nal(33, 40), hevc_nal(34, 12), hevc_nal(19, 3000), hevc_nal(1, 600))
+
+
+def make_es(ffmpeg: str, out: Path, seconds: int = 4) -> Path:
+    """A decodable 1080p25 H.265 Annex-B clip, IDR every 2 s, parameter sets on every IDR (go2rtc/S2 tests)."""
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=25", "-t", str(seconds),
+                    "-c:v", "libx265", "-x265-params", "keyint=50:min-keyint=50:bframes=0:repeat-headers=1",
+                    "-f", "hevc", str(out)], check=True, capture_output=True, timeout=300)
+    return out
