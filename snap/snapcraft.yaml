@@ -181,6 +181,17 @@ apps:
     timer: "00:00-24:00/6"
     plugs: [shm-private]
 
+  # --- ezviz-check, disk-guard (W-23) ----------------------------------------
+  # ezviz-check: on-demand CLI (hub tools); reads the helper's ledger/state only, so no plugs.
+  ezviz-check:
+    command: bin/ezviz-check
+  # disk-guard (D13): every 10 min ("00:00-24:00/144"); below the floor it runs
+  # `snapctl stop --disable frigate.frigate` and logs one line. No plugs needed.
+  disk-guard:
+    command: bin/disk-guard
+    daemon: oneshot
+    timer: "00:00-24:00/144"
+
 parts:
   python311:
     plugin: nil
@@ -328,6 +339,42 @@ parts:
     source: spike/bin
     organize:
       '*': bin/
+  # W-23 OD1/R1: a separate CPython 3.12 used ONLY by the ezviz helper (pyezvizapi needs >= 3.12;
+  # Frigate stays on 3.11). Not primed-filtered by any other part: it lives wholly under opt/ezviz-py.
+  ezviz-py:
+    plugin: nil
+    source: spike/ezviz
+    build-packages: [wget, binutils]
+    override-build: |
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64) A=x86_64;  S=6a9e62dad033790aef722dbd370e0ce76ce17b73627ba3ae679f537049350b39 ;;
+        arm64) A=aarch64; S=b6a41defec4975d94b4ff1950236e7383e5c02ba40ea48c9ec33c66087a35aab ;;
+        *) echo "ezviz-py: unsupported arch $CRAFT_ARCH_BUILD_FOR" >&2; exit 1 ;;
+      esac
+      wget -O "$CRAFT_PART_BUILD/py.tgz" "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.12.16%2B20261110-$A-unknown-linux-gnu-install_only_stripped.tar.gz"
+      echo "$S  $CRAFT_PART_BUILD/py.tgz" | sha256sum -c -
+      D="$CRAFT_PART_INSTALL/opt/ezviz-py"; mkdir -p "$D"
+      tar -xzf "$CRAFT_PART_BUILD/py.tgz" -C "$D" --strip-components=1
+      # SF7: NOT env -i here: pip must keep the Launchpad builder's http_proxy/https_proxy/no_proxy (as spike-wheels does).
+      env -u LD_LIBRARY_PATH -u PYTHONPATH -u PYTHONHOME "$D/bin/python3.12" -I -m pip install --no-cache-dir --no-compile \
+        --require-hashes --only-binary=:all: --no-deps -r "$CRAFT_PART_SRC/requirements.txt"
+      SP="$D/lib/python3.12/site-packages"
+      cp -r "$CRAFT_PART_SRC/ezviz_source" "$SP/"
+      env -i PATH=/usr/bin:/bin "$D/bin/python3.12" -I -m pip uninstall -y pip
+      # Prune (each verified by the import proof below): Tk/Tcl, idle, turtle, ensurepip, headers, docs, the shared libpython
+      # (bin/python3.12 links libpython statically; nothing embeds it).
+      rm -rf "$D"/include "$D"/share "$D"/lib/pkgconfig "$D"/lib/tcl9* "$D"/lib/tk9* "$D"/lib/itcl* "$D"/lib/thread* \
+             "$D"/lib/libtcl9* "$D"/lib/python3.12/config-3.12-* \
+             "$D"/lib/python3.12/idlelib "$D"/lib/python3.12/tkinter "$D"/lib/python3.12/turtledemo \
+             "$D"/lib/python3.12/ensurepip "$D"/lib/python3.12/lib-dynload/_tkinter*
+      # N11/R2-N8: drop the shared libpython only if readelf ran OK and bin/python3.12 does not need it. FAIL CLOSED:
+      # readelf missing or erroring exits 1 and never removes anything (the import proof below catches a wrong guess).
+      command -v readelf >/dev/null || { echo "ezviz-py: readelf missing" >&2; exit 1; }
+      NEEDED=$(readelf -d "$D/bin/python3.12") || { echo "ezviz-py: readelf -d failed" >&2; exit 1; }
+      if ! printf '%s\n' "$NEEDED" | grep -q 'NEEDED.*libpython'; then rm -f "$D"/lib/libpython3*; fi
+      env -i PATH=/usr/bin:/bin "$D/bin/python3.12" -I -m compileall -q -j0 "$D/lib/python3.12"
+      # Import proof on the build arch (§10 rows 8 and 16): everything the helper, rearm, check and unlatch import.
+      env -i PATH=/usr/bin:/bin "$D/bin/python3.12" -I -B -c 'import ezviz_source.main, ezviz_source.camera, ezviz_source.rearm, ezviz_source.check, ezviz_source.unlatch, pyezvizapi.streaming.local.session, Crypto.PublicKey.RSA, cryptography.hazmat.primitives.ciphers; print("ezviz-py import proof ok")'
   ffmpeg:
     plugin: nil
     build-packages: [wget, xz-utils, bzip2]
