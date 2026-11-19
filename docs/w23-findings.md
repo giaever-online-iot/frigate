@@ -286,6 +286,44 @@ H1 (0xB2) was a real gap in annexb's table, but it was not the cause: 0xB2 never
 
 No shell file changed in this round.
 
+### GA run 2 on the real camera: RESULT (video; the reader fix confirmed)
+
+**The run** (cam1, one login, 3 minutes, `PROBE_DIAG=1`, frozen 3a54aa1, 19 Nov 18:04 UTC; counters only):
+`end=stop login_ok=1 published=1 session_s=180.195 first_irap_s=0.628 keepalive_sent=35 keepalive_failed=0
+frames=4487 decode_errors=0`.
+- `pkts` 11152; `pt` {96: 8210, 104: 2806, 112: 136}.
+- `drop` {route: 2942, held: 1, fu_part: 3542}. The route drops are exactly the PT 104 and PT 112 bodies. One body
+  waited for the PT-96 promotion and came out in order.
+- `desc` {15: 0x24}; `nal` {32: 45, 33: 45, 34: 45, 39: 45, 19: 45, 1: 4443}; `au` n 4488, idr 45.
+
+**What it shows.**
+- 4487 frames in 180.2 s is 24.9 fps, with 0 decode errors.
+- The first IDR came 0.628 s after the session start. The publish point (first IDR + `PUBLISH_HOLD_S` 5 s) is about
+  5.6 s in.
+- 45 IDRs (type 19) in 180 s: one about every 4 s.
+- The fake camera's `--real-shape` and the real camera now agree.
+
+**What it settles.**
+- The reader fix (d06e99c, the PT-96 promotion) works on the real camera.
+- The 30 s `STARTTIMEOUT_S` looks safe: publish came at about 5.6 s.
+
+**What it does NOT settle.**
+- The long session: wait for the 63-minute run.
+- `KEEPALIVE_FORM` and `KEEPALIVE_COUNT`: 35 keepalives over 3 minutes say nothing about the long-session limit.
+- `TIMESTAMP_MODE`. This run's `rtp_ts_monotonic=0.6187 rtp_ts_step_mode=3600 rtp_ts_step_p99_dev=2784805578` mixed
+  the audio-like PT 104 and the descriptor PT 112, which have their own timestamp bases, into the video's list. From
+  ccd7812 the probe takes timestamps from the HEVC video route only. On the real-shape fake that gives 1.0000 / 3600 /
+  0, against 0.5008 / 3600 / 4294944016 before.
+
+All four constants (`KEEPALIVE_FORM`, `KEEPALIVE_COUNT`, `STARTTIMEOUT_S`, `TIMESTAMP_MODE`) stay PROVISIONAL until
+Task 21.
+
+**Suites at ccd7812** (19 Nov, a private `W23_VENV`, heavy suites one at a time under the suite lock):
+- `tests/ezviz` unittest: `Ran 257 tests`, `OK`, 0 skipped (256 before, plus 1);
+- `serve-ezviz.test.sh` (S2): 53 ok, 0 FAIL;
+- `probe-run.test.sh`: 76 ok, 0 FAIL;
+- CI python: `discover -s tests` 27 OK and `tests.test_go2rtc_config_gen` 23 OK.
+
 ### A1 gave no video: why the helper might drop it (HYPOTHESES, not results)
 
 The ranking below was written before the diagnostic run. The run settled it: H2. The table is kept as the record.
