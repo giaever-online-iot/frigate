@@ -80,9 +80,17 @@ def rtp_payloads(nal: bytes) -> list:
             for n, c in enumerate(chunks)]
 
 
-def media_frame(seq: int, ts: int, marker: bool, payload: bytes) -> bytes:
-    rtp = bytes([0x80, (0x80 if marker else 0) | 96]) + (seq & 0xFFFF).to_bytes(2, "big") \
-        + (ts & 0xFFFFFFFF).to_bytes(4, "big") + SSRC + payload
+def descriptor_ext(stream_type: int, pt: int = 96) -> bytes:
+    """An RTP header extension carrying one 0x45 stream descriptor (stream type, payload type), as
+    pyezvizapi/streaming/media/rtp.py idmx_rtp_stream_descriptors reads it; padded to whole 32-bit words."""
+    tlv = bytes([0x45, 2, stream_type & 0xFF, pt & 0x7F])
+    tlv += b"\x00" * (-len(tlv) % 4)
+    return b"\xbe\xde" + (len(tlv) // 4).to_bytes(2, "big") + tlv
+
+
+def media_frame(seq: int, ts: int, marker: bool, payload: bytes, ext: bytes = b"") -> bytes:
+    rtp = bytes([0x90 if ext else 0x80, (0x80 if marker else 0) | 96]) + (seq & 0xFFFF).to_bytes(2, "big") \
+        + (ts & 0xFFFFFFFF).to_bytes(4, "big") + SSRC + ext + payload
     idmx = len(rtp).to_bytes(4, "little") + rtp
     return b"$\x00" + (4 + len(idmx)).to_bytes(2, "little") + idmx
 
@@ -133,7 +141,8 @@ def attempt_on_disk(path) -> bool:
 class Server:
     def __init__(self, code: str, es, *, port: int = 0, stats_path=None, reject: bool = False,
                  silent_before_challenge: bool = False, silent_after_login: bool = False, close_after_s=None,
-                 stall_after_s=None, no_media: bool = False, ledger_at_accept=None, fps: float = 25.0):
+                 stall_after_s=None, no_media: bool = False, ledger_at_accept=None, fps: float = 25.0,
+                 desc_stream_type=None):
         self.code = code.encode()
         self.aus = access_units(split_nals(Path(es).read_bytes()))
         if not self.aus:
@@ -143,6 +152,7 @@ class Server:
         self.silent_before_challenge, self.silent_after_login = silent_before_challenge, silent_after_login
         self.close_after_s, self.stall_after_s = close_after_s, stall_after_s
         self.ledger_at_accept, self.fps = ledger_at_accept, fps
+        self.desc_stream_type = desc_stream_type      # None: no 0x45 descriptors (the legacy PT 96 route)
         self._stats = {"connects": 0, "logins_ok": 0, "logins_rejected": 0, "keepalives": 0, "media_sessions": 0,
                        "attempt_on_disk_at_accept": []}
         self._lock = threading.Lock()
@@ -316,7 +326,9 @@ class Server:
                 if self.stall_after_s is not None and elapsed >= self.stall_after_s:
                     return                           # silent, socket left open
                 pkts = [p for nal in self.aus[k % len(self.aus)] for p in rtp_payloads(nal)]
-                out = b"".join(media_frame(seq + n, k * TS_STEP, n == len(pkts) - 1, p) for n, p in enumerate(pkts))
+                ext = descriptor_ext(self.desc_stream_type) if self.desc_stream_type is not None else b""
+                out = b"".join(media_frame(seq + n, k * TS_STEP, n == len(pkts) - 1, p, ext if n == 0 else b"")
+                               for n, p in enumerate(pkts))
                 sock.sendall(out)
                 seq, k = seq + len(pkts), k + 1
                 self._stop.wait(max(0.0, t0 + k / self.fps - time.monotonic()))
@@ -338,6 +350,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-media", action="store_true")
     ap.add_argument("--port-file")
     ap.add_argument("--ledger-at-accept")
+    ap.add_argument("--desc-stream-type", type=lambda v: int(v, 0),
+                    help="send a 0x45 descriptor (this stream type, PT 96) on each picture's first packet")
     a = ap.parse_args(argv)
     done = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -345,7 +359,7 @@ def main(argv=None) -> int:
     srv = Server(a.code, a.es, port=a.port, stats_path=a.stats, reject=a.reject,
                  silent_before_challenge=a.silent_before_challenge, silent_after_login=a.silent_after_login,
                  close_after_s=a.close_after_s, stall_after_s=a.stall_after_s, no_media=a.no_media,
-                 ledger_at_accept=a.ledger_at_accept)
+                 ledger_at_accept=a.ledger_at_accept, desc_stream_type=a.desc_stream_type)
     if a.port_file:
         tmp = Path(a.port_file + ".tmp")
         tmp.write_text(f"{srv.port}\n")

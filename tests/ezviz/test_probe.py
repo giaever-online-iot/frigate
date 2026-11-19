@@ -191,6 +191,25 @@ class Probe(ProbeCase):
         self.assertFalse((self.tmp / "common/ezviz/state/cam1.ledger").exists())
         self.assertEqual(json.loads(self.stats.read_text())["connects"], 0)
 
+    def test_b2_descriptor_camera_publishes(self):
+        # GA A1 diagnosis, H1: a camera that announces its video as 0x45 stream type 0xB2 on PT 96 (hevc in the
+        # library's table) must publish like the plain fake; before the fix every packet was dropped (frames=0)
+        ff = real_ffmpeg()
+        self.start_fake(ff, "--desc-stream-type", "0xb2")
+        p = self.probe(ff, "0.2")
+        m = LINE.match(p.stdout.strip())
+        self.assertIsNotNone(m, p.stdout + p.stderr)
+        self.assertEqual((m["end"], m["published"], m["decode_errors"]), ("stop", "1", "0"), p.stdout)
+        self.assertGreaterEqual(int(m["frames"]), 200, p.stdout)
+
+    def test_h264_descriptor_camera_is_not_hevc(self):                  # the control: 0x1B owns PT 96, no video
+        ff = real_ffmpeg()
+        self.start_fake(ff, "--desc-stream-type", "0x1b")
+        p = self.probe(ff, "0.2")
+        m = LINE.match(p.stdout.strip())
+        self.assertIsNotNone(m, p.stdout + p.stderr)
+        self.assertEqual((m["login_ok"], m["published"], m["frames"]), ("1", "0", "0"), p.stdout)
+
     def test_non_idr_start_is_not_fed_until_the_first_idr(self):        # the IDR gate
         import fakecam
         ff = real_ffmpeg()

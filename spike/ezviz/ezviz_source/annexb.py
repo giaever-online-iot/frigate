@@ -19,7 +19,7 @@ WRAPPER = b"\x40\x00\x00\x02\x80\x06"   # packets.py:297-300 (_looks_like_idmx_h
 WRAPPER_NAL_OFFSET = 12                 # packets.py:54
 TRAILER_PREFIX = b"\x24\x00"            # packets.py:57
 DEFAULT_PT = 96                         # session.py:2635, rtp.py:221-256 (legacy fallback route)
-HEVC_STREAM_TYPE = 0x24                 # rtp.py:88
+HEVC_STREAM_TYPES = frozenset({0x24, 0xB2})   # rtp.py:88 and :102 (_IDMX_RTP_STREAM_TYPES: both are hevc)
 FU = 49
 FU_MAX_BYTES = 8 << 20                  # a FU that grows past this is dropped (never-ending FU)
 AU_MAX_BYTES = 16 << 20                 # a pending AU past this many bytes or NALs is dropped
@@ -170,7 +170,7 @@ class Reassembler:
     def _is_hevc_route(self, pt: int) -> bool:
         # payloads.py:1117-1171 + rtp.py:547-562: descriptor-owned routes win; else the legacy PT 96, unless
         # a descriptor has assigned 96 to something else. Built progressively, the library uses the final map.
-        hevc = {p for p, st in self._desc.items() if st == HEVC_STREAM_TYPE}
+        hevc = {p for p, st in self._desc.items() if st in HEVC_STREAM_TYPES}
         return pt in hevc if hevc else (pt == DEFAULT_PT and pt not in self._desc)
 
     def push(self, body: bytes) -> list:
@@ -196,7 +196,7 @@ class Reassembler:
             return []
         if not self._is_hevc_route(pkt.pt):
             return []
-        authoritative = any(st == HEVC_STREAM_TYPE for st in self._desc.values())
+        authoritative = any(st in HEVC_STREAM_TYPES for st in self._desc.values())
         if len(media) > WRAPPER_NAL_OFFSET and media.startswith(WRAPPER):    # packets.py:297-300 / payloads.py:~800
             self._evidence = True
             return self._payload(media[WRAPPER_NAL_OFFSET:], pkt)

@@ -112,6 +112,19 @@ class ReassemblerTests(unittest.TestCase):
         self.assertEqual(r.push(with_desc(98, 1, 0x24, 98, VPS)), [SC + VPS])  # hevc on another PT
         self.assertEqual(r.push(rtp_body(96, 2, 0, SPS)), [])                  # 96 is no longer a route
 
+    def test_stream_type_b2_is_hevc(self):
+        # rtp.py:_IDMX_RTP_STREAM_TYPES maps BOTH 0x24 and 0xB2 to hevc (W-23 GA A1 diagnosis, hypothesis H1): a 0xB2
+        # descriptor on PT 96 is an authoritative HEVC route, not a foreign owner of 96
+        def with_desc(pt, seq, stream_type, desc_pt, payload):
+            rtp = bytes([0x90, pt, 0, seq, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" \
+                + bytes([0x45, 2, stream_type, desc_pt]) + payload
+            return len(rtp).to_bytes(4, "little") + rtp
+        for st in (0x24, 0xB2):
+            r = Reassembler()
+            idr = hevc_nal(19, 30)
+            self.assertEqual(r.push(with_desc(96, 1, st, 96, idr)), [SC + idr], hex(st))   # authoritative: no evidence wait
+            self.assertEqual(r.push(rtp_body(96, 2, 0, SPS)), [SC + SPS], hex(st))
+
     def test_evidence_gate_drops_vcl_before_parameter_sets(self):
         r = Reassembler()
         self.assertEqual(r.push(rtp_body(96, 1, 0, hevc_nal(19, 30))), [])
