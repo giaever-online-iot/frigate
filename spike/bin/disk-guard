@@ -2,7 +2,7 @@
 # W-23 D13: the hub-side disk floor guard. A oneshot timer app (every 10 min). Below the floor
 # (snap set frigate disk-floor-gib=N, default 20) it stops AND disables frigate.frigate once and logs one line.
 # It never stops anything when it cannot read the free space. No plugs: df of $SNAP_COMMON/media/frigate and snapctl only.
-# R2-N10: "stopped" is printed only if snapctl stop exited 0 AND a re-read shows frigate.frigate no longer active.
+# R2-N10: "stopped" is printed only if snapctl stop exited 0 AND a re-read positively shows frigate.frigate inactive.
 F=$(snapctl get disk-floor-gib 2>/dev/null) || F=""
 [ -n "$F" ] || F=20
 case "$F" in *[!0-9]*) echo "disk-guard: disk-floor-gib is not an integer; nothing done"; exit 1 ;; esac
@@ -13,7 +13,7 @@ floor=$((F * 1073741824))
 snapctl services frigate.frigate 2>/dev/null | awk '$1 == "frigate.frigate" { print $3 }' | grep -qx active || exit 0
 msg="disk-guard: free $((free / 1073741824)) GiB below floor $F GiB:"
 if snapctl stop --disable frigate.frigate &&
-   ! snapctl services frigate.frigate 2>/dev/null | awk '$1 == "frigate.frigate" { print $3 }' | grep -qx active; then
+   snapctl services frigate.frigate 2>/dev/null | awk '$1 == "frigate.frigate" { print $3 }' | grep -qx inactive; then
   echo "$msg stopped and disabled frigate.frigate"
 else
   echo "$msg stop FAILED"

@@ -4,7 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 SHELL_UNDER_TEST="${1:-sh}"; FAILS=0; SB=$(mktemp -d); trap 'rm -rf "$SB"' EXIT
 check() { if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1 [want $2 got $3]"; FAILS=$((FAILS+1)); fi; }
-# case NAME FREE_GIB FLOOR(or "") FRIGATE_STATE [DF_FAILS] [STOP_MODE: ok|fail|noop]
+# case NAME FREE_GIB FLOOR(or "") FRIGATE_STATE [DF_FAILS] [STOP_MODE: ok|fail|noop|blind]
 #   STOP_MODE ok: stop exits 0 and the state flips to inactive (R2-N10); fail: rc 1, state stays; noop: rc 0, state stays.
 case_() {
   local free=$2 floor=$3 state=$4 dffail=${5:-0} stopmode=${6:-ok} d="$SB/$1"; mkdir -p "$d/bin"
@@ -14,12 +14,13 @@ case_() {
 echo "\$*" >> "$d/calls"
 case "\$1 \$2" in
   "get disk-floor-gib") [ -n "$floor" ] && echo "$floor"; exit 0 ;;
-  "services frigate.frigate") printf 'Service          Startup  Current  Notes\nfrigate.frigate  enabled  %s  -\n' "\$(cat "$d/state")" ;;
+  "services frigate.frigate") [ -f "$d/blind" ] && exit 1; printf 'Service          Startup  Current  Notes\nfrigate.frigate  enabled  %s  -\n' "\$(cat "$d/state")" ;;
   "stop --disable")
     case "$stopmode" in
       ok) echo inactive > "$d/state"; exit 0 ;;
       fail) exit 1 ;;
       noop) exit 0 ;;
+      blind) echo blind > "$d/blind"; exit 0 ;;
     esac ;;
 esac
 EOF
@@ -52,5 +53,8 @@ case_ h 19 "" active 0 noop
 check "stop rc 0 but still active: exit 1" 1 "$(cat "$SB/h/rc")"
 check "stop rc 0 but still active: FAILED line" "disk-guard: free 19 GiB below floor 20 GiB: stop FAILED" "$(cat "$SB/h/out")"
 check "stop rc 0 but still active: no 'stopped' line" 0 "$(grep -c 'stopped and disabled' "$SB/h/out")"
+case_ i 19 "" active 0 blind
+check "stop rc 0 but re-read fails: exit 1" 1 "$(cat "$SB/i/rc")"
+check "stop rc 0 but re-read fails: FAILED line" "disk-guard: free 19 GiB below floor 20 GiB: stop FAILED" "$(cat "$SB/i/out")"
 [ "$FAILS" = 0 ] && echo "disk-guard.test: all ok" || echo "disk-guard.test: FAILURES"
 exit "$FAILS"
