@@ -266,6 +266,17 @@ rate() {
        END { printf "%d %d %d %.3f %d\n", n, after, before, seen ? first : 99, key }' "$3.log"
 }
 
+# jitter PREFIX: W-23 T21's jitter evidence from rate()'s showinfo log: "steps p99_ms", the p99 of |pts step - 40 ms|
+# over the consumer's decoded frames (25 fps), in ms. Evidence only: it measures the fake camera's stream.
+jitter() {
+  local devs m
+  devs=$(awk '/Parsed_showinfo/ && / pts_time:/ { match($0, / pts_time:[-0-9.]+/); t = substr($0, RSTART + 10, RLENGTH - 10) + 0
+         if (n++) { d = (t - last - 0.04) * 1000; if (d < 0) d = -d; printf "%.3f\n", d } last = t }' "$1.log" | sort -n)
+  m=$(printf '%s\n' "$devs" | grep -c .)
+  [ "$m" -gt 0 ] || { echo "0 -"; return; }
+  echo "$m $(printf '%s\n' "$devs" | sed -n "$(( (99 * m + 99) / 100 ))p")"
+}
+
 # ---------------------------------------------------------------- scenario A: checks 1, 5, 2, 3, 4, 7 (one camera)
 scen_A() {
   local E=$T/A L S=cam1 pg t0 fr er w c y h lg a1 l0 c0 gp tk sdt tr pre natt c a2 l1 bw sp evs2 left
@@ -279,6 +290,7 @@ scen_A() {
   check "1: cam1 decoded >= 250 frames in 10 s with 0 decode errors once synced, after a lead-in <= GOP 2 s + 1 s on a keyframe [frames=$fr errors after the first frame=$er (join errors before it=$eb) lead-in=$li s first frame key=$k0 logins=$(st "$E" $S logins_ok) published +$(sub "$(lq last "$L" published)" "$t0") s after go2rtc-run started]" \
     1 "$([ "${fr:-0}" -ge 250 ] && [ "$er" = 0 ] && [ "$(le "$li" 3)" = 1 ] && [ "$k0" = 1 ] && echo 1 || echo 0)"
   echo "evidence - 1: cam1 frames=$fr in 10 s, lead-in $li s"
+  echo "evidence - 1 (T21 jitter, TIMESTAMP_MODE $(sed -n 's/^TIMESTAMP_MODE = "\([a-z]*\)".*/\1/p' "$REPO/spike/ezviz/ezviz_source/constants.py")): consumer pts steps and p99 |step - 40 ms| in ms: $(jitter "$E/c1")"
   w=$(grep -c 'WARNING operator go2rtc stream cam1 replaced by the snap-owned ezviz camera' "$E/run.1.log")
   c=$( { logs "$E"; cat "$E/data/go2rtc.yaml"; } | grep -c S2OPCANARY)
   # N7 (fix wave 1): the YAML is PARSED and the stream VALUE compared; a physical-line grep breaks when a long path makes the dumper wrap the scalar.

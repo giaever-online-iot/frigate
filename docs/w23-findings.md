@@ -359,6 +359,13 @@ chosen: form=extend count=4320 starttimeout=30 timestamps=rtp
   starts just below it, a backward step, a zero step and a 10**9-tick jump, plus a 20,000-step random fuzz that never
   goes back. Real ffmpeg reads strictly monotonic PTS, equal to the unwrapped ts, across a 32-bit wrap, and decodes the
   clip with 0 errors.
+- **S2 check 1 re-run in rtp mode** (19 Nov, the local amd64 snap's go2rtc 1.9.14 and ffmpeg 8.0, fake camera):
+  `serve-ezviz.test.sh` 53 ok, 0 FAIL. Check 1 decoded 251 frames in 10 s with 0 errors after a 0.000 s lead-in.
+- **Jitter evidence** (the plan asks for the consumer's pts-step p99 deviation from 40 ms under the chosen form): S2's
+  check-1 consumer saw 326 pts steps, with a p99 |step − 40 ms| of 0.000 ms. That is the fake camera, whose RTP steps
+  are exactly 3600, so it shows only that the helper, ffmpeg and go2rtc pass the camera's timestamps through
+  unchanged. On the real cameras the probes measured `rtp_ts_step_p99_dev` ≤ 2 ticks (0.02 ms) at the source. A
+  consumer-side measurement on the real cameras needs a hub run (S6/S8); it was not taken here.
 
 ### A1 and the diagnostic run: RESULT (the cause is H2, fixed in d06e99c)
 
