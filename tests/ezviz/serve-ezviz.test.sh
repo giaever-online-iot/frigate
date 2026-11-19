@@ -281,7 +281,9 @@ scen_A() {
   echo "evidence - 1: cam1 frames=$fr in 10 s, lead-in $li s"
   w=$(grep -c 'WARNING operator go2rtc stream cam1 replaced by the snap-owned ezviz camera' "$E/run.1.log")
   c=$( { logs "$E"; cat "$E/data/go2rtc.yaml"; } | grep -c S2OPCANARY)
-  y=$(grep -c "^  cam1: exec:$E/snap/bin/ezviz-source cam1 {output}#killsignal=15#killtimeout=5\$" "$E/data/go2rtc.yaml")
+  # N7 (fix wave 1): the YAML is PARSED and the stream VALUE compared; a physical-line grep breaks when a long path makes the dumper wrap the scalar.
+  y=$(python3 -I -c 'import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); s = (d.get("streams") or d.get("go2rtc", {}).get("streams") or {}); print(1 if s.get("cam1") == sys.argv[2] else 0)' \
+        "$E/data/go2rtc.yaml" "exec:$E/snap/bin/ezviz-source cam1 {output}#killsignal=15#killtimeout=5")
   h=$(helpers "$pg" cam1); lg=$(st "$E" $S logins_ok)
   check "5 (N7): operator cam1 in config.yml dropped with a redacted warning; 1 helper, 1 login [warnings=$w canary hits in logs+yaml=$c exec-only cam1=$y helpers=$h logins=$lg]" \
     "1 0 1 1 1" "$w $c $y $h $lg"
