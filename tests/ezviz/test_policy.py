@@ -170,6 +170,16 @@ class TestBudget(unittest.TestCase):
         d = at(recs + [R(3500, "latch"), R(3600, "unlatch")], 3700)   # k=3 would wait until 4400; cap free
         self.assertTrue(d.allow)
 
+    def test_unlatch_resets_ladder_for_a_rung_after_it(self):          # P6, fix wave 1 S1
+        # Two rungs and an auth_fail before the unlatch, one rung after it. The ladder counts only the session after
+        # the unlatch (k = 1: 6210 + 60), so the cap binds (3000 + 3600). Counting every session gives k = 3
+        # (6210 + 900 = 7110).
+        recs = [R(0, "attempt"), R(10, "net_fail"), R(3000, "attempt"), R(3010, "net_fail"),
+                R(6000, "attempt"), R(6001, "auth_fail"), R(6001, "latch"), R(6100, "unlatch"),
+                R(6200, "attempt"), R(6210, "net_fail")]
+        d = at(recs, 6300)
+        self.assertEqual((d.cls, d.next_allowed - T0), ("budget_wait", 6600))
+
     def test_relatch_after_unlatch_writes_latch_again(self):           # P9
         recs = [R(0, "attempt"), R(1, "auth_fail"), R(1, "latch"), R(4000, "unlatch"),
                 R(4100, "attempt"), R(4101, "auth_fail")]
