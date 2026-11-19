@@ -62,41 +62,70 @@ def render_seconds(plan) -> float:
     return time.perf_counter() - t0
 
 
+class _HookFailed(BaseException):
+    """Carries an on_login_ok exception through the library unwrapped.
+
+    The library's step code wraps any OSError/PyEzvizError from a connect as PyEzvizError("... send failed ...")
+    (session.py L1046-1052), which classify() would read as session_end. A BaseException subclass passes
+    through its `except (OSError, PyEzvizError)` clauses; __enter__ unwraps it.
+    """
+
+    def __init__(self, err: Exception):
+        super().__init__()
+        self.err = err
+
+
 class CameraSession:
     """One login and one plan run against one camera. Not reusable."""
 
     def __init__(self, cam: Camera, *, plan, timeout: float, on_login_ok: Callable[[], None]):
         self.logged_in = False
         self._on_login_ok = on_login_ok
-        self._factory_calls = 0
         endpoint = HcNetSdkLanEndpoint(serial=cam.serial, host=cam.host, command_port=cam.port)
         self._stream = open_hcnetsdk_command_port_generated_multi_socket_stream(
             endpoint, plan, password=cam.login, username="admin", timeout=timeout, socket_factory=self._factory)
 
     def _factory(self, address, timeout):
-        # P2: call 1 is the login socket; call 2 is the plan's first socket, made only after login returned and
-        # the login socket was closed. login_ok goes out here, on the main thread, before that connect.
-        self._factory_calls += 1
-        if self._factory_calls == 2 and self._stream.login_session is not None and not self.logged_in:
+        # P2: on 2.0.0's path, call 1 is the login socket and call 2 the plan's first socket, made only after login
+        # returned and the login socket was closed. login_ok goes out here, on the main thread, before that connect.
+        # The gate is "the first call that sees login_session set", which is call 2 there and survives an extra
+        # pre-login connect. The keepalive thread can reach this factory lazily after a media-socket invalidation
+        # (client.connect() reconnects on demand); the hook is latched by logged_in, so that is harmless.
+        if not self.logged_in and self._stream.login_session is not None:
             self.logged_in = True
-            self._on_login_ok()
+            try:
+                self._on_login_ok()
+            except Exception as e:  # noqa: BLE001 - carried past the library's step wrapping, re-raised as is
+                raise _HookFailed(e) from None
         return socket.create_connection(address, timeout)
 
     def __enter__(self) -> "CameraSession":
         try:
             self._stream.prepare_startup()      # the RSA key, as iter_packets() would do (session.py L1593)
             self._stream.start()                # login + plan + first media (P1)
+        except _HookFailed as h:
+            hook_err = h.err
+            self.__exit__(None, None, None)
         except BaseException:
             self.__exit__(None, None, None)
             raise
-        return self
+        else:
+            return self
+        # Review fix 1: the hook's own exception object, re-raised outside the handler so its __cause__ and
+        # __context__ stay as the hook left them.
+        raise hook_err
 
     def packets(self) -> Iterator[bytes]:
         for pkt in self._stream.iter_packets():
             yield pkt.body
 
     def keepalive_failed(self) -> bool:
-        # E8/E14. N5: the property copies the whole event tuple; once a second that is cheap.
+        """A METHOD, not a property: True once any keepalive send failed (E8/E14).
+
+        Sample it before __exit__: close() drops the rendered stream, after which the library's
+        keepalive_events is () and this returns False. N5: that library property copies the whole
+        event tuple; once a second that is cheap.
+        """
         return any(not e.sent for e in self._stream.keepalive_events)
 
     def __exit__(self, *exc) -> None:

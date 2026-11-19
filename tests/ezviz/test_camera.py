@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -92,15 +93,33 @@ class SessionTests(unittest.TestCase):
         self.addCleanup(cs.__exit__, None, None, None)
         return cs
 
-    def fail_of(self, cs) -> BaseException:
-        """Open and read until the library raises; return that exception."""
+    def fail_of(self, cs, bound_s: float = 60.0) -> BaseException:
+        """Open and read until the library raises; return that exception. Bounded: an overrun fails the test."""
+        end = time.monotonic() + bound_s
         try:
             with cs:
                 for _ in cs.packets():
-                    pass
+                    if time.monotonic() > end:
+                        self.fail(f"no library exception within {bound_s} s")
         except Exception as e:  # noqa: BLE001 - the test classifies whatever the library raised
             return e
         self.fail("the stream ended without an exception")
+
+    def test_hook_error_reaches_caller_unwrapped(self):
+        # Task 11's hook writes login_ok (LedgerIOError) and spawns ffmpeg (OSError): main.py must see that very
+        # object, not a library PyEzvizError("... send failed ...") wrapper that classify() would call session_end.
+        s = self.server()
+        err, cause = PermissionError(13, "canary hook failure"), OSError("canary cause")
+
+        def hook():
+            raise err from cause
+        cs = self.session(s.port, hook=hook)
+        with self.assertRaises(PermissionError) as cm:
+            cs.__enter__()
+        self.assertIs(cm.exception, err)
+        self.assertIs(err.__cause__, cause)             # the hook's own chain is left as it was
+        self.assertNotIsInstance(err.__context__, PyEzvizError)
+        self.assertEqual(s.stats["connects"], 1)        # plan connection 2 was never opened
 
     def test_login_ok_hook_fires_once_after_login(self):
         s = self.server()
