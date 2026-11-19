@@ -8,6 +8,10 @@
 #   as in a snap refresh, does not trip). A change of the HA snap unit's MainPID or NRestarts alone is logged as
 #   INFO, not tripped on: a home-assistant snap refresh restarts the unit while the container and the frontend
 #   stay up (hub, 14 Nov: MainPID changed twice, container StartedAt and RestartCount unchanged);
+#   the hub kernel logged "Undervoltage detected" since the watcher started (W-23 P12): the kernel transport of the
+#   journal across ALL boots (`journalctl _TRANSPORT=kernel --since @<start>`, never -k, which is the current boot
+#   only, as tests/hub/power-check.sh reads it); a count that grows trips; an unreadable journal is logged as INFO
+#   (`kuv=unreadable`), never counted as 0 and never BLIND;
 #   Home Assistant slow: no HTTP status line within 5 s in 3 consecutive samples. The slow check is a HEURISTIC
 #   (no curl on the hub): `printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 5 127.0.0.1 <port> | head -n 1`, timed;
 #   any `HTTP/1.x NNN` status line counts as an answer. A plain `nc -z` TCP result is logged, not tripped on.
@@ -48,6 +52,7 @@ LOG="${LOG:-$HOME/.cache/frigate-m7c-evidence/hub/watch-$(date +%Y%m%dT%H%M%S).l
 mkdir -p "$(dirname "$LOG")" || exit 2
 SLEEP="${M7C_WATCH_SLEEP:-sleep}"
 now() { if [ -n "${M7C_WATCH_CLOCK:-}" ]; then "$M7C_WATCH_CLOCK"; else date +%s; fi; }
+START=$(now)
 gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
 log() { printf '%s\n' "$*" | tee -a "$LOG"; }
 loud() { printf '%s\n' "$*" | tee -a "$LOG" >&2; }
@@ -64,13 +69,14 @@ nc -z -w 5 127.0.0.1 $PORT >/dev/null 2>&1; echo \"ha_tcp_rc=\$?\"
 echo \"ha_ctr=\$(docker inspect -f '{{.State.Running}} {{.RestartCount}} {{.State.StartedAt}}' $HAC 2>/dev/null)\"
 t0=\$(date +%s%N); r=\$(printf 'GET / HTTP/1.0\\r\\n\\r\\n' | timeout 10 nc -w 5 127.0.0.1 $PORT 2>/dev/null | head -n 1 | tr -d '\\r'); t1=\$(date +%s%N)
 echo \"ha_http=\$r\"; echo \"ha_http_ms=\$(( (t1 - t0) / 1000000 ))\"
+k=\$(journalctl _TRANSPORT=kernel --since @$START --no-pager -q -o cat 2>/dev/null) && echo \"kuv=\$(printf '%s\\n' \"\$k\" | grep -c 'Undervoltage detected')\" || echo kuv=unreadable
 echo end=1"
-KEYS="memavail_kb swap_used_kb psi_some_avg60 load1 fr_nrestarts free_kb ha_LoadState ha_ActiveState ha_MainPID ha_NRestarts ha_tcp_rc ha_ctr ha_http_ms end"
+KEYS="memavail_kb swap_used_kb psi_some_avg60 load1 fr_nrestarts free_kb ha_LoadState ha_ActiveState ha_MainPID ha_NRestarts ha_tcp_rc ha_ctr ha_http_ms kuv end"
 
 "$EXEC" check >/dev/null 2>&1 </dev/null || { loud "watch: MASTER GONE: no live ssh master; not watching (exit 3)"; exit 3; }
-log "watch: start $(date -Is); mode $([ "$ACT" = 1 ] && echo ACT || echo DETECT-ONLY); interval ${IV}s; swap baseline ${BASE_MB} MB; HA unit $HAU container $HAC port $PORT; data fs $DATA"
+log "watch: start $(date -Is) (epoch $START); mode $([ "$ACT" = 1 ] && echo ACT || echo DETECT-ONLY); interval ${IV}s; swap baseline ${BASE_MB} MB; HA unit $HAU container $HAC port $PORT; data fs $DATA"
 
-declare -A V; bad=0; i=0; psi_since=""; load_since=""; ha_bad=0; ha_down=0; ha_pid0=""; ha_nr0=""; ctr_rc0=""; ctr_st0=""
+declare -A V; bad=0; i=0; kuv0=0; kuv_blind=0; psi_since=""; load_since=""; ha_bad=0; ha_down=0; ha_pid0=""; ha_nr0=""; ctr_rc0=""; ctr_st0=""
 NRT=(); NRV=()
 while :; do
   i=$((i + 1)); t=$(now)
@@ -81,6 +87,7 @@ while :; do
   for k in $KEYS; do [ -n "${V[$k]+x}" ] || ok=0; done
   for k in memavail_kb swap_used_kb fr_nrestarts free_kb ha_NRestarts ha_tcp_rc ha_http_ms; do uint "${V[$k]:-}" || ok=0; done
   [[ "${V[psi_some_avg60]:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "${V[load1]:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ok=0
+  { uint "${V[kuv]:-}" || [ "${V[kuv]:-}" = unreadable ]; } || ok=0
   if [ "$ok" = 0 ]; then
     bad=$((bad + 1)); loud "watch: WARN: unparsable sample $i (rc $rc), $bad in a row"
     if [ "$bad" -ge 2 ]; then loud "watch: BLIND: $bad samples in a row failed; stopping the watcher (exit 4)"; exit 4; fi
@@ -94,7 +101,7 @@ while :; do
       log "watch: baseline: HA container $HAC Running=$ctr_run RestartCount=$ctr_rc0 StartedAt=$ctr_st0; HA unit MainPID=${V[ha_MainPID]} NRestarts=${V[ha_NRestarts]}"
     fi
     code=$(awk '{ print $2 }' <<<"${V[ha_http]:-}")
-    log "$(date -Is) mem_avail=$(( V[memavail_kb] / 1024 ))MB psi60=${V[psi_some_avg60]} load1=${V[load1]} fr_nrestarts=${V[fr_nrestarts]} free=$(( V[free_kb] / 1048576 ))GB swap_used=$(( V[swap_used_kb] / 1024 ))MB(base $BASE_MB) ha=${V[ha_ActiveState]} pid=${V[ha_MainPID]} nr=${V[ha_NRestarts]} ctr=${ctr_run:-?}/${ctr_rc:-?} tcp=${V[ha_tcp_rc]} http=${code:-none} ${V[ha_http_ms]}ms"
+    log "$(date -Is) mem_avail=$(( V[memavail_kb] / 1024 ))MB psi60=${V[psi_some_avg60]} load1=${V[load1]} fr_nrestarts=${V[fr_nrestarts]} free=$(( V[free_kb] / 1048576 ))GB swap_used=$(( V[swap_used_kb] / 1024 ))MB(base $BASE_MB) ha=${V[ha_ActiveState]} pid=${V[ha_MainPID]} nr=${V[ha_NRestarts]} ctr=${ctr_run:-?}/${ctr_rc:-?} tcp=${V[ha_tcp_rc]} http=${code:-none} ${V[ha_http_ms]}ms kuv=${V[kuv]}"
     TRIPS=()
     [ "${V[memavail_kb]}" -lt 2097152 ] && TRIPS+=("MemAvailable $(( V[memavail_kb] / 1024 )) MB < 2048 MB")
     if gt "${V[psi_some_avg60]}" 10; then psi_since=${psi_since:-$t}; [ $((t - psi_since)) -ge 300 ] && TRIPS+=("memory PSI some avg60 > 10 for $((t - psi_since)) s")
@@ -124,6 +131,15 @@ while :; do
     hok=1; [ "${V[ha_http_ms]}" -le 5000 ] || hok=0
     [[ "${V[ha_http]:-}" =~ ^HTTP/1\.[01]\ [0-9]{3} ]] || hok=0
     if [ "$hok" = 1 ]; then ha_bad=0; else ha_bad=$((ha_bad + 1)); fi
+    # Kernel undervoltage lines since $START, all boots: unreadable is INFO (once per spell), never 0 and never BLIND.
+    if [ "${V[kuv]}" = unreadable ]; then
+      [ "$kuv_blind" = 1 ] || log "INFO: kernel journal unreadable (kuv=unreadable): undervoltage is NOT checked while it stays unreadable (each sample line shows kuv=); check it with tests/hub/power-check.sh --since $START"
+      kuv_blind=1
+    else
+      kuv_blind=0
+      [ "${V[kuv]}" -gt "$kuv0" ] && TRIPS+=("undervoltage: the hub kernel logged ${V[kuv]} 'Undervoltage detected' line(s) since $START (was $kuv0)")
+      kuv0=${V[kuv]}
+    fi
     [ "$ha_bad" -ge 3 ] && TRIPS+=("Home Assistant gave no HTTP status line within 5 s in $ha_bad samples (last: '${V[ha_http]:-}' ${V[ha_http_ms]}ms; tcp=${V[ha_tcp_rc]})")
     if [ "${#TRIPS[@]}" -gt 0 ]; then
       for m in "${TRIPS[@]}"; do loud "TRIP: $m"; done

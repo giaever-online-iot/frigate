@@ -126,5 +126,14 @@ run b1 W_BROKEN="0 1 0" -- "${B[@]}" --samples 4; check "one unparsable sample: 
 run b2 W_BROKEN="0 1 1" -- "${B[@]}";  check "two unparsable samples in a row: exit 4 (BLIND)" 4 "$(rc b2)"; has "says BLIND" "BLIND" "$(O b2)"
 check "BLIND right after the second bad sample (2 WARN lines)" 2 "$(grep -c 'WARN: unparsable sample' "$(O b2)")"
 
+# --- kernel undervoltage since the watcher started, all boots (P12, SF10): a growing count trips; unreadable is INFO ---
+run uv1 W_UV="0 0 1" -- "${B[@]}" --samples 3
+check "undervoltage +1: exit 1" 1 "$(rc uv1)"; has "undervoltage: TRIP line" "TRIP: undervoltage" "$(O uv1)"
+run uv2 W_UV="0 1" -- "${B[@]}" --samples 2 --act; check "undervoltage --act: frigate stopped once" 1 "$(stops uv2)"
+run uv3 W_UV="unreadable" -- "${B[@]}" --samples 3
+check "kuv unreadable: exit 0, no TRIP" 0 "$(rc uv3)"; has "kuv unreadable: INFO line" "INFO: kernel journal unreadable" "$(O uv3)"
+has "the sample reads the kernel transport across boots" "journalctl _TRANSPORT=kernel --since @" "$(C uv3)"
+hasnt "never journalctl -k" "journalctl -k" "$(C uv3)"
+
 [ "$fail" = 0 ] && echo "watch.test: all ok" || echo "watch.test: FAILURES"
 exit "$fail"
