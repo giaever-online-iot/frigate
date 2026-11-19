@@ -117,12 +117,12 @@ class TestEzvizEmission(unittest.TestCase):
         self.assertEqual(out["preload"], {"cam1": "video", "cam2": "video"})
 
     def test_operator_cam1_dropped_redacted(self):  # N7
-        cfg = 'go2rtc:\n  streams:\n    cam1: rtsp://admin:QZCNRA@192.0.2.11/x\n'
+        cfg = 'go2rtc:\n  streams:\n    cam1: rtsp://admin:QZFAKECODEA@192.0.2.11/x\n'
         rc, out, err = run_main5(BASELINE, cfg, ["cam1"])
         self.assertEqual(rc, 0)
         self.assertEqual(out["streams"]["cam1"], exec_line("cam1"))
         self.assertIn("WARNING operator go2rtc stream cam1 replaced by the snap-owned ezviz camera", err)
-        for secret in ("QZCNRA", "192.0.2.11", "admin"):
+        for secret in ("QZFAKECODEA", "192.0.2.11", "admin"):
             self.assertNotIn(secret, err)
 
     def test_operator_cam1_sub_kept(self):

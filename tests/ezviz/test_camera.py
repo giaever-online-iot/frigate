@@ -24,7 +24,7 @@ from pyezvizapi.exceptions import DeviceException, PyEzvizError
 from pyezvizapi.streaming.local import session as libsession
 from pyezvizapi.streaming.local.session import hcnetsdk_command_port_native_lan_live_view_plan
 
-CODE = "QZCNRA"
+CODE = "QZFAKECODEA"
 
 
 def media_step(plan):

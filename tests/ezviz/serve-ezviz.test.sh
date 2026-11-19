@@ -24,7 +24,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 REPO=$PWD; T=$(mktemp -d); : > "$T/pgs"; : > "$T/results"
-CODE=QZCNRA   # the fixtures' canary login code (spec §4.5 markers), never a real one
+CODE=QZFAKECODEA   # the fixtures' canary login code (spec §4.5 markers), never a real one
 
 # shellcheck disable=SC2317  # cleanup runs from the EXIT trap
 cleanup() {

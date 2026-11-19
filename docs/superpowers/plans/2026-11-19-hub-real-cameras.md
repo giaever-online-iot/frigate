@@ -355,7 +355,7 @@ class TestCamfile(unittest.TestCase):
 
     def test_good(self):
         c = load("cam1", mk(GOOD))
-        self.assertEqual((c.host, c.port, c.serial, c.login), ("192.0.2.11", 8000, "TESTCAM-0001", "QZCNRA"))
+        self.assertEqual((c.host, c.port, c.serial, c.login), ("192.0.2.11", 8000, "TESTCAM-0001", "QZFAKECODEA"))
 
     def test_repr_has_no_value(self):
         self.assertEqual(repr(load("cam1", mk(GOOD))), "Camera(cam1)")
@@ -395,11 +395,11 @@ class TestCamfile(unittest.TestCase):
         self.assertEqual(self.cls(mk(GOOD.replace("8000", "65536"))), "shape")
 
     def test_login_shape(self):
-        self.assertEqual(self.cls(mk(GOOD.replace("QZCNRA", "QZ CN"))), "shape")
+        self.assertEqual(self.cls(mk(GOOD.replace("QZFAKECODEA", "QZ CN"))), "shape")
 
     def test_error_text_is_class_only(self):
         with self.assertRaises(CameraFileError) as cm:
-            load("cam1", mk(GOOD.replace("QZCNRA", "QZ!!")))
+            load("cam1", mk(GOOD.replace("QZFAKECODEA", "QZ!!")))
         self.assertEqual((str(cm.exception), cm.exception.args), ("shape", ("shape",)))
 
     def test_comment_and_crlf(self):
@@ -419,8 +419,8 @@ import tempfile
 import time
 from pathlib import Path
 
-GOOD = "host=192.0.2.11\nport=8000\nserial=TESTCAM-0001\nlogin=QZCNRA\n"
-CANARIES = ("192.0.2.11", "TESTCAM-0001", "QZCNRA")
+GOOD = "host=192.0.2.11\nport=8000\nserial=TESTCAM-0001\nlogin=QZFAKECODEA\n"
+CANARIES = ("192.0.2.11", "TESTCAM-0001", "QZFAKECODEA")
 
 
 class Tree:
@@ -1723,7 +1723,7 @@ def test_two_slices_one_picture(self): IDR first_slice=1 then IDR first_slice=0 
 **Files:** Create `tests/ezviz/fakecam.py`. Test `tests/ezviz/test_fakecam.py`.
 
 **Interfaces:**
-- Produces the CLI `"$PY" tests/ezviz/fakecam.py --port 0 --code QZCNRA --stats FILE --es CLIP.h265 [--reject] [--silent-before-challenge] [--silent-after-login] [--close-after-s N] [--stall-after-s N] [--no-media] [--port-file FILE]`. It listens on 127.0.0.1, writes the bound port to `--port-file`, runs one thread per connection, and rewrites `--stats` atomically after every event as `{"connects": n, "logins_ok": n, "logins_rejected": n, "keepalives": n, "media_sessions": n}`.
+- Produces the CLI `"$PY" tests/ezviz/fakecam.py --port 0 --code QZFAKECODEA --stats FILE --es CLIP.h265 [--reject] [--silent-before-challenge] [--silent-after-login] [--close-after-s N] [--stall-after-s N] [--no-media] [--port-file FILE]`. It listens on 127.0.0.1, writes the bound port to `--port-file`, runs one thread per connection, and rewrites `--stats` atomically after every event as `{"connects": n, "logins_ok": n, "logins_rejected": n, "keepalives": n, "media_sessions": n}`.
 - Produces `fakecam.Server(...)` with the same knobs in-process, plus `.stats` and `.close()`.
 - **The wire protocol it implements**, from the pyEzvizApi 2.0.0 client side:
   - every frame has a 16-byte header: u32 BE `total_length` (header included) and three u32 fields, then the body (`framing.py` L126-155, L286-300);
@@ -1749,7 +1749,7 @@ def test_two_slices_one_picture(self): IDR first_slice=1 then IDR first_slice=0 
 def test_login_ok_counts_one_and_11_connects(self):  open the library stream (camera.py does not exist yet: call
     open_hcnetsdk_command_port_generated_multi_socket_stream directly with the built-in plan), read 10 packets -> stats logins_ok 1, connects 11
 def test_reject_raises_login_failed(self): --reject -> PyEzvizError("HCNetSDK command-port login failed"); logins_rejected 1, connects 1
-def test_wrong_code_is_rejected(self): client password "QZWRNG" -> login failed
+def test_wrong_code_is_rejected(self): client password "QZFAKEWRONG" -> login failed
 def test_media_packets_reassemble(self): 50 packets through annexb.Reassembler -> NAL types include 32,33,34,19
 def test_keepalives_counted(self): read for 11 s -> stats keepalives >= 2
 ```
@@ -1883,7 +1883,7 @@ def test_second_helper_while_first_holds_session_is_busy_one_login(self):  # F4:
 def test_auth_fail_latches_and_next_helper_opens_no_socket(self):  # E2: rc 77, ledger ends auth_fail, latch; next helper rc 75 "latched"; fake connects unchanged
 def test_net_fail_counts_as_attempt(self):                          # closed port -> net_fail; the next decision has attempts_in_window == 1
 def test_no_marker_leaks_anywhere(self):                            # §4.5, N8: drive auth_fail, net_fail, session_end, output_end, stop;
-    # 192.0.2.11 / TESTCAM-0001 / QZCNRA absent from stdout, stderr, the ledger, /proc/<helper>/cmdline, /proc/<ffmpeg>/environ (read while running)
+    # 192.0.2.11 / TESTCAM-0001 / QZFAKECODEA absent from stdout, stderr, the ledger, /proc/<helper>/cmdline, /proc/<ffmpeg>/environ (read while running)
 # test_helper_s14.py
 def test_sigterm_P0_writes_nothing(self):          # EZVIZ_TEST_HOOKS=pause_gate, SIGTERM in the pause -> rc 0, no ledger record
 def test_sigterm_P1_is_net_fail_no_row(self):      # fake --silent-before-challenge, SIGTERM 1 s after "attempt" -> net_fail; row unchanged (K2)
@@ -2170,9 +2170,9 @@ class TestEzvizEmission(unittest.TestCase):
         self.assertEqual(out["streams"]["cam1"], f"exec:{SNAP}/bin/ezviz-source cam1 {{output}}#killsignal=15#killtimeout=5")
         self.assertEqual(out["preload"], {"cam1": "video", "cam2": "video"})
     def test_operator_cam1_dropped_redacted(self):   # N7
-        rc, out, err = run_main5(BASELINE, 'go2rtc:\n  streams:\n    cam1: rtsp://admin:QZCNRA@192.0.2.11/x\n', ["cam1"])
+        rc, out, err = run_main5(BASELINE, 'go2rtc:\n  streams:\n    cam1: rtsp://admin:QZFAKECODEA@192.0.2.11/x\n', ["cam1"])
         self.assertTrue(out["streams"]["cam1"].startswith("exec:")); self.assertIn("go2rtc stream cam1 replaced", err)
-        self.assertNotIn("QZCNRA", err); self.assertNotIn("192.0.2.11", err)
+        self.assertNotIn("QZFAKECODEA", err); self.assertNotIn("192.0.2.11", err)
     def test_operator_cam1_sub_kept(self): an operator "cam1_sub" stays as given
     def test_only_valid_camera_files_become_streams(self):   # Review Focus 5
         extra = ["cam1.conf.m7c-new", "CAM2.conf", "x.txt"]; and a directory "d.conf"

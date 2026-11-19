@@ -10,7 +10,7 @@ check() { if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1 [want 
 has()   { grep -qF -- "$2" "$3"; check "$1" 0 $?; }
 hasnt() { grep -qF -- "$2" "$3"; check "$1" 1 $?; }
 M=tests/hub/make-config.sh; FX=$PWD/tests/hub/fixtures
-CA=QZCNRA; CB=QZCNRB; NC=QZNEVERREAD; IP1=192.0.2.11; IP2=192.0.2.12; ID1=TESTCAM-0001; ID2=TESTCAM-0002
+CA=QZFAKECODEA; CB=QZFAKECODEB; NC=QZNEVERREAD; IP1=192.0.2.11; IP2=192.0.2.12; ID1=TESTCAM-0001; ID2=TESTCAM-0002
 CANARIES=("$CA" "$CB" "$NC" "$IP1" "$IP2" "$ID1" "$ID2")
 
 # argv+env recording shims for every external command the scripts use (resolved now, exec'd later)
@@ -24,7 +24,7 @@ mkenv() {  # mkenv DIR [pairs-mode]: synthetic env dir (pairs + env 0600) and a 
   local d=$1; mkdir -p "$d"
   printf '%s %s\r\n%s %s\r\n' "$ID1" "$IP1" "$ID2" "$IP2" > "$d/cameras.pairs"
   printf 'M7C_KEYFILE=%s\n' "$d/keys.yaml" > "$d/env"
-  printf 'new:\r\n  common: %s\r\noriginal QR Code keys:\r\n  %s: %s\r\n  %s: %s\r\n  TESTCAM-9999: QZOTHR\r\n' "$NC" "$ID1" "$CA" "$ID2" "$CB" > "$d/keys.yaml"
+  printf 'new:\r\n  common: %s\r\noriginal QR Code keys:\r\n  %s: %s\r\n  %s: %s\r\n  TESTCAM-9999: QZFAKEOTHER\r\n' "$NC" "$ID1" "$CA" "$ID2" "$CB" > "$d/keys.yaml"
   chmod 600 "$d/cameras.pairs" "$d/env" "$d/keys.yaml"; [ -n "${2:-}" ] && chmod "$2" "$d/cameras.pairs"; return 0
 }
 run() {  # run NAME [env...] -- args. Fresh hub (the rendered H4 config) unless PRE says otherwise.
@@ -119,7 +119,7 @@ if python3 -c 'import yaml' 2>/dev/null; then
   check "generator: says it merged the section, prints no secret" 0 "$(grep -cF -e "$CA" -e "$IP1" "$T/gen/err")"
 else echo "SKIP - generator cross-check (no PyYAML on this host)"; fi
 hasnt "new.common never reaches the hub" "$NC" "$(HC h1)"
-hasnt "another camera's code never reaches the hub" "QZOTHR" "$(HC h1)"
+hasnt "another camera's code never reaches the hub" "QZFAKEOTHER" "$(HC h1)"
 has   "the config is sent on stdin, never in the remote command" "cat > /var/snap/frigate/current/config/config.yml.m7c-new" "$T/h1/st/cmds"
 
 # --- re-run: the pristine backup stays the source and is never overwritten ---

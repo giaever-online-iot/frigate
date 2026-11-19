@@ -21,7 +21,7 @@ from pyezvizapi.streaming.local.session import (
     open_hcnetsdk_command_port_generated_multi_socket_stream,
 )
 
-CODE, WRONG = "QZCNRA", "QZWRNG"
+CODE, WRONG = "QZFAKECODEA", "QZFAKEWRONG"
 FAKECAM = Path(__file__).resolve().parent / "fakecam.py"
 
 

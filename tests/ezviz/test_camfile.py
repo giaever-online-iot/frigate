@@ -26,7 +26,7 @@ class TestCamfile(unittest.TestCase):
 
     def test_good(self):
         c = load("cam1", mk(GOOD))
-        self.assertEqual((c.host, c.port, c.serial, c.login), ("192.0.2.11", 8000, "TESTCAM-0001", "QZCNRA"))
+        self.assertEqual((c.host, c.port, c.serial, c.login), ("192.0.2.11", 8000, "TESTCAM-0001", "QZFAKECODEA"))
 
     def test_repr_has_no_value(self):
         self.assertEqual(repr(load("cam1", mk(GOOD))), "Camera(cam1)")
@@ -66,11 +66,11 @@ class TestCamfile(unittest.TestCase):
         self.assertEqual(self.cls(mk(GOOD.replace("8000", "65536"))), "shape")
 
     def test_login_shape(self):
-        self.assertEqual(self.cls(mk(GOOD.replace("QZCNRA", "QZ CN"))), "shape")
+        self.assertEqual(self.cls(mk(GOOD.replace("QZFAKECODEA", "QZ CN"))), "shape")
 
     def test_error_text_is_class_only(self):
         with self.assertRaises(CameraFileError) as cm:
-            load("cam1", mk(GOOD.replace("QZCNRA", "QZ!!")))
+            load("cam1", mk(GOOD.replace("QZFAKECODEA", "QZ!!")))
         self.assertEqual((str(cm.exception), cm.exception.args), ("shape", ("shape",)))
 
     def test_comment_and_crlf(self):

@@ -14,8 +14,8 @@ from pathlib import Path
 
 from ezviz_source import ledger as _ledger
 
-GOOD = "host=192.0.2.11\nport=8000\nserial=TESTCAM-0001\nlogin=QZCNRA\n"
-CANARIES = ("192.0.2.11", "TESTCAM-0001", "QZCNRA")
+GOOD = "host=192.0.2.11\nport=8000\nserial=TESTCAM-0001\nlogin=QZFAKECODEA\n"
+CANARIES = ("192.0.2.11", "TESTCAM-0001", "QZFAKECODEA")
 
 
 def tmpdir(case=None, **kw) -> Path:
@@ -147,7 +147,7 @@ def fake_ffmpeg(tmpdir, **knobs) -> str:
 
 # ---- the helper process harness (W-23 T11, C22) ----
 HERE = Path(__file__).resolve().parent
-LOOPBACK, SERIAL, CODE = "127.0.0.1", "TESTCAM-0001", "QZCNRA"   # the camera file's markers (spec §4.5)
+LOOPBACK, SERIAL, CODE = "127.0.0.1", "TESTCAM-0001", "QZFAKECODEA"   # the camera file's markers (spec §4.5)
 
 
 def closed_port() -> int:

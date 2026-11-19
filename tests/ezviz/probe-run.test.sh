@@ -6,7 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1; fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 check() { if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1 [want $2 got $3]"; fail=1; fi; }
-CA=QZCNRA; CB=QZCNRB; NC=QZNEVERREAD; IP1=192.0.2.11; IP2=192.0.2.12; ID1=TESTCAM-0001; ID2=TESTCAM-0002
+CA=QZFAKECODEA; CB=QZFAKECODEB; NC=QZNEVERREAD; IP1=192.0.2.11; IP2=192.0.2.12; ID1=TESTCAM-0001; ID2=TESTCAM-0002
 CANARIES=("$CA" "$CB" "$NC" "$IP1" "$IP2" "$ID1" "$ID2" "192.0.2.")
 
 # A copy of the tree the script needs, so the stub probe.py sits where the real one does.
