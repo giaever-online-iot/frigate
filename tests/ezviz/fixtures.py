@@ -115,3 +115,13 @@ def make_es(ffmpeg: str, out: Path, seconds: int = 4) -> Path:
                     "-c:v", "libx265", "-x265-params", "keyint=50:min-keyint=50:bframes=0:repeat-headers=1",
                     "-f", "hevc", str(out)], check=True, capture_output=True, timeout=300)
     return out
+
+
+def fake_ffmpeg(tmpdir, **knobs) -> str:
+    """Write an sh script that exports FAKEFF_<KNOB>=value and execs fakeffmpeg.py; returns its path (R1/C1)."""
+    exports = "".join("FAKEFF_%s=%s; export FAKEFF_%s\n" % (k.upper(), v, k.upper()) for k, v in knobs.items())
+    script = Path(tmpdir) / "ffmpeg"
+    script.write_text("#!/bin/sh\n%sexec %s -I %s \"$@\"\n"
+                      % (exports, sys.executable, Path(__file__).resolve().parent / "fakeffmpeg.py"))
+    script.chmod(0o755)
+    return str(script)
