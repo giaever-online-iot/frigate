@@ -10,7 +10,12 @@ Accepted differences from the library (Task 9's byte-for-byte diff must not chas
   it has shown 2 HEVC evidence frames while no announced video PT has carried a packet, and leaves them for good
   when one does (the library then never promotes). PT-96 bodies wait in a hold of HOLD_MAX until it is decided, and
   come out in order, so the VPS before the second evidence frame is not lost (GA A1 diagnosis: the real camera
-  announces hevc on PT 15 and sends it on PT 96);
+  announces hevc on PT 15 and sends it on PT 96). The hold's limits: past HOLD_MAX bodies it drops the OLDEST one
+  (the library keeps all; it takes more than 63 non-evidence bodies between the first and the second evidence frame,
+  and a keyframe's VPS/SPS/PPS and FU fragments are all evidence), and a later descriptor that assigns 96 to hevc
+  clears a pending hold (the library's final map would output those bodies);
+- an H.264-only descriptor set (no hevc route) still leaves PT 96 on the legacy HEVC route, and a descriptor that
+  changes a PT's codec overwrites the earlier one (the library finds no media then); both pre-date the promotion;
 - no conflicting-route checks, no rtp_payload_video_codec != "h264" check, no H.264 promotion;
 - no H.264 path;
 - no concatenated-frame or nested "00 10" aggregate splitting: one length-prefixed body per push;
@@ -25,7 +30,7 @@ WRAPPER = b"\x40\x00\x00\x02\x80\x06"   # packets.py:297-300 (_looks_like_idmx_h
 WRAPPER_NAL_OFFSET = 12                 # packets.py:54
 TRAILER_PREFIX = b"\x24\x00"            # packets.py:57
 DEFAULT_PT = 96                         # session.py:2635, rtp.py:221-256 (legacy fallback route)
-HEVC_STREAM_TYPES = frozenset({0x24, 0xB2})   # rtp.py:88 and :102 (_IDMX_RTP_STREAM_TYPES: both are hevc)
+HEVC_STREAM_TYPES = frozenset({0x24, 0xB2})   # rtp.py:88 and :103 (_IDMX_RTP_STREAM_TYPES: both are hevc)
 H264_STREAM_TYPES = frozenset({0x1B, 0xB0})   # rtp.py:87 and :101
 PROMOTE_EVIDENCE = 2                    # payloads.py:1156 (hevc_evidence >= 2)
 HOLD_MAX = 64                           # PT-96 bodies kept while the promotion is undecided
