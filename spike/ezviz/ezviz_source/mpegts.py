@@ -1,5 +1,6 @@
-"""TIMESTAMP_MODE "rtp" (W-23 T21, spec §4.4 (a)): the access units go to ffmpeg as MPEG-TS whose PES PTS is the camera's
-RTP timestamp (90 kHz), so recordings carry the camera's own clock. Stdlib only. Video only (OD4): one HEVC stream.
+"""TIMESTAMP_MODE "rtp" (W-23 T21, spec §4.4 (a)): the access units go to ffmpeg as MPEG-TS whose PES PTS is the
+camera's RTP timestamp (90 kHz), so recordings carry the camera's own clock. Stdlib only. Video only (OD4): one HEVC
+stream.
 
 RtpClock turns the 32-bit RTP timestamps into one monotonic 90 kHz counter:
 - the first timestamp is the start, so a session's PTS equal its RTP timestamps until the first 32-bit wrap;

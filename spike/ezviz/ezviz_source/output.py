@@ -61,7 +61,8 @@ class Output:
         self.pid = self._proc.pid
 
     def write_au(self, au: bytes, is_idr: bool, ts=None) -> None:
-        """`ts`: the access unit's RTP timestamp, required in "rtp" mode (the clock starts at the first IDR written)."""
+        """`ts`: the access unit's RTP timestamp, required in "rtp" mode (the clock starts at the first IDR
+        written)."""
         if self._mux is not None and ts is None:
             raise ValueError("TIMESTAMP_MODE rtp needs the access unit's RTP timestamp")
         if self._proc.poll() is not None:

@@ -64,9 +64,9 @@ class Helper:
             reasm, aus, last_ka = annexb.Reassembler(), annexb.AccessUnits(), 0.0
             with self.sess:
                 for body in self.sess.packets():
-                    for nal in reasm.push(body):
-                        for au, idr in aus.push(nal):        # C16: (au_bytes, is_idr)
-                            self.out.write_au(au, idr)
+                    for nal, ts in reasm.push_ts(body):
+                        for au, idr, au_ts in aus.push_ts(nal, ts):   # C16: is_idr; T21: the AU's RTP ts
+                            self.out.write_au(au, idr, au_ts)
                     if self.phase == "P2" and self.out.published_due():
                         self._published()
                     now = time.monotonic()

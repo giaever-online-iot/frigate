@@ -2,6 +2,7 @@ import _path
 import hashlib
 import importlib.metadata as md
 import os
+import re
 import unittest
 from unittest import mock
 
@@ -31,18 +32,21 @@ class TestRuntime(unittest.TestCase):
     def test_exit_codes(self):
         self.assertEqual((C.EXIT_STOP, C.EXIT_TEMP, C.EXIT_AUTH, C.EXIT_CONFIG, C.EXIT_USAGE), (0, 75, 77, 78, 64))
 
-    def test_ga_constants_are_marked_provisional(self):
-        """Fix wave 1, S5: the four GA constants are the plan's defaults until gate GA and Task 21; the header and
-        each assignment line say so, so a build before Task 21 cannot be read as final."""
+    def test_constants_match_findings(self):
+        """Task 21 Step 1: constants.py equals the `chosen:` line in docs/w23-findings.md section A, which the plan's
+        rules derive from gate GA's probe lines (recorded there as results)."""
+        doc = (_path.REPO / "docs/w23-findings.md").read_text()
+        got = re.findall(r"^chosen: form=(\w+) count=(\d+) starttimeout=(\d+) timestamps=(\w+)$", doc, re.M)
+        self.assertEqual(len(got), 1, "exactly one chosen: line in docs/w23-findings.md")
+        form, count, start, ts = got[0]
+        self.assertEqual((C.KEEPALIVE_FORM, C.KEEPALIVE_COUNT, C.STARTTIMEOUT_S, C.TIMESTAMP_MODE),
+                         (form, int(count), int(start), ts))
         src = (_path.PKG / "ezviz_source/constants.py").read_text()
-        header = src.split('"""')[1]
-        ga = ("KEEPALIVE_FORM", "KEEPALIVE_COUNT", "STARTTIMEOUT_S", "TIMESTAMP_MODE")
-        for word in ("PROVISIONAL", "gate GA", "Task 21") + ga:
-            self.assertIn(word, header)
-        for name in ga:
+        for name in ("KEEPALIVE_FORM", "KEEPALIVE_COUNT", "STARTTIMEOUT_S", "TIMESTAMP_MODE"):
             line = [ln for ln in src.splitlines() if ln.startswith(name + " = ")]
             self.assertEqual(len(line), 1, name)
-            self.assertIn("PROVISIONAL", line[0], name)
+            self.assertNotIn("PROVISIONAL", line[0], name)             # settled by gate GA (Task 21)
+            self.assertIn("gate GA", line[0], name)
 
     def test_paths_from_env(self):
         with mock.patch.dict(os.environ, {"SNAP": "/s", "SNAP_DATA": "/d", "SNAP_COMMON": "/c"}):

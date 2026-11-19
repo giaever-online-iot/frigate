@@ -1,7 +1,8 @@
 """Stand-in for ffmpeg (W-23 T10): drains stdin into /dev/null, dumps argv and env as JSON to $FAKEFF_DUMP.
 
 Knobs (env, set by a generated wrapper script, see fixtures.fake_ffmpeg): FAKEFF_EXIT_AFTER_S, FAKEFF_IGNORE_TERM,
-FAKEFF_LINGER (keep running after stdin EOF, so only pdeathsig/SIGTERM can end it).
+FAKEFF_LINGER (keep running after stdin EOF, so only pdeathsig/SIGTERM can end it), FAKEFF_STDIN (a file that keeps
+what came in on stdin, instead of /dev/null; W-23 T21 reads the MPEG-TS back).
 """
 import json
 import os
@@ -19,7 +20,7 @@ if os.environ.get("FAKEFF_IGNORE_TERM"):
 exit_after = os.environ.get("FAKEFF_EXIT_AFTER_S")
 deadline = time.monotonic() + float(exit_after) if exit_after else None
 eof = False
-sink = open(os.devnull, "wb")
+sink = open(os.environ.get("FAKEFF_STDIN") or os.devnull, "wb", buffering=0)
 while True:
     if deadline is not None and time.monotonic() >= deadline:
         sys.exit(0)

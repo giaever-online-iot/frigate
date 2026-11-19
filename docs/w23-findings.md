@@ -201,8 +201,10 @@ cross-checks.
 **The runner is ubuntu-26.04, not noble (round 6).**
 - Sources:
   - the PR #11 job log (`Image: ubuntu-26.04`);
-  - the image's software list (`actions/runner-images`, `images/ubuntu/Ubuntu2604-Readme.md`: 26.04.1 LTS, image
-    20261111.196.1);
+  - the image's software list (`actions/runner-images`, `images/ubuntu/Ubuntu2604-Readme.md`: 26.04.1 LTS). That
+    published list is for image 20261111.196.1, which is the 16 Nov run's image. PR #11's run used image
+    20261111.82.6 (Ubuntu 26.04.1), whose software-list link returns 404. The re-review found that the published .196
+    and .202 lists agree on every tool the workflow uses;
   - packages.ubuntu.com for resolute.
 - What this means for each tool the workflow uses:
   - `shellcheck`: 0.11.0-2, preinstalled, and in the archive.
@@ -222,6 +224,8 @@ cross-checks.
     non-empty lines: `Ran N tests in Xs`, then a plain `OK`. Every red path prints an `::error::` line.
   - A 16-case harness, running the step verbatim under `bash -e`: only the two genuine passes are green. Against the
     round-5 guard, 9 cases were wrong; one of them was a late writer's `OK` that turned a skip green.
+  - Accepted as is: a leaked child that writes a complete fake `Ran N tests in Xs` and `OK` after a skipped run still
+    passes the guard. Only a check of unittest's result object, rather than its text, would beat that.
 - Replay closer to the runner, still on the noble kernel and libc:
   - Setup: a PATH made only of a symlink farm. It has the system binaries minus what 26.04 lacks (squashfs-tools, qemu)
     and minus every python and ffmpeg. `python3` is a CPython 3.14.7 venv with PyYAML 6.0.3, standing in for the system
@@ -308,12 +312,53 @@ So no goroutine exits holding a locked thread, and `Pdeathsig` cannot fire early
 is inferred from `build.yml`, because the binaries are UPX-packed. S2 checks 2 and 4 show that the `Pdeathsig` SIGTERM
 arrives when go2rtc exits; they do not prove it never arrives earlier.
 
-## A (item A, the long-session probe): pending gate GA
+## A (item A, the long-session probe): gate GA passed; Task 21 set the constants
 
-Task 21 has not run. It needs the probe lines from GA (runs A1/A1b, A2, A3), which only the orchestrator and the
-maintainer can take. Until then the constants are the plan's defaults: `KEEPALIVE_FORM="extend"`,
-`KEEPALIVE_COUNT=4320` (not yet capped by a measured render time), `STARTTIMEOUT_S=30` and
-`TIMESTAMP_MODE="wallclock"`.
+### The 63-minute runs: RESULTS
+
+Real probe lines (counters only), from a frozen checkout of 66fb66c, whose helper code is the head's (re-review 3),
+form `extend`, count 4320 (probe-run.sh's default), 19 Nov:
+- **A1, cam1 alone:** `end=stop login_ok=1 published=1 session_s=3780.319 first_irap_s=0.913 render_s=0.235
+  keepalive_sent=755 keepalive_failed=0 frames=94278 decode_errors=84 rtp_ts_monotonic=1.0000 rtp_ts_step_mode=3600
+  rtp_ts_step_p99_dev=2`.
+- **Both cameras at once, cam1:** `end=stop login_ok=1 published=1 session_s=3780.254 first_irap_s=0.776
+  render_s=0.248 keepalive_sent=755 keepalive_failed=0 frames=94482 decode_errors=0 rtp_ts_monotonic=1.0000
+  rtp_ts_step_mode=3600 rtp_ts_step_p99_dev=2`.
+- **Both cameras at once, cam2:** `end=stop login_ok=1 published=1 session_s=3780.224 first_irap_s=1.451
+  render_s=0.223 keepalive_sent=755 keepalive_failed=0 frames=94465 decode_errors=0 rtp_ts_monotonic=1.0000
+  rtp_ts_step_mode=3600 rtp_ts_step_p99_dev=0`.
+- From the `diag` counters: IDRs (type 19) 943 (A1 cam1), 951 (cam1) and 1891 (cam2) in 3780 s, so one IDR about every
+  4.0 s on cam1 and every 2.0 s on cam2.
+- **A1's 84 decode errors: unexplained, and not reproduced.** The later cam1 run had 0. A1 is also the only run with
+  `drop.frame = 1` (one packet body that did not parse). A lost body inside a GOP would break the pictures that refer
+  to it until the next IDR (about 100 at 25 fps), which fits 84 error lines. That is a hypothesis, not a result.
+
+**The plan's rules (Task 21), applied to these lines:**
+- `KEEPALIVE_FORM`: the form whose long run had `keepalive_failed=0` and `session_s >= 3540` on both cameras:
+  **extend** (3780 s, 755 keepalives, 0 failed, on cam1 and cam2).
+- `KEEPALIVE_COUNT` = max(4320, ⌈3780.319 ÷ 5⌉ = 757) = **4320**. The cap: worst render 0.248 s × (4320 ÷ 4320) × 4 =
+  0.99 s ≤ 3 s. The × 4 Pi/laptop ratio stays an ESTIMATE until S5 measures `published.t − attempt.t` on the hub.
+- `STARTTIMEOUT_S`: the worst `first_irap_s + render_s` is 1.451 + 0.223 = 1.674 s ≤ 20 s, so **30**.
+  go2rtc-config-gen.py's copy stays 30.
+- `TIMESTAMP_MODE`: every probe has `rtp_ts_monotonic` 1.0000 ≥ 0.999 and `rtp_ts_step_p99_dev` ≤ 2 ≤ 360, so
+  **"rtp"**. That needs the conditional muxer, `mpegts.py`.
+
+chosen: form=extend count=4320 starttimeout=30 timestamps=rtp
+
+**The "rtp" mode (`mpegts.py`, `output.py`).**
+- Each access unit goes to the ffmpeg child as MPEG-TS (`-f mpegts -i pipe:0`). Its PES PTS is the RTP timestamp of
+  the picture's first VCL NAL, at 90 kHz. Video only (OD4); the audio PT 104 stays unused.
+- **The 32-bit wrap.** The RTP ts is 32 bit, with a random base, and wraps within 13.25 h. `RtpClock` unwraps it into
+  one monotonic counter, so a wrap in the middle of a session gives no backwards PTS. The PES carries the counter
+  modulo 2**33, MPEG-TS's own wrap, which the demuxer handles.
+- **A timestamp jump.** Rule: a step of 1 to 900000 ticks (10 s, `SOCKET_TIMEOUT_S`) is taken as it is. Anything else
+  is a re-base with continuity: no step, a step back, or a jump forward past 10 s (a camera that restarted its
+  timestamp base mid-session). The counter advances by the last good step, and later steps count from the new base. So
+  no PTS ever goes back or repeats, nothing raises, and the cadence stays regular.
+- **Tests:** the muxer tests (`tests/ezviz/test_mpegts.py`) cover a session that crosses the 32-bit wrap, one that
+  starts just below it, a backward step, a zero step and a 10**9-tick jump, plus a 20,000-step random fuzz that never
+  goes back. Real ffmpeg reads strictly monotonic PTS, equal to the unwrapped ts, across a 32-bit wrap, and decodes the
+  clip with 0 errors.
 
 ### A1 and the diagnostic run: RESULT (the cause is H2, fixed in d06e99c)
 
@@ -402,8 +447,8 @@ frames=4487 decode_errors=0`.
   ccd7812 the probe takes timestamps from the HEVC video route only. On the real-shape fake that gives 1.0000 / 3600 /
   0, against 0.5008 / 3600 / 4294944016 before.
 
-All four constants (`KEEPALIVE_FORM`, `KEEPALIVE_COUNT`, `STARTTIMEOUT_S`, `TIMESTAMP_MODE`) stay PROVISIONAL until
-Task 21.
+All four constants (`KEEPALIVE_FORM`, `KEEPALIVE_COUNT`, `STARTTIMEOUT_S`, `TIMESTAMP_MODE`) stayed provisional until
+Task 21; the 63-minute runs at the start of this section settle them.
 
 **Suites at ccd7812** (19 Nov, a private `W23_VENV`, heavy suites one at a time under the suite lock):
 - `tests/ezviz` unittest: `Ran 257 tests`, `OK`, 0 skipped (256 before, plus 1);

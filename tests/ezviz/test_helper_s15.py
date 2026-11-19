@@ -4,6 +4,7 @@ Spec §9.2 S15, T-END E6/E11/E17 (§4.3), J2, K1, K3, the torn-line rules of §4
 the harness moves every record 2 h into the past (fixtures.shift_ledger), so the budget allows the next run.
 """
 import _path  # noqa: F401
+import json
 import re
 import sys
 import time
@@ -55,6 +56,30 @@ class HelperS15(HelperCase):
         self.assertNotEqual(policy.decide(h.ledger() + one_more, later, latch_file=False).cls, "latched")   # row 1
         seeded = h.ledger()[:h.base]
         self.assertEqual(policy.decide(seeded + one_more, later, latch_file=False).cls, "latched")  # control: row 3
+
+    def test_rtp_mode_feeds_ffmpeg_mpegts_stamped_with_the_camera_ts(self):  # W-23 T21, TIMESTAMP_MODE "rtp"
+        from test_mpegts import pes_list
+        from ezviz_source import constants as C
+        self.assertEqual(C.TIMESTAMP_MODE, "rtp")
+        sink, dump = self.tmp / "ffmpeg.stdin", self.tmp / "ffmpeg.json"
+        h = Helper(self.tmp, "cam1", [], ffmpeg_knobs={"stdin": sink, "dump": dump})
+        h.wait_ev("published", 30)
+        h.term()
+        h.wait_exit(10)
+        argv = json.loads(dump.read_text())["argv"]
+        self.assertEqual(argv[argv.index("-i") - 2:argv.index("-i") + 2], ["-f", "mpegts", "-i", "pipe:0"])
+        self.assertNotIn("-use_wallclock_as_timestamps", argv)
+        data = sink.read_bytes()
+        pes = pes_list(data[:len(data) // 188 * 188])                  # the last packet may be cut at the stop
+        self.assertGreaterEqual(len(pes), 100)                        # 5 s of 25 fps before published
+        pts = [e["pts"] for e in pes[:-1]]                            # the last PES may be cut too
+        k0 = pts[0] // 3600                                           # the fake stamps picture k with k * 3600
+        self.assertEqual(pts, [(k0 + i) * 3600 for i in range(len(pts))])
+        # ... and alternates SYNTH_ES's two pictures, the IDR on even k: each PES carries ITS picture's ts, not the
+        # next one's (an AU is emitted when the next picture's first NAL arrives)
+        idr = [b"\x00\x00\x00\x01\x26\x01" in e["es"] for e in pes[:-1]]
+        self.assertEqual(idr, [(p // 3600) % 2 == 0 for p in pts])
+        self.assertTrue(idr[0])                                       # the helper starts at the first IDR
 
     def test_J2_start_timeout_net_fail_start_timeout_start_timeout_latches(self):  # J2
         ends = []
