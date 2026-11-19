@@ -18,7 +18,8 @@ produced RTSP 404s — go2rtc had never heard of those streams. This generator r
 upstream parity: config.yml's `go2rtc:` section now flows through to go2rtc.
 
 Invoked by bin/go2rtc-run on EVERY start with:
-    python3.11 go2rtc-config-gen.py <baseline.in> <config.yml> <SNAP> <output.yaml>
+    python3.11 go2rtc-config-gen.py <baseline.in> <config.yml> <SNAP> <output.yaml> \
+        [<ezviz cameras dir>]
 
 MODEL (mirrors create_config.py's layering; divergences flagged DIVERGENCE below):
   1. Start from the snap BASELINE (config/go2rtc.yaml.in: loopback api listen,
@@ -36,6 +37,14 @@ MODEL (mirrors create_config.py's layering; divergences flagged DIVERGENCE below
      log.format="text", webrtc.candidates=[...,"stun:8555"], ffmpeg.bin).
   5. Absent config.yml / absent `go2rtc:` key -> baseline only (first boot: go2rtc
      starts before frigate ever renders config.yml).
+
+  6. Cameras (D8, optional 5th argument). Every regular file named
+     ^[a-z0-9_]{1,32}\\.conf$ in the ezviz cameras dir is a snap-owned camera: listed by
+     name only, NEVER opened. Its stream becomes the ezviz-source exec line (replacing an
+     operator stream of the same name, with a redacted warning) and it is preloaded.
+  7. API (D20), unconditional: api.local_auth=false and api.base_path="" are always set,
+     and /api/preload is appended to an operator api.allow_paths list that lacks it.
+     Each change of an operator value logs a warning naming the key, never the value.
 
 Output is written under umask 077 (operator stream URLs may carry credentials) and its
 contents are NEVER printed (config.yml embeds a camera secret on operator hosts).
@@ -66,6 +75,8 @@ DIVERGENCES from create_config.py (deliberate, documented):
 """
 
 import os
+import re
+import stat
 import sys
 
 import yaml
@@ -80,6 +91,13 @@ INCLUDED_FFMPEG_VERSIONS = ("8.0", "7.0", "5.0")
 # Loopback-only control API (M5 ruling). Kept as a constant so the force + the
 # override-detection compare against one source of truth.
 FORCED_API_LISTEN = "127.0.0.1:1984"
+
+# go2rtc's #starttimeout for the helper streams (D8, D17). Must equal STARTTIMEOUT_S in
+# spike/ezviz/ezviz_source/constants.py: this script runs on the snap's python3.11 and
+# cannot import that package, so a test compares the two as text.
+STARTTIMEOUT_S = 30
+
+CAMERA_FILE_RE = re.compile(r"[a-z0-9_]{1,32}\.conf")
 
 
 def resolve_ffmpeg_path(path: str, binary: str, snap: str) -> str:
@@ -116,12 +134,37 @@ def deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
+def list_camera_names(cameras_dir: str) -> list:
+    """Names of the snap-owned ezviz cameras: regular files `<name>.conf`, by name only.
+    The files are never opened (they hold camera logins). A symlink, a directory or any
+    other file type is not a camera. A missing/unreadable dir means no cameras."""
+    try:
+        entries = sorted(os.listdir(cameras_dir))
+    except OSError as e:
+        log("WARNING ezviz cameras dir unreadable (%s); no ezviz cameras emitted"
+            % e.__class__.__name__)
+        return []
+    names = []
+    for entry in entries:
+        if not re.fullmatch(CAMERA_FILE_RE, entry):
+            continue
+        try:
+            st = os.lstat(os.path.join(cameras_dir, entry))
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            names.append(entry[: -len(".conf")])
+    return names
+
+
 def main() -> int:
-    if len(sys.argv) != 5:
-        log("ERROR usage: go2rtc-config-gen.py <baseline.in> <config.yml> <SNAP> <output.yaml>")
+    if len(sys.argv) not in (5, 6):
+        log("ERROR usage: go2rtc-config-gen.py <baseline.in> <config.yml> <SNAP> <output.yaml> "
+            "[<ezviz cameras dir>]")
         return 2
 
     baseline_path, config_path, snap, output_path = sys.argv[1:5]
+    cameras_dir = sys.argv[5] if len(sys.argv) == 6 else None
 
     # --- 1. baseline (template) --------------------------------------------------------
     # Missing baseline is an INTERNAL error (packaging bug) -> non-zero so go2rtc-run trips.
@@ -219,6 +262,48 @@ def main() -> int:
     if ffmpeg.get("bin") is None:
         # Upstream parity: create_config.py:94-95 + util/config.py resolve_ffmpeg_path @ v0.18.2.
         ffmpeg["bin"] = resolve_ffmpeg_path(top_path, "ffmpeg", snap)
+
+    # --- 6. snap-owned ezviz cameras (D8) ----------------------------------------------
+    # After the operator merge, so the snap-owned stream wins over an operator stream of
+    # the same name. The operator's value is never printed.
+    if cameras_dir is not None:
+        names = list_camera_names(cameras_dir)
+        if names:
+            streams = cfg.get("streams")
+            if not isinstance(streams, dict):
+                streams = {}
+            preload = cfg.get("preload")
+            if not isinstance(preload, dict):
+                preload = {}
+            for name in names:
+                if name in streams:
+                    del streams[name]
+                    log("WARNING operator go2rtc stream %s replaced by the snap-owned "
+                        "ezviz camera" % name)
+                line = "exec:%s/bin/ezviz-source %s {output}#killsignal=15#killtimeout=5" % (
+                    snap, name)
+                if STARTTIMEOUT_S != 30:
+                    line += "#starttimeout=%d" % STARTTIMEOUT_S
+                streams[name] = line
+                preload[name] = "video"
+            cfg["streams"] = streams
+            cfg["preload"] = preload
+
+    # --- 7. force the API settings the re-arm relies on (D20), unconditional -----------
+    api = cfg["api"]
+    if api.get("local_auth") not in (None, False):
+        log("WARNING operator go2rtc.api.local_auth overridden (forced false; the "
+            "preload re-arm needs loopback requests without a login)")
+    api["local_auth"] = False
+    if api.get("base_path") not in (None, ""):
+        log("WARNING operator go2rtc.api.base_path overridden (forced empty; the "
+            "re-arm and frigate use fixed API paths)")
+    api["base_path"] = ""
+    allow = api.get("allow_paths")
+    if isinstance(allow, list) and "/api/preload" not in allow:
+        allow.append("/api/preload")
+        log("WARNING operator go2rtc.api.allow_paths overridden (/api/preload added "
+            "for the preload re-arm)")
 
     # --- 5. write (umask 077; contents NEVER printed) ----------------------------------
     os.umask(0o077)
