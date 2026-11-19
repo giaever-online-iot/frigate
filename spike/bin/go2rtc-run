@@ -18,7 +18,8 @@ umask 077  # defence in depth; the generator also sets 077 before writing
     "$SNAP/config/go2rtc.yaml.in" \
     "$SNAP_DATA/config/config.yml" \
     "$SNAP" \
-    "$SNAP_DATA/go2rtc.yaml"
+    "$SNAP_DATA/go2rtc.yaml" \
+    "$SNAP_DATA/ezviz/cameras"
 # M8 /logs tee: go2rtc has NO shm-private plug, so it CANNOT write /dev/shm/logs itself
 # (AppArmor-DENIED — verified M8). It tees to its own writable $SNAP_DATA/go2rtc-logs/current
 # instead; frigate-run (the shm-private holder, and the app that starts AFTER go2rtc) symlinks
@@ -30,4 +31,7 @@ umask 077  # defence in depth; the generator also sets 077 before writing
 # credentials on warnings; these land only in the snap's private $SNAP_DATA (same exposure class
 # as journald), acceptable — the generator above still never prints config contents.
 mkdir -p "$SNAP_DATA/go2rtc-logs" && : > "$SNAP_DATA/go2rtc-logs/current"
+# W-23 D19: the preload re-arm loop runs beside go2rtc in the same cgroup (go2rtc's stop takes it down).
+# Its output is tee'd into the same log; it is a background child, go2rtc stays the main process.
+"$SNAP/bin/ezviz-rearm" > >(exec tee -a "$SNAP_DATA/go2rtc-logs/current") 2>&1 &
 exec "$SNAP/usr/local/go2rtc/bin/go2rtc" -config "$SNAP_DATA/go2rtc.yaml" > >(exec tee -a "$SNAP_DATA/go2rtc-logs/current") 2>&1
