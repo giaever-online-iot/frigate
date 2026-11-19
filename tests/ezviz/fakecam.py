@@ -69,12 +69,12 @@ def access_units(nals: list) -> list:
     return aus
 
 
-def rtp_payloads(nal: bytes) -> list:
-    """One payload if the NAL fits, else RFC 7798 FUs (type 49) of at most MAX_RTP_PAYLOAD bytes each."""
-    if len(nal) <= MAX_RTP_PAYLOAD:
+def rtp_payloads(nal: bytes, max_payload: int = MAX_RTP_PAYLOAD) -> list:
+    """One payload if the NAL fits, else RFC 7798 FUs (type 49) of at most `max_payload` bytes each."""
+    if len(nal) <= max_payload:
         return [nal]
     ind = bytes([(nal[0] & 0x81) | (49 << 1), nal[1]])
-    t, rest, size = (nal[0] >> 1) & 0x3F, nal[2:], MAX_RTP_PAYLOAD - 3
+    t, rest, size = (nal[0] >> 1) & 0x3F, nal[2:], max_payload - 3
     chunks = [rest[k:k + size] for k in range(0, len(rest), size)]
     return [ind + bytes([t | (0x80 if n == 0 else 0) | (0x40 if n == len(chunks) - 1 else 0)]) + c
             for n, c in enumerate(chunks)]
@@ -88,8 +88,22 @@ def descriptor_ext(stream_type: int, pt: int = 96) -> bytes:
     return b"\xbe\xde" + (len(tlv) // 4).to_bytes(2, "big") + tlv
 
 
-def media_frame(seq: int, ts: int, marker: bool, payload: bytes, ext: bytes = b"") -> bytes:
-    rtp = bytes([0x90 if ext else 0x80, (0x80 if marker else 0) | 96]) + (seq & 0xFFFF).to_bytes(2, "big") \
+# --real-shape (GA A1 diagnosis): the real camera's stream as the counters-only diagnostic saw it. Before each keyframe
+# two PT-112 packets with an empty payload: TLVs 0x40, 0x45, 0x41 (body 64 bytes; the 0x45 announces hevc, stream type
+# 0x24, on PT 15, which never carries a packet) and TLVs 0x42, 0x43 (body 44 bytes); the video as plain RFC 7798 HEVC on
+# PT 96 (VPS, SPS, PPS, SEI, then FU bodies of 1152 bytes); one audio-like PT 104 packet per picture.
+REAL_FU_PAYLOAD = 1152 - 4 - 12           # body = 4-byte prefix + 12-byte RTP header + payload
+REAL_DESC_A = bytes([0x40, 18]) + bytes(18) + bytes([0x45, 2, 0x24, 15]) + bytes([0x41, 18]) + bytes(18)
+REAL_DESC_B = bytes([0x42, 14]) + bytes(14) + bytes([0x43, 6]) + bytes(6)
+
+
+def tlv_ext(tlvs: bytes) -> bytes:
+    tlvs += b"\x00" * (-len(tlvs) % 4)
+    return b"\xbe\xde" + (len(tlvs) // 4).to_bytes(2, "big") + tlvs
+
+
+def media_frame(seq: int, ts: int, marker: bool, payload: bytes, ext: bytes = b"", pt: int = 96) -> bytes:
+    rtp = bytes([0x90 if ext else 0x80, (0x80 if marker else 0) | pt]) + (seq & 0xFFFF).to_bytes(2, "big") \
         + (ts & 0xFFFFFFFF).to_bytes(4, "big") + SSRC + ext + payload
     idmx = len(rtp).to_bytes(4, "little") + rtp
     return b"$\x00" + (4 + len(idmx)).to_bytes(2, "little") + idmx
@@ -142,7 +156,7 @@ class Server:
     def __init__(self, code: str, es, *, port: int = 0, stats_path=None, reject: bool = False,
                  silent_before_challenge: bool = False, silent_after_login: bool = False, close_after_s=None,
                  stall_after_s=None, no_media: bool = False, ledger_at_accept=None, fps: float = 25.0,
-                 desc_stream_type=None):
+                 desc_stream_type=None, real_shape: bool = False):
         self.code = code.encode()
         self.aus = access_units(split_nals(Path(es).read_bytes()))
         if not self.aus:
@@ -153,6 +167,7 @@ class Server:
         self.close_after_s, self.stall_after_s = close_after_s, stall_after_s
         self.ledger_at_accept, self.fps = ledger_at_accept, fps
         self.desc_stream_type = desc_stream_type      # None: no 0x45 descriptors (the legacy PT 96 route)
+        self.real_shape = real_shape
         self._stats = {"connects": 0, "logins_ok": 0, "logins_rejected": 0, "keepalives": 0, "media_sessions": 0,
                        "attempt_on_disk_at_accept": []}
         self._lock = threading.Lock()
@@ -325,6 +340,12 @@ class Server:
                     return
                 if self.stall_after_s is not None and elapsed >= self.stall_after_s:
                     return                           # silent, socket left open
+                if self.real_shape:
+                    out, seq = self._real_shape_picture(k, seq)
+                    sock.sendall(out)
+                    k += 1
+                    self._stop.wait(max(0.0, t0 + k / self.fps - time.monotonic()))
+                    continue
                 pkts = [p for nal in self.aus[k % len(self.aus)] for p in rtp_payloads(nal)]
                 ext = descriptor_ext(self.desc_stream_type) if self.desc_stream_type is not None else b""
                 out = b"".join(media_frame(seq + n, k * TS_STEP, n == len(pkts) - 1, p, ext if n == 0 else b"")
@@ -334,6 +355,17 @@ class Server:
                 self._stop.wait(max(0.0, t0 + k / self.fps - time.monotonic()))
         except OSError:
             pass
+
+    def _real_shape_picture(self, k: int, seq: int):
+        au = self.aus[k % len(self.aus)]
+        out = b""
+        if any((n[0] >> 1) & 0x3F == 32 for n in au):                    # a keyframe: the two PT-112 descriptor packets
+            out += media_frame(2 * k, k * TS_STEP, False, b"", tlv_ext(REAL_DESC_A), pt=112)
+            out += media_frame(2 * k + 1, k * TS_STEP, False, b"", tlv_ext(REAL_DESC_B), pt=112)
+        pkts = [p for nal in au for p in rtp_payloads(nal, REAL_FU_PAYLOAD)]
+        out += b"".join(media_frame(seq + n, k * TS_STEP, n == len(pkts) - 1, p) for n, p in enumerate(pkts))
+        out += media_frame(k, k * 320, True, b"\xd5" * 160, pt=104)        # audio-like, 8 kHz clock
+        return out, seq + len(pkts)
 
 
 def main(argv=None) -> int:
@@ -350,6 +382,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-media", action="store_true")
     ap.add_argument("--port-file")
     ap.add_argument("--ledger-at-accept")
+    ap.add_argument("--real-shape", action="store_true",
+                    help="the real camera's shape: hevc announced on PT 15 by PT-112 packets, video on PT 96, audio PT 104")
     ap.add_argument("--desc-stream-type", type=lambda v: int(v, 0),
                     help="send a 0x45 descriptor (this stream type, PT 96) on each picture's first packet")
     a = ap.parse_args(argv)
@@ -359,7 +393,7 @@ def main(argv=None) -> int:
     srv = Server(a.code, a.es, port=a.port, stats_path=a.stats, reject=a.reject,
                  silent_before_challenge=a.silent_before_challenge, silent_after_login=a.silent_after_login,
                  close_after_s=a.close_after_s, stall_after_s=a.stall_after_s, no_media=a.no_media,
-                 ledger_at_accept=a.ledger_at_accept, desc_stream_type=a.desc_stream_type)
+                 ledger_at_accept=a.ledger_at_accept, desc_stream_type=a.desc_stream_type, real_shape=a.real_shape)
     if a.port_file:
         tmp = Path(a.port_file + ".tmp")
         tmp.write_text(f"{srv.port}\n")

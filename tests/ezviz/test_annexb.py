@@ -125,6 +125,73 @@ class ReassemblerTests(unittest.TestCase):
             self.assertEqual(r.push(with_desc(96, 1, st, 96, idr)), [SC + idr], hex(st))   # authoritative: no evidence wait
             self.assertEqual(r.push(rtp_body(96, 2, 0, SPS)), [SC + SPS], hex(st))
 
+    def test_pt96_promotion_when_the_announced_hevc_pt_never_carries_packets(self):
+        # payloads.py:1125-1157 (GA A1 diagnosis, the real camera): a 0x45 TLV announces hevc on PT 15, PT 15 never
+        # carries a packet, PT 96 is unassigned and shows >= 2 HEVC evidence frames: the library adds 96 to the hevc
+        # routes. The bodies before the second evidence frame wait in the hold and come out in order.
+        def desc(seq, stream_type=0x24, pt=15):
+            rtp = bytes([0x90, 112, 0, seq, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" + bytes([0x45, 2, stream_type, pt])
+            return len(rtp).to_bytes(4, "little") + rtp
+        idr = hevc_nal(19, 30)
+        r = Reassembler()
+        self.assertEqual(r.push(desc(1)), [])
+        self.assertEqual(r.descriptors(), {15: 0x24})
+        self.assertEqual(r.push(rtp_body(96, 1, 0, VPS)), [])
+        self.assertEqual(r.drop, "held")
+        self.assertEqual(r.push(rtp_body(96, 2, 0, SPS)), [SC + VPS, SC + SPS])   # the second evidence frame decides
+        self.assertIsNone(r.drop)
+        self.assertEqual(r.push(rtp_body(96, 3, 0, PPS)), [SC + PPS])
+        self.assertEqual(r.push(rtp_body(96, 4, 0, idr)), [SC + idr])
+        self.assertEqual(r.push(rtp_body(104, 5, 0, b"\xd5" * 40)), [])            # audio stays off the route
+        self.assertEqual(r.drop, "route")
+
+    def test_no_promotion_once_the_announced_pt_carries_a_packet(self):
+        # payloads.py:1141-1143: one packet on an announced video PT and the library never promotes 96
+        def desc(pt_rtp, seq, stream_type=0x24, pt=15, payload=b""):
+            rtp = bytes([0x90, pt_rtp, 0, seq, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" \
+                + bytes([0x45, 2, stream_type, pt]) + payload
+            return len(rtp).to_bytes(4, "little") + rtp
+        r = Reassembler()
+        r.push(desc(112, 1))
+        self.assertEqual(r.push(rtp_body(15, 1, 0, VPS)), [SC + VPS])              # the announced route itself
+        for seq, n in enumerate((VPS, SPS, PPS, hevc_nal(19, 30)), 2):
+            self.assertEqual(r.push(rtp_body(96, seq, 0, n)), [])
+            self.assertEqual(r.drop, "route")
+        r = Reassembler()                                                           # promoted, then PT 15 shows up
+        r.push(desc(112, 1))
+        r.push(rtp_body(96, 1, 0, VPS))
+        self.assertEqual(r.push(rtp_body(96, 2, 0, SPS)), [SC + VPS, SC + SPS])
+        r.push(rtp_body(15, 1, 0, PPS))
+        self.assertEqual(r.push(rtp_body(96, 3, 0, PPS)), [])
+        self.assertEqual(r.drop, "route")
+
+    def test_no_promotion_with_h264_routes_or_96_assigned_or_one_evidence(self):
+        def desc(tlvs):
+            ext = b"".join(bytes([0x45, 2, st, pt]) for pt, st in tlvs)
+            rtp = bytes([0x90, 112, 0, 1, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde" + (len(ext) // 4).to_bytes(2, "big") + ext
+            return len(rtp).to_bytes(4, "little") + rtp
+        for tlvs in ([(15, 0x24), (17, 0x1B)], [(15, 0x24), (96, 0x90)], [(15, 0x24), (17, 0xB0)]):
+            r = Reassembler()
+            r.push(desc(tlvs))
+            out = [x for seq, n in enumerate((VPS, SPS, PPS), 1) for x in r.push(rtp_body(96, seq, 0, n))]
+            self.assertEqual((out, r.drop), ([], "route"), tlvs)
+        r = Reassembler()                                                           # one evidence frame: still held
+        r.push(desc([(15, 0x24)]))
+        self.assertEqual(r.push(rtp_body(96, 1, 0, VPS)), [])
+        self.assertEqual(r.push(rtp_body(96, 2, 0, hevc_nal(1, 30))), [])
+        self.assertEqual(r.drop, "held")
+
+    def test_promotion_hold_is_bounded(self):
+        def desc():
+            rtp = bytes([0x90, 112, 0, 1, 0, 0, 0, 0]) + SENTINEL + b"\xbe\xde\x00\x01" + bytes([0x45, 2, 0x24, 15])
+            return len(rtp).to_bytes(4, "little") + rtp
+        r = Reassembler()
+        r.push(desc())
+        r.push(rtp_body(96, 0, 0, VPS))                                             # evidence 1, then no more
+        for seq in range(1, 1000):
+            r.push(rtp_body(96, seq, 0, hevc_nal(1, 30)))
+        self.assertLessEqual(len(r._held), annexb.HOLD_MAX)
+
     def test_evidence_gate_drops_vcl_before_parameter_sets(self):
         r = Reassembler()
         self.assertEqual(r.push(rtp_body(96, 1, 0, hevc_nal(19, 30))), [])

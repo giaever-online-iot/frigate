@@ -6,13 +6,19 @@ are pyezvizapi/streaming/{local/packets.py, local/payloads.py, media/rtp.py} at 
 Accepted differences from the library (Task 9's byte-for-byte diff must not chase these):
 - no EOF flush of an active FU (the library appends it after its loop);
 - the 0x45 route map is progressive, the library uses the final map over all packets;
-- no PT-96 evidence promotion when descriptors exist, no hevc_evidence>=2 / conflicting-route checks,
-  no rtp_payload_video_codec != "h264" check;
+- the PT-96 evidence promotion (payloads.py:1125-1157) is decided progressively: PT 96 joins the hevc routes once
+  it has shown 2 HEVC evidence frames while no announced video PT has carried a packet, and leaves them for good
+  when one does (the library then never promotes). PT-96 bodies wait in a hold of HOLD_MAX until it is decided, and
+  come out in order, so the VPS before the second evidence frame is not lost (GA A1 diagnosis: the real camera
+  announces hevc on PT 15 and sends it on PT 96);
+- no conflicting-route checks, no rtp_payload_video_codec != "h264" check, no H.264 promotion;
 - no H.264 path;
 - no concatenated-frame or nested "00 10" aggregate splitting: one length-prefixed body per push;
 - caps: an FU over FU_MAX_BYTES, or a pending AU over AU_MAX_BYTES / AU_MAX_NALS, is dropped;
 - an AU is emitted one picture late; flush() returns the pending one at EOF.
 """
+from collections import deque
+
 START = b"\x00\x00\x00\x01"
 SENTINEL = b"\x55\x66\x77\x88"          # packets.py:42
 WRAPPER = b"\x40\x00\x00\x02\x80\x06"   # packets.py:297-300 (_looks_like_idmx_hevc_media_frame)
@@ -20,6 +26,9 @@ WRAPPER_NAL_OFFSET = 12                 # packets.py:54
 TRAILER_PREFIX = b"\x24\x00"            # packets.py:57
 DEFAULT_PT = 96                         # session.py:2635, rtp.py:221-256 (legacy fallback route)
 HEVC_STREAM_TYPES = frozenset({0x24, 0xB2})   # rtp.py:88 and :102 (_IDMX_RTP_STREAM_TYPES: both are hevc)
+H264_STREAM_TYPES = frozenset({0x1B, 0xB0})   # rtp.py:87 and :101
+PROMOTE_EVIDENCE = 2                    # payloads.py:1156 (hevc_evidence >= 2)
+HOLD_MAX = 64                           # PT-96 bodies kept while the promotion is undecided
 FU = 49
 FU_MAX_BYTES = 8 << 20                  # a FU that grows past this is dropped (never-ending FU)
 AU_MAX_BYTES = 16 << 20                 # a pending AU past this many bytes or NALs is dropped
@@ -150,7 +159,7 @@ class Reassembler:
     read only by the probe's --diag counters, it changes no decision): frame (_frame_of), rtp (_rtp_of), param (an
     00 01 / 00 02 carrier), route (not an HEVC payload type), evidence (no HEVC evidence yet), direct (not a direct HEVC
     frame), short, plausible, fu_gap (a continuation that does not continue), fu_cap, fu_part (an FU fragment held for
-    more: not a loss).
+    more: not a loss), held (a PT-96 body waiting for the promotion decision: not a loss yet).
     """
 
     def __init__(self):
@@ -159,6 +168,9 @@ class Reassembler:
         self._active = None            # [data bytearray, last_seq, ts]   (packets.py:34-39)
         self._evidence = False         # payloads.py:~830 hevc_evidence_seen
         self.drop = None               # the stage that dropped the last push (class docstring); diagnostics only
+        self._adv_seen = False         # payloads.py:1141-1143: a packet on an announced video PT was seen
+        self._ev96 = 0                 # payloads.py:1144-1150: HEVC evidence frames on PT 96
+        self._held = deque(maxlen=HOLD_MAX)   # (media, pkt) on PT 96 while the promotion is undecided
 
     def pts_seen(self) -> set:
         return set(self._pts)
@@ -183,11 +195,32 @@ class Reassembler:
                 self._desc[ext[o + 3] & 0x7F] = ext[o + 2]
             o = end
 
-    def _is_hevc_route(self, pt: int) -> bool:
-        # payloads.py:1117-1171 + rtp.py:547-562: descriptor-owned routes win; else the legacy PT 96, unless
-        # a descriptor has assigned 96 to something else. Built progressively, the library uses the final map.
+    def _routes(self):
         hevc = {p for p, st in self._desc.items() if st in HEVC_STREAM_TYPES}
-        return pt in hevc if hevc else (pt == DEFAULT_PT and pt not in self._desc)
+        h264 = {p for p, st in self._desc.items() if st in H264_STREAM_TYPES}
+        return hevc, h264
+
+    def _promotable(self, hevc, h264) -> bool:
+        # payloads.py:1125-1157: video descriptors, 96 unassigned, no announced video PT seen, hevc routes only
+        return bool(hevc) and not h264 and DEFAULT_PT not in self._desc and not self._adv_seen
+
+    def _track(self, pkt: _Rtp, media: bytes) -> None:
+        hevc, h264 = self._routes()
+        if pkt.pt in hevc | h264:
+            self._adv_seen = True                                       # payloads.py:1141-1143
+            self._held.clear()
+        elif pkt.pt == DEFAULT_PT and ((len(media) > WRAPPER_NAL_OFFSET and media.startswith(WRAPPER))
+                                       or _evidence_frame(media)):
+            self._ev96 += 1                                             # payloads.py:1147-1150
+
+    def _is_hevc_route(self, pt: int) -> bool:
+        # payloads.py:1117-1171 + rtp.py:547-562: descriptor-owned routes win, plus PT 96 once promoted; else the
+        # legacy PT 96, unless a descriptor has assigned 96 to something else. Built progressively (the library uses
+        # the final map).
+        hevc, h264 = self._routes()
+        if not hevc:
+            return pt == DEFAULT_PT and pt not in self._desc
+        return pt in hevc or (pt == DEFAULT_PT and self._promotable(hevc, h264) and self._ev96 >= PROMOTE_EVIDENCE)
 
     def push(self, body: bytes) -> list:
         self.drop = None
@@ -208,11 +241,28 @@ class Reassembler:
             media = _strip_trailer(pkt.payload)            # packets.py:329-342
         else:
             media = pkt.payload
+        self._track(pkt, media)
         # packets.py:~262-265: bodies starting 00 01 / 00 02 are parameter-frame carriers, skipped (payloads.py:~802)
         if len(media) > 4 and media[:2] in (b"\x00\x01", b"\x00\x02"):
             return self._no("param")
         if not self._is_hevc_route(pkt.pt):
+            if pkt.pt == DEFAULT_PT and self._promotable(*self._routes()):
+                self._held.append((media, pkt))
+                return self._no("held")
             return self._no("route")
+        out = []
+        if self._held and pkt.pt == DEFAULT_PT:
+            held = list(self._held)
+            self._held.clear()
+            for m, k in held:
+                out += self._media(m, k)
+        out += self._media(media, pkt)
+        if out:
+            self.drop = None
+        return out
+
+    def _media(self, media: bytes, pkt: _Rtp) -> list:
+        self.drop = None
         authoritative = any(st in HEVC_STREAM_TYPES for st in self._desc.values())
         if len(media) > WRAPPER_NAL_OFFSET and media.startswith(WRAPPER):    # packets.py:297-300 / payloads.py:~800
             self._evidence = True

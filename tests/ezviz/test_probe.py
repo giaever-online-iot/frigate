@@ -238,7 +238,7 @@ class Probe(ProbeCase):
         self.assertEqual(d["pt"], {"96": d["pkts"]})
         self.assertEqual((d["desc"], d["route_pt"], d["rtp_rej"], d["multi"]), ({}, {}, {}, 0))
         self.assertLessEqual(set(d["drop"]), {"frame", "rtp", "param", "route", "evidence", "direct", "short",
-                                              "plausible", "fu_gap", "fu_cap", "fu_part"})
+                                              "plausible", "fu_gap", "fu_cap", "fu_part", "held"})
         self.assertGreater(d["drop"].get("fu_part", 0), 0)               # the fake fragments its IDR pictures
         self.assertEqual(sum(v for k, v in d["drop"].items() if k != "fu_part"), 0, d["drop"])
         self.assertTrue({"32", "33", "34", "1"} <= set(d["nal"]), d["nal"])
@@ -269,6 +269,22 @@ class Probe(ProbeCase):
         self.assertEqual(d["route_pt"], {"96": d["pkts"]})
         self.assertEqual((d["nal"], d["au"]), ({}, {"n": 0, "idr": 0, "vcl": {}}))
         self.assertEqual(d["first"][0][3], [0x45])                        # the descriptor rides on a picture's first packet
+
+    def test_real_shape_camera_publishes(self):
+        # GA A1 diagnosis round 2: the real camera announces hevc on PT 15 (never used) and sends it on PT 96. The
+        # library promotes PT 96 (payloads.py:1125-1157); before the fix every packet was dropped at route (frames=0)
+        ff = real_ffmpeg()
+        self.start_fake(ff, "--real-shape")
+        p = self.probe(ff, "0.2", diag=True)
+        m, d = self.diag_of(p)
+        self.assertEqual(d["desc"], {"15": 0x24})
+        self.assertEqual(set(d["pt"]), {"96", "104", "112"})
+        self.assertEqual(d["first"][0][:4], [64, 12, 112, [0x40, 0x45, 0x41]])
+        self.assertEqual(d["first"][1][:4], [44, 12, 112, [0x42, 0x43]])
+        self.assertEqual([e[4] for e in d["first"][2:5]], ["4001", "4201", "4401"])
+        self.assertEqual(set(d["route_pt"]), {"104", "112"}, d["route_pt"])     # PT 96 is never dropped at route
+        self.assertEqual((m["end"], m["published"], m["decode_errors"]), ("stop", "1", "0"), p.stdout)
+        self.assertGreaterEqual(int(m["frames"]), 200, p.stdout)
 
     def test_non_idr_start_is_not_fed_until_the_first_idr(self):        # the IDR gate
         import fakecam

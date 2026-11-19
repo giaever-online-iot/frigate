@@ -31,7 +31,8 @@ p99_dev = 99th percentile of |step - mode|.
   pkts      packet bodies the library handed over;          per_min  bodies per minute, the first 5 minutes only
   pt        RTP-parsed bodies per payload type;              drop     Reassembler.drop counts (annexb: frame, rtp, param,
   route_pt  route drops per payload type                              route, evidence, direct, short, plausible, fu_gap,
-  rtp_rej   "<header size>:<lead byte>" of frames _rtp_of             fu_cap; fu_part = an FU fragment held, no loss)
+  rtp_rej   "<header size>:<lead byte>" of frames _rtp_of             fu_cap; fu_part = an FU fragment held, held = a
+                                                                      PT-96 body awaiting the promotion: no loss yet)
             refused (legacy, non-RTP IDMX records);          multi    bodies with more than one IDMX sentinel (aggregates)
   desc      the 0x45 map, payload type -> stream type;       nal      NAL types out of the reassembler
   au        access units: n, idr, vcl = first VCL NAL type per AU
