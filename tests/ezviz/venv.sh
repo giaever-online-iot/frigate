@@ -16,4 +16,7 @@ if [ "$(cat "$V/lock.sha256" 2>/dev/null || true)" != "$WANT" ]; then
 fi
 SP=$("$V/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
 echo "$REPO/spike/ezviz" > "$SP/ezviz_source.pth"
+# N4 (fix wave 1): no bytecode from any process of this venv, `-I` ones included (-I ignores PYTHONDONTWRITEBYTECODE but still
+# reads .pth files), so running the tests leaves no __pycache__ under spike/ or tests/.
+echo 'import sys; sys.dont_write_bytecode = True' > "$SP/ezviz_nobytecode.pth"
 echo "$V/bin/python"

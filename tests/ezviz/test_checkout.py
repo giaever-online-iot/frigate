@@ -62,6 +62,13 @@ class TestChildCheckout(unittest.TestCase):
     def test_this_python_imports_this_checkout(self):
         self.assertEqual(_path.check_isolated_import(sys.executable), "")
 
+    def test_isolated_child_writes_no_bytecode(self):
+        """N4 (fix wave 1): venv.sh's second .pth turns bytecode writing off, and `-I` (which ignores
+        PYTHONDONTWRITEBYTECODE) still reads it, so no child of the tests leaves a __pycache__ in the tree."""
+        p = subprocess.run([_path.isolated_python(), "-I", "-c", "import sys; print(sys.dont_write_bytecode)"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        self.assertEqual((p.returncode, p.stdout.strip()), (0, "True"))
+
     def _scratch_venv(self) -> tuple:
         d = fixtures.tmpdir(self)
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(d / "v")], check=True, timeout=120,

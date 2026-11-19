@@ -360,6 +360,7 @@ parts:
         --require-hashes --only-binary=:all: --no-deps -r "$CRAFT_PART_SRC/requirements.txt"
       SP="$D/lib/python3.12/site-packages"
       cp -r "$CRAFT_PART_SRC/ezviz_source" "$SP/"
+      find "$SP/ezviz_source" -name __pycache__ -type d -exec rm -rf {} +   # N4: never ship a dev checkout's bytecode; compileall below regenerates it
       env -i PATH=/usr/bin:/bin "$D/bin/python3.12" -I -m pip uninstall -y pip
       # Prune (each verified by the import proof below): Tk/Tcl, idle, turtle, ensurepip, headers, docs, the shared libpython
       # (bin/python3.12 links libpython statically; nothing embeds it).

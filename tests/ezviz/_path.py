@@ -14,6 +14,7 @@ sys.dont_write_bytecode = True
 def child_env(**extra) -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith("EZVIZ_TEST")}
     env["PYTHONPATH"] = str(PKG)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"   # N4: children that are not -I
     env.update(extra)
     return env
 

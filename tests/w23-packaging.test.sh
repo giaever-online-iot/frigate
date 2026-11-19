@@ -32,6 +32,8 @@ t "R1: ezviz-source unsets LD_LIBRARY_PATH" grep -qE '^unset .*LD_LIBRARY_PATH' 
 t "R1: no ezviz path under any prime:/stage: exclude" sh -c "! grep -nE '^ +- -.*(ezviz|bin/disk-guard)' $Y && ! grep -nE '^ +- -bin/' $Y"
 t "R1: no spike/bin/ezviz-* wrapper references python3.11" sh -c "! grep -l 'python3\.11' spike/bin/ezviz-*"
 t "R1: wrappers part dumps spike/bin into bin/" sh -c "$(declare -f blk); Y=$Y; b=\$(blk parts wrappers); echo \"\$b\" | grep -qx '    source: spike/bin' && echo \"\$b\" | grep -q \"'\\*': bin/\""
+# N4 (fix wave 1): the copied source tree must not ship a stale __pycache__ from a dev checkout; deleted after the cp and before compileall.
+t "N4: ezviz-py deletes __pycache__ from the copied ezviz_source after the cp, before compileall" sh -c "$(declare -f blk); Y=$Y; blk parts ezviz-py | awk '/cp -r .*ezviz_source/{c=NR} /find .*ezviz_source.* -name __pycache__ .*rm -rf/{d=NR} /-m compileall/{k=NR} END{exit !(c && d>c && k>d)}'"
 for f in ezviz-source ezviz-rearm ezviz-check disk-guard; do
   t "wrappers: $f is mode 100755 in git" sh -c "git ls-files -s spike/bin/$f | grep -q '^100755 '"
 done
