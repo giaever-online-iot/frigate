@@ -27,6 +27,7 @@ rtp_ts_*: per-picture RTP timestamps (packets of one picture share a timestamp),
 step = (ts - previous ts) mod 2**32; monotonic = fraction of steps in (0, 2**31); mode = the most common step;
 p99_dev = 99th percentile of |step - mode|.
 """
+import importlib.util
 import os
 import re
 import shutil
@@ -39,6 +40,22 @@ from collections import Counter
 from pathlib import Path
 
 EXIT_USAGE = 64
+
+
+def _own_checkout(name: str) -> None:
+    """Fix wave 1, S4: the ezviz_source this probe imports must be its own checkout's (spike/ezviz next to this
+    tests/ directory), not whichever checkout a shared venv's .pth or a PYTHONPATH names. find_spec locates the
+    package without running any of its code. Checked before the gate and any camera contact; the line carries no path."""
+    own = Path(__file__).resolve().parents[2] / "spike" / "ezviz" / "ezviz_source"
+    try:
+        spec = importlib.util.find_spec("ezviz_source")
+    except (ImportError, ValueError):
+        spec = None
+    origin = spec.origin if spec is not None else None
+    if not origin or Path(origin).resolve().parent != own:
+        sys.stderr.write(f"probe {name}: wrong_checkout\n")
+        sys.stderr.flush()
+        os._exit(2)
 
 
 def _usage():
@@ -72,6 +89,7 @@ def main(argv: list) -> int:
         _usage()
     if not re.fullmatch(r"[a-z0-9_]{1,32}", name) or minutes_f <= 0 or form not in ("extend", "repeat"):
         _usage()
+    _own_checkout(name)                                              # S4: before the gate, the ledger, any contact
     work = Path(tempfile.mkdtemp(prefix="w23-probe-hash"))          # 0700: hashes, ffmpeg stderr, the camdir link
     (work / "data" / "ezviz").mkdir(parents=True)
     (work / "data" / "ezviz" / "cameras").symlink_to(Path(camdir).resolve())

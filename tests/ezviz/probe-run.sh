@@ -8,7 +8,7 @@ set +x +o xtrace   # first: no trace of any value, even under `bash -x` or an in
 # Inputs are make-config's: M7C_ENV_DIR (default ~/.local/state/m7c-hub) with cameras.pairs, env and the key file it
 # names; read by the shared read_cameras (tests/hub/lib-cameras.sh). The camera files go into a mktemp -d directory
 # (0700, files 0600) written with printf (a builtin: no argv, no environment) and removed by an EXIT trap.
-# probe.py runs with the venv python and the 8.0 ffmpeg unsquashed from the local amd64 snap file (as
+# probe.py runs with the venv python ($W23_VENV, default ~/.cache/frigate-w23/venv-probe) and the 8.0 ffmpeg unsquashed from the local amd64 snap file (as
 # tests/hub/serve.test.sh does; heavy: run under `flock -w 3600 /tmp/claude-1000/chim-suites.lock`).
 # State: $M7C_ENV_DIR/w23-probe-state (0700, never deleted); probe.py puts the ledger in <state>/ezviz/state, the
 # helper's layout (C18), so the D4 budget applies across probe runs. Knobs for tests: PROBE_PYTHON, PROBE_FFMPEG,
@@ -79,6 +79,9 @@ for i in 0 1; do
 done
 mkdir -p "$STATE"; chmod 700 "$STATE"
 
+# Fix wave 1, S4: the probe's own venv unless the caller names one. The shared default venv's .pth is retargeted by
+# any checkout's test run (serve-ezviz.test.sh, venv.sh), and probe.py imports the helper lazily against a real camera.
+export W23_VENV="${W23_VENV:-$HOME/.cache/frigate-w23/venv-probe}"
 if [ -n "${PROBE_PYTHON:-}" ]; then PY=$PROBE_PYTHON; else PY=$(bash "$HERE/venv.sh") || die 2 "the venv could not be built"; fi
 if [ -n "${PROBE_FFMPEG:-}" ]; then FF=$PROBE_FFMPEG; else
   SNAP_FILE="${M7C_AMD64_SNAP:-$HOME/.cache/frigate-m7c-evidence/amd64/frigate_0.18.2_amd64.snap}"

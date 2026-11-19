@@ -8,9 +8,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -226,6 +228,48 @@ class Probe(ProbeCase):
         self.assertEqual(p.returncode, 0, out + err)
         self.assertEqual(evs(self.ledger()), ["attempt", "login_ok", "published", "stop"])
         self.assertEqual(list((self.tmp / "tmp").iterdir()), [])           # the Terminating path removes the hash dir too
+
+
+class ProbeCheckout(ProbeCase):
+    """Fix wave 1, S4: the probe refuses an ezviz_source that is not its own checkout's, before the gate and any
+    contact. No ffmpeg is needed: the refusal comes before the ffmpeg check."""
+
+    def test_foreign_ezviz_source_exits_2_with_no_connect(self):
+        plant = self.tmp / "plant"                 # a full, working copy elsewhere: without the guard it would run
+        shutil.copytree(_path.PKG / "ezviz_source", plant / "ezviz_source",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        srv = socket.socket()
+        self.addCleanup(srv.close)
+        srv.bind((LOOPBACK, 0))
+        srv.listen(8)
+        srv.settimeout(0.2)
+        connects, stop = [], threading.Event()
+
+        def accept():
+            while not stop.is_set():
+                try:
+                    c, _ = srv.accept()
+                except (socket.timeout, OSError):
+                    continue
+                connects.append(1)
+                c.close()
+        th = threading.Thread(target=accept, daemon=True)
+        th.start()
+        f = self.cams / "cam1.conf"
+        f.write_text(f"host={LOOPBACK}\nport={srv.getsockname()[1]}\nserial={SERIAL}\nlogin={CODE}\n")
+        f.chmod(0o600)
+        env = _path.child_env()
+        for k in ("SNAP", "SNAP_DATA", "SNAP_COMMON"):
+            env.pop(k, None)
+        env["PYTHONPATH"] = str(plant)             # ahead of the venv's .pth: the planted package is found first
+        cmd = [sys.executable, "-B", str(PROBE), str(self.tmp / "common"), str(self.cams), "cam1", "0.5", "extend",
+               "300", "/bin/true"]
+        p = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        stop.set()
+        th.join(5)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (2, "", "probe cam1: wrong_checkout\n"))
+        self.assertEqual(connects, [])
+        self.assertFalse((self.tmp / "common/ezviz/state/cam1.ledger").exists())   # the gate was never called
 
 
 if __name__ == "__main__":

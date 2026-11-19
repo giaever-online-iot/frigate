@@ -34,6 +34,11 @@ with open(out + "/log", "a") as f:
 print("probe %s: end=stop login_ok=1" % n)
 sys.exit(int(os.environ.get("STUB_RC", "0")))
 PYEOF
+# A stub venv.sh: records the W23_VENV it was given (UNSET when none) and prints the system python3 (fix wave 1, S4)
+cat > "$TREE/tests/ezviz/venv.sh" <<'SHEOF'
+printf '%s\n' "${W23_VENV-UNSET}" > "$STUB_OUT/venv"
+command -v python3
+SHEOF
 PR=$TREE/tests/ezviz/probe-run.sh
 
 mkenv() {  # synthetic env dir: pairs + env 0600, a CRLF key file
@@ -102,6 +107,13 @@ signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp("bash", ["bash"] + sys.a
   check "$name: camera dir gone" 0 "$([ -e "$(cat "$T/$k/out/camdir.cam1")" ] && echo 1 || echo 0)"
   check "$name: nothing left in the temp dir" 0 "$(find "$T/$k/tmp" -mindepth 1 | wc -l)"
 done
+
+# --- S4 (fix wave 1): the real probe never uses the shared default venv another checkout's test may retarget ---
+( unset W23_VENV; run v1 PROBE_PYTHON= HOME="$T/v1/home" -- cam1 0.5 extend )
+check "venv: W23_VENV unset -> the probe's own venv" "$T/v1/home/.cache/frigate-w23/venv-probe" "$(cat "$T/v1/out/venv" 2>/dev/null)"
+check "venv: the probe ran with the venv python (exit 0)" 0 "$(rc v1)"
+run v2 PROBE_PYTHON= W23_VENV="$T/v2/own" -- cam1 0.5 extend
+check "venv: a caller's W23_VENV is kept" "$T/v2/own" "$(cat "$T/v2/out/venv" 2>/dev/null)"
 
 # --- the camera files go under XDG_RUNTIME_DIR when it is set (M3) ---
 check "camera dir was under XDG_RUNTIME_DIR" "$T/b1/tmp" "$(dirname "$(dirname "$(cat "$T/b1/out/camdir.cam1")")")"
