@@ -228,7 +228,67 @@ maintainer can take. Until then the constants are the plan's defaults: `KEEPALIV
 `KEEPALIVE_COUNT=4320` (not yet capped by a measured render time), `STARTTIMEOUT_S=30` and
 `TIMESTAMP_MODE="wallclock"`.
 
+### A1 and the diagnostic run: RESULT (the cause is H2, fixed in d06e99c)
+
+**Real runs on cam1** (one login each; counters only):
+- **A1** (19 Nov, form extend, 63 min, frozen 5d46c3d): `end=start_timeout login_ok=1 published=0 session_s=3780.095
+  first_irap_s=0.000 keepalive_sent=755 keepalive_failed=0 frames=0 decode_errors=3 rtp_ts_step_mode=3600
+  pts_seen=[96, 104, 112]`.
+- **The diagnostic** (19 Nov, 17:34 UTC, 3 minutes, `PROBE_DIAG=1`, frozen f78b183): `end=start_timeout login_ok=1
+  published=0 session_s=180.036 keepalive_sent=35 keepalive_failed=0 frames=0 decode_errors=3`.
+  - `pkts` 11115 and `per_min` [3679, 3714, 3721, 1]: steady.
+  - `pt` {96: 8180, 104: 2800, 112: 135}.
+  - `drop` {route: 11115}: every packet was dropped at the route stage.
+  - `rtp_rej` {} and `multi` 0. `nal` {} and `au` 0.
+  - `desc` {15: 36}: the 0x45 TLV announces hevc (stream type 0x24) on PT 15. PT 15 never carries a packet.
+  - The first bodies are two PT-112 packets with an empty payload: 64 bytes with TLV ids [0x40, 0x45, 0x41], and 44
+    bytes with [0x42, 0x43]. Then PT 96 as plain RFC 7798 HEVC: VPS `4001`, SPS `4201`, PPS `4401`, SEI `4e01`, then
+    FU `6201` bodies of 1152 bytes.
+
+**Cause (H2, established offline in the library source).**
+- pyEzvizApi 2.0.0 reads the 0x45 TLV the way annexb does: stream type = byte 2, payload type = byte 3 & 0x7F
+  (`streaming/media/rtp.py:526-536`). So `{15: 0x24}` is the library's map too.
+- The library then adds PT 96 to the hevc routes (`streaming/local/payloads.py:1125-1157`) when all of these hold: video
+  descriptors exist, 96 is unassigned (1130), no packet on an announced video PT is seen (1141-1143), there are no
+  H.264 routes, and PT 96 shows at least 2 HEVC evidence frames: the wrapper, a layer-0 VPS/SPS/PPS, or an FU
+  (1147-1150, 1155-1157).
+- The decrypt loop then treats PT 96 as authoritative hevc (772, 808-822, 866). The clear path
+  (`_idmx_local_packets_to_hevc_annexb`) uses the same routes.
+- annexb had listed this as an accepted difference. With hevc = {15}, PT 96 failed the route check.
+
+Offline checks on bodies of the real shape:
+- library routes hevc {15, 96}, 6 NALs; annexb 0;
+- with one PT-15 packet added, the library routes {15} only and drops PT 96 too.
+
+H1 (0xB2) was a real gap in annexb's table, but it was not the cause: 0xB2 never appears. That fix stays.
+
+**Fix (d06e99c).**
+- annexb ports the promotion progressively. PT 96 joins the hevc routes at its second evidence frame. It leaves them for
+  good once an announced video PT carries a packet.
+- PT-96 bodies wait in a bounded hold (`HOLD_MAX` 64) until the decision, then come out in order, so the leading VPS is
+  kept.
+- The fake camera's `--real-shape` variant reproduces the diagnostic field for field: the two PT-112 packets of 64 and
+  44 bytes, `desc` {15: 0x24}, FU bodies of 1152 bytes, and PT 104 audio.
+  - Red: `end=start_timeout login_ok=1 published=0 frames=0 decode_errors=3 pts_seen=[96, 104, 112]`,
+    `drop {route: 7614}`.
+  - Green: `end=stop published=1 frames=298 decode_errors=0`, route drops only on 104 and 112, 1 body held and
+    replayed.
+- On 2552 real-shape bodies (100 pictures), annexb and the library's decrypt path give byte-identical Annex-B.
+- Seven mutants fail: the threshold, the announced-PT stop, the H.264 guard, the 96-assigned guard, the hold replay,
+  the old route rule and an unbounded hold.
+- Not yet proven on the real camera: that needs a new real run.
+
+**Suites at d06e99c** (19 Nov, a private `W23_VENV`, heavy suites one at a time under the suite lock):
+- `tests/ezviz` unittest: `Ran 256 tests`, `OK`, 0 skipped (251 before, plus 4 annexb tests and 1 probe test);
+- `serve-ezviz.test.sh` (S2): 53 ok, 0 FAIL;
+- `probe-run.test.sh`: 76 ok, 0 FAIL;
+- CI python: `discover -s tests` 27 OK and `tests.test_go2rtc_config_gen` 23 OK.
+
+No shell file changed in this round.
+
 ### A1 gave no video: why the helper might drop it (HYPOTHESES, not results)
+
+The ranking below was written before the diagnostic run. The run settled it: H2. The table is kept as the record.
 
 **The fact.** GA run A1 (cam1, form extend, 63 min, from the frozen 5d46c3d) printed `end=start_timeout login_ok=1
 published=0 session_s=3780.095 first_irap_s=0.000 keepalive_sent=755 keepalive_failed=0 frames=0 decode_errors=3
