@@ -48,7 +48,7 @@ def parse(data: bytes) -> list:
 def _accepted_end(data: bytes) -> int:
     """Offset just past the last line parse() would accept: a torn last line is cut whether or not it ends in a newline (C7)."""
     end = data.rfind(b"\n") + 1             # drops a non-empty tail without newline
-    if end:
+    if end == len(data) and end:             # no torn tail: examine the last line only then (a bad line before a tail is mid-file damage, P8)
         start = data.rfind(b"\n", 0, end - 1) + 1
         try:
             rec = json.loads(data[start:end])
@@ -78,8 +78,12 @@ class Ledger:
         try:
             while True:
                 fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                held = os.fstat(fd)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    held = os.fstat(fd)
+                except OSError:
+                    os.close(fd)             # do not leak the fd on a lock failure
+                    raise
                 try:
                     now = os.stat(self.path, follow_symlinks=False)
                 except FileNotFoundError:

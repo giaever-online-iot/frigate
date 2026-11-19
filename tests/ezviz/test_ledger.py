@@ -52,6 +52,13 @@ class TestLedger(unittest.TestCase):
             self.assertEqual([r["ev"] for r in L.records()], ["attempt", "net_fail"])
         self.assertEqual(self.evs(), ["attempt", "net_fail"])
 
+    def test_append_never_erases_mid_file_damage(self):    # C7, P8
+        self.p.write_bytes(A + b"bad\n" + b'{"t":2,"ev')
+        with Ledger(self.p) as L:
+            L.append({"t": 3, "ev": "net_fail", "dur": 2, "syn": True})
+            with self.assertRaises(LedgerDamaged):
+                L.records()
+
     def test_mid_file_damage_is_reported(self):
         with self.assertRaises(LedgerDamaged):
             parse(A + b"garbage\n" + b'{"t":3,"ev":"stop","dur":2}\n')
