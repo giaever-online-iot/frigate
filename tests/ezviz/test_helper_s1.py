@@ -155,6 +155,22 @@ class HelperS1(HelperCase):
               file=sys.stderr)
         self.assertLess(min(times), 0.150)
 
+    def test_internal_error_before_contact_is_one_fixed_line_and_75(self):   # fix wave 1, N2
+        # A hand-edited ledger (review N2): the first session has `published` but no end before the next `attempt`,
+        # so policy.decide raises a TypeError inside gate.admit. No traceback, one fixed line, exit 75, no contact.
+        now = time.time()
+        seed = [rec(now - 900, "attempt"), rec(now - 899, "login_ok"), rec(now - 890, "published"),
+                rec(now - 600, "attempt"), rec(now - 599, "net_fail", 1.0)]
+        fixtures.seed_ledger(self.tmp, seed)
+        with self.assertRaises(TypeError):                               # control: this ledger does make decide raise
+            policy.decide(fixtures.read_ledger(self.tmp), now, latch_file=False)
+        h = Helper(self.tmp, "cam1", [])
+        h.wait_exit(15)
+        self.assertEqual((h.rc, h.stderr), (75, "ezviz-source cam1: internal TypeError\n"))
+        self.assertNotIn("Traceback", h.stderr)
+        self.assertEqual(h.stats()["connects"], 0)
+        self.assertEqual(fixtures.read_ledger(self.tmp), seed)          # nothing written: no attempt, no end
+
 
 class KeepaliveFailedEndsTheSession(unittest.TestCase):
     """T11 review mutant R3: the keepalive-failure end of Helper.run(), in-process with a stand-in camera session.

@@ -159,7 +159,16 @@ def main(argv: list) -> None:
     ev, code = None, None
     try:
         signals.install()                                    # inside the try: a SIGTERM right after it is E1
-        adm = gate.admit(h.name, on_attempt=h.on_attempt)
+        try:
+            adm = gate.admit(h.name, on_attempt=h.on_attempt)
+        except gate.Refused:
+            raise
+        except Exception as e:                               # noqa: BLE001 - fix wave 1, N2
+            # An unexpected error inside gate.admit or policy.decide (a hand-edited ledger, a bug): before any camera
+            # contact, so fail closed through the Refused path below: one fixed-form line with the class word
+            # `internal` and the exception's CLASS NAME only (no message, no args), then exit 75. If the attempt
+            # was already written, the next decision closes it with a synthetic record (D21).
+            raise gate.Refused(f"internal {type(e).__name__}", C.EXIT_TEMP) from None
         h.cam = adm.cam
         gate.say(h.name, "attempt", attempt=adm.attempts_in_window)
         ev, code = h.run()

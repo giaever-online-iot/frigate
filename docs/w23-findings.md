@@ -158,7 +158,7 @@ last changed that row).
 
 | Suite | Result | At |
 |---|---|---|
-| `"$PY" -m unittest discover -s tests/ezviz -p 'test_*.py'` | `Ran 238 tests in 441.039s`, `OK`, 0 skipped (the local amd64 snap file was present, so `test_probe` ran) | S5 |
+| `"$PY" -m unittest discover -s tests/ezviz -p 'test_*.py'` | `Ran 239 tests in 446.456s`, `OK`, 0 skipped (the local amd64 snap file was present, so `test_probe` ran) | N2 |
 | `bash tests/hub/make-config.test.sh` | 233 ok, 0 FAIL | S5 |
 | `bash tests/hub/watch.test.sh` | 98 ok, 0 FAIL | S5 |
 | `bash tests/hub/observe.test.sh` | 101 ok, 0 FAIL | S5 |
