@@ -41,12 +41,15 @@ def say(name: str, cls: str, *, attempt=None, next_in=None) -> None:
 
 
 def write_latch(state: Path, name: str) -> None:
-    fd = os.open(state / f"{name}.latch", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    ledger._fsync_dir(state)
+        fd = os.open(state / f"{name}.latch", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        ledger._fsync_dir(state)
+    except OSError as e:
+        raise ledger.LedgerIOError(type(e).__name__) from None
 
 
 def _row_start(recs: list) -> float:

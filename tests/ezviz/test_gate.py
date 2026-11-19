@@ -2,6 +2,7 @@ import _path
 import fcntl
 import json
 import os
+import re
 import signal
 import statistics
 import time
@@ -79,12 +80,26 @@ class TestGate(unittest.TestCase):
         self.assertTrue((t.state / "cam1.latch").exists())
         self.assertEqual(self.evs(t).count("latch"), 1)
 
+    def test_latch_write_failure_is_ledger_io(self):                        # review fix 1
+        t = Tree()
+        lines = []
+        for dt in (-30000, -20000, -10000):
+            lines += [rec(dt, "attempt"), rec(dt + 2, "login_ok"), rec(dt + 9, "start_timeout")]
+        t.seed(lines)
+        os.symlink("nowhere", t.state / "cam1.latch")
+        rc, out, err, _ = run_gate(t)
+        self.assertEqual((rc, out, err.strip()), (75, "", "ezviz-source cam1: ledger_io"))
+
     def test_synthetic_written_once_across_refusals(self):                  # H3
         t = Tree()
         t.seed([rec(-30, "attempt")])
+        ns = []
         for _ in range(2):
-            self.assertEqual(run_gate(t)[0], 75)
+            rc, _, err, _ = run_gate(t)
+            self.assertEqual(rc, 75)
+            ns.append(int(re.search(r"next allowed \+(\d+)s", err).group(1)))
             time.sleep(1)
+        self.assertLessEqual(ns[1], ns[0])                                  # H3: spacing does not move later
         self.assertEqual(self.evs(t), ["attempt", "net_fail"])
 
     def test_ledger_damaged_refuses_without_contact(self):                  # Review Focus 2, P8
@@ -132,8 +147,10 @@ class TestGate(unittest.TestCase):
     def test_lines_carry_no_camera_value(self):
         t = Tree()
         rc, out, err, _ = run_gate(t)
+        self.assertEqual((rc, out), (0, "ADMITTED\n"))
         t.seed([rec(-100, "attempt"), rec(-99, "auth_fail")])
         rc2, out2, err2, _ = run_gate(t)
+        self.assertEqual((rc2, err2.strip()), (75, "ezviz-source cam1: latched"))
         for c in CANARIES:
             for s in (out, err, out2, err2, t.ledger().read_text()):
                 self.assertNotIn(c, s)
