@@ -60,9 +60,15 @@ for f in "${WFS[@]}"; do
 done
 
 # A6 first. Every `uses:` value in every workflow file (steps and jobs alike), lower-cased.
+# explode(.) resolves YAML aliases and merge keys, so `uses: *ua` reads as the action it
+# names. Only string values are kept: a map key `uses` under env: or with: holding a number
+# or bool is not an action, and downcase would fail on it. A file yq still fails on gives a
+# YQ-ERROR line, which fails the check below instead of silently dropping its uses.
 all_uses="$(for f in "${WFS[@]}"; do
-  yf '.. | select(tag == "!!map") | select(has("uses")) | .uses | downcase' "$f" | sed "s|^|$(basename "$f"): |"
+  yf 'explode(.) | .. | select(tag == "!!map") | select(has("uses")) | .uses | select(tag == "!!str") | downcase' "$f" \
+    | sed "s|^|$(basename "$f"): |" || echo "$(basename "$f"): YQ-ERROR"
 done)"
+check "A6 yq read the uses of every workflow" "" "$(grep 'YQ-ERROR' <<<"$all_uses")"
 check "A6 exactly one upload-artifact uses, in any case, across all workflows" \
   "$(basename "$WF"): actions/upload-artifact@v7" "$(grep 'upload-artifact' <<<"$all_uses")"
 check "A6 no local action (uses: ./...) in any workflow" "" "$(grep -E '^[^:]+: \./' <<<"$all_uses")"

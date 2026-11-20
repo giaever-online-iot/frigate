@@ -258,9 +258,10 @@ comment, that keeps the run's built `frigate*.snap` files as one GitHub artifact
 - The label must be on the PR before the build starts. The workflow does not run on `labeled`, and a re-run is
   expected to reuse the original event's label list (GitHub's behaviour, not tested here).
 - `.github/scripts/artifact-step.test.sh` pins the step: its place, the exact `if`, 1-day retention, and the path. It
-  also checks that no other upload-artifact `uses:` (in any case) appears in any workflow, that no workflow uses a
-  local action, that the triggers stay opened/synchronize/reopened, and that lint-test.yml's path filter lists
-  pr-build-snap.yml (round 13).
+  also checks that no other upload written as a `uses:` of upload-artifact (in any case, aliases resolved) appears in
+  any workflow, that no workflow uses a local action, that the triggers stay opened/synchronize/reopened, and that
+  lint-test.yml's path filter lists pr-build-snap.yml (rounds 13 and 14). An upload through a remote reusable
+  workflow, another action or a `run:` step is outside what a static check of `uses:` can see.
 
 ## Known pre-existing flake: `tests/hub/serve.test.sh` (clip mode)
 
