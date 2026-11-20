@@ -181,7 +181,7 @@ class OutputTest(unittest.TestCase):
 
     def test_exited_child_raises(self):
         o = self.make(fixtures.fake_ffmpeg(self.tmp, exit_after_s=0.5), mode="wallclock")
-        time.sleep(1.0)
+        o._proc.wait(30)                       # N4: wait for the exit itself; a fixed 1 s sleep flaked under load
         with self.assertRaises(output.FfmpegExited):
             o.write_au(b"\x00\x00\x00\x01\x26", True)
 
