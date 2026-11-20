@@ -100,10 +100,20 @@ class TestGate(unittest.TestCase):
             self.assertIn("ezviz-source cam1: budget_wait", err)
             self.assertNotIn("pyezvizapi", err)
             self.assertNotIn("ezviz_source.camera", err)
+            # Round 11 (re-review slot 15): spec 4.1 "stdlib only until the decision", so every module the refusal
+            # imports is stdlib or ezviz_source; deterministic, unlike a time bound: it is red on a pyEzvizApi
+            # dependency (requests, cryptography, paho) as well as on pyezvizapi. Allowed site probes: the two
+            # customize hooks, and the apport_python_hook that Ubuntu's own sitecustomize tries (importtime logs a
+            # failed import too)
+            site = {"sitecustomize", "usercustomize", "apport_python_hook"}
+            mods = {m.split(".")[0] for m in re.findall(r"^import time:\s+\d+ \|\s+\d+ \|\s+(\S+)", err, re.M)}
+            self.assertIn("ezviz_source", mods, "the importtime parse found no ezviz_source line: a vacuous check")
+            self.assertEqual(mods - set(sys.stdlib_module_names) - {"ezviz_source"} - site,
+                             set(), "the refusal imports a non-stdlib module (spec 4.1: stdlib only until the decision)")
         # N6: S1's 150 ms holds idle (0.04-0.06 s on the laptop), but under load the median was 0.175 s at load 12 and
         # even the best of 5 0.20 s at load 16, CPU time 0.16 s: a 150 ms bound measured the laptop. So the best run
         # gets a bound several times larger, which still fails a refusal that waits (a 1 s sleep is red); the per-run
-        # importtime checks above prove the path imports no pyezvizapi and no camera module
+        # importtime checks above prove the path imports no pyezvizapi, no camera module and nothing outside the stdlib
         self.assertLess(min(secs), 0.5, secs)
 
     def test_latched_refusal(self):

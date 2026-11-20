@@ -44,7 +44,8 @@ def _pgrp(stat: Path):
 
 
 def real_ffmpeg() -> str:
-    """$W23_REAL_FFMPEG, else the 8.0 ffmpeg unsquashed from the local amd64 snap file, else PATH, else skip."""
+    """$W23_REAL_FFMPEG, else the snap's ffmpeg (n8.1.1, in usr/lib/ffmpeg/8.0) unsquashed from the local amd64 snap
+    file, else PATH, else skip."""
     if "ff" in _TOOLS:
         return _TOOLS["ff"]
     env = os.environ.get("W23_REAL_FFMPEG")

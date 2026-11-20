@@ -8,7 +8,8 @@ set +x +o xtrace   # first: no trace of any value, even under `bash -x` or an in
 # Inputs are make-config's: M7C_ENV_DIR (default ~/.local/state/m7c-hub) with cameras.pairs, env and the key file it
 # names; read by the shared read_cameras (tests/hub/lib-cameras.sh). The camera files go into a mktemp -d directory
 # (0700, files 0600) written with printf (a builtin: no argv, no environment) and removed by an EXIT trap.
-# probe.py runs with the venv python ($W23_VENV, default ~/.cache/frigate-w23/venv-probe) and the 8.0 ffmpeg unsquashed from the local amd64 snap file (as
+# probe.py runs with the venv python ($W23_VENV, default ~/.cache/frigate-w23/venv-probe) and the snap's ffmpeg
+# (n8.1.1, directory usr/lib/ffmpeg/8.0) unsquashed from the local amd64 snap file (as
 # tests/hub/serve.test.sh does; heavy: run under `flock -w 3600 /tmp/claude-1000/chim-suites.lock`).
 # State: $M7C_ENV_DIR/w23-probe-state (0700, never deleted); probe.py puts the ledger in <state>/ezviz/state, the
 # helper's layout (C18), so the D4 budget applies across probe runs. Knobs for tests: PROBE_PYTHON, PROBE_FFMPEG,

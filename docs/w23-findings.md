@@ -142,7 +142,8 @@ Also changed in the workflow:
 
 **What SKIPs in CI, and why:**
 - `tests/ezviz/serve-ezviz.test.sh` (S2): there is no local amd64 snap file on the runner, so there is no go2rtc or
-  ffmpeg 8.0. It prints a `SKIP` line and exits 0. S2's evidence is the laptop run above.
+  snap ffmpeg (n8.1.1, in `usr/lib/ffmpeg/8.0`). It prints a `SKIP` line and exits 0. S2's evidence is the laptop run
+  above.
 - `test_probe.py`'s fake-camera runs need a real ffmpeg (`W23_REAL_FFMPEG`, the snap file or `ffmpeg` on PATH). They
   SKIP with a reason when none is found.
 - `configure-ezviz.test.sh` SKIPs only if `python3 -m venv` is unavailable.
@@ -412,6 +413,11 @@ ran 3 minutes, both cameras at once, one login each. The two lines, counters onl
     burners, load 16 on 14 threads) even the best of 5 runs took 0.20 s. The test therefore bounds the best run at
     0.5 s, which still fails a refusal that sleeps 1 s, and keeps its per-run check that no pyezvizapi or camera
     module is imported. The test no longer asserts the 150 ms itself; the idle figure above is the evidence for it.
+- **Round 11 (re-review slot 15's one change, test-only):** the same per-run loop now also asserts that every
+  module the refusal imports is stdlib or `ezviz_source` (spec 4.1: stdlib only until the decision). It is red on
+  a refusal that imports `requests`, `urllib3`, `cryptography.fernet` + `paho.mqtt.client` or `pyezvizapi`, which
+  the 0.5 s bound let through. Load cannot flake it. It allows the site probes `sitecustomize`, `usercustomize` and
+  `apport_python_hook` (Ubuntu's sitecustomize tries that one; `-X importtime` logs a failed import too).
 - **Known follow-ups, not changed** (production code; the real cameras ran fc721cc):
   - N2: `RtpClock` learns any good step as "the" step. After a stall of up to 10 s, a re-base advances by that gap
     instead of by one picture. This is harmless: the PTS stays monotonic.
