@@ -14,6 +14,8 @@ on:
       - 'snap/**'
       - 'spike/**'
       - '.github/workflows/lint-test.yml'
+      # W-23: .github/scripts/artifact-step.test.sh pins the opt-in artifact step in this file.
+      - '.github/workflows/pr-build-snap.yml'
   workflow_dispatch:
 
 permissions:

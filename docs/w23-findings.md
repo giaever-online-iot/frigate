@@ -251,10 +251,16 @@ comment, that keeps the run's built `frigate*.snap` files as one GitHub artifact
   never fails the build or its Store release.
 - The rule: whoever applies the label downloads the artifact and deletes it at once, without waiting for the expiry.
   While the label stays on, every new build of the PR makes a new copy.
+- The rule covers re-runs too. A re-run of a labelled run may upload a new copy. If the earlier copy still exists, the
+  same name conflicts and `continue-on-error` absorbs the failure. Remove the label before any re-run. Because a
+  re-run is expected to reuse the original label list (below), that may not stop the upload, so check a re-run of a
+  labelled run for a new artifact and delete it at once too.
 - The label must be on the PR before the build starts. The workflow does not run on `labeled`, and a re-run is
   expected to reuse the original event's label list (GitHub's behaviour, not tested here).
-- `.github/scripts/artifact-step.test.sh` pins the step: its place, the exact `if`, 1-day retention, the path, and no
-  other upload-artifact step in the file.
+- `.github/scripts/artifact-step.test.sh` pins the step: its place, the exact `if`, 1-day retention, and the path. It
+  also checks that no other upload-artifact `uses:` (in any case) appears in any workflow, that no workflow uses a
+  local action, that the triggers stay opened/synchronize/reopened, and that lint-test.yml's path filter lists
+  pr-build-snap.yml (round 13).
 
 ## Known pre-existing flake: `tests/hub/serve.test.sh` (clip mode)
 

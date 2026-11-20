@@ -15,14 +15,27 @@
 #   A3  retention-days is 1
 #   A4  continue-on-error is true
 #   A5  if-no-files-found is error
-#   A6  no other upload-artifact step anywhere in the file
+#   A6  no other upload-artifact `uses:` (any case) in ANY workflow file of the
+#       directory; no local action (`uses: ./...`) in any workflow, since a local
+#       composite action could wrap an upload; and no file under .github/actions
+#       mentions upload-artifact (there is no .github/actions directory today)
 #   A7  the path is the release step's own snaps (${SNAP_NAME}*.snap, SNAP_NAME frigate)
+#   A8  lint-test.yml's path filters include pr-build-snap.yml, so a PR that
+#       changes only that file still runs this test
+#   A9  pr-build-snap runs on pull_request types opened, synchronize, reopened
+#       only: with `labeled`, every label change would start a rebuild and a
+#       Store release, and the docs say the workflow does not run on labeled
 #
 # Usage: artifact-step.test.sh [workflow.yml]   (default: ../workflows/pr-build-snap.yml)
+# The other workflows are read from the directory of that file, and the actions
+# from ../actions next to it, so a scratch copy of .github tests as a whole.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WF="${1:-$HERE/../workflows/pr-build-snap.yml}"
+WFDIR="$(cd "$(dirname "$WF")" && pwd)"
+ACTIONS="$WFDIR/../actions"
+LINT="$WFDIR/lint-test.yml"
 JOB='.jobs["build-and-release"]'
 fail=0
 check() { # desc expected actual
@@ -37,15 +50,26 @@ check() { # desc expected actual
 command -v yq >/dev/null 2>&1 || { echo "FAIL - yq is not on PATH"; exit 1; }
 [ -f "$WF" ] || { echo "FAIL - no workflow file at $WF"; exit 1; }
 # On stdin: a strictly confined yq (the snap) cannot open files under /tmp.
-y() { yq "$1" - <"$WF"; }
+yf() { yq "$1" - <"$2"; }
+y() { yf "$1" "$WF"; }
+shopt -s nullglob
+WFS=("$WFDIR"/*.yml "$WFDIR"/*.yaml)
 # A file yq cannot parse must not turn into a vacuous red or green below.
-[ "$(y '.jobs | type' 2>&1)" = "!!map" ] || { echo "FAIL - yq cannot parse $WF as a workflow"; exit 1; }
+for f in "${WFS[@]}"; do
+  [ "$(yf '.jobs | type' "$f" 2>&1)" = "!!map" ] || { echo "FAIL - yq cannot parse $f as a workflow"; exit 1; }
+done
 
-# A6 first: every step of every job, so a second step in another job counts too.
-n_upload="$(y '[.jobs[].steps[] | select((.uses // "") | test("^actions/upload-artifact@"))] | length')"
-check "A6 exactly one upload-artifact step in the file" "1" "$n_upload"
+# A6 first. Every `uses:` value in every workflow file (steps and jobs alike), lower-cased.
+all_uses="$(for f in "${WFS[@]}"; do
+  yf '.. | select(tag == "!!map") | select(has("uses")) | .uses | downcase' "$f" | sed "s|^|$(basename "$f"): |"
+done)"
+check "A6 exactly one upload-artifact uses, in any case, across all workflows" \
+  "$(basename "$WF"): actions/upload-artifact@v7" "$(grep 'upload-artifact' <<<"$all_uses")"
+check "A6 no local action (uses: ./...) in any workflow" "" "$(grep -E '^[^:]+: \./' <<<"$all_uses")"
+check "A6 no file under .github/actions mentions upload-artifact" "" \
+  "$([ -d "$ACTIONS" ] && grep -rli 'upload-artifact' "$ACTIONS")"
 
-idx_art="$(y "$JOB.steps | to_entries | map(select((.value.uses // \"\") | test(\"^actions/upload-artifact@\"))) | .[0].key // \"none\"")"
+idx_art="$(y "$JOB.steps | to_entries | map(select((.value.uses // \"\") | downcase | test(\"upload-artifact\"))) | .[0].key // \"none\"")"
 idx_rel="$(y "$JOB.steps | to_entries | map(select(.value.id == \"release\")) | .[0].key // \"none\"")"
 idx_sticky="$(y "$JOB.steps | to_entries | map(select(.value.name == \"Sticky PR comment\")) | .[0].key // \"none\"")"
 check "A1 the release step exists" "yes" "$([ "$idx_rel" != none ] && echo yes || echo no)"
@@ -78,6 +102,19 @@ check "A5 if-no-files-found is error" "error" "$(y "$S.with[\"if-no-files-found\
 # shellcheck disable=SC2016  # the ${{ }} expression is literal YAML text, not a shell expansion
 check "A7 path is the built snaps" '${{ env.SNAP_NAME }}*.snap' "$(y "$S.with.path // \"unset\"")"
 check "A7 SNAP_NAME is frigate" "frigate" "$(y '.env.SNAP_NAME // "unset"')"
+
+# A8: every trigger of lint-test.yml that has a path filter lists pr-build-snap.yml.
+if [ -f "$LINT" ]; then
+  n_paths="$(yf '[.on[] | select(tag == "!!map") | select(has("paths"))] | length' "$LINT")"
+  n_listed="$(yf '[.on[] | select(tag == "!!map") | select(has("paths")) | select(.paths | any_c(. == ".github/workflows/pr-build-snap.yml"))] | length' "$LINT")"
+  check "A8 lint-test.yml has a path filter" "yes" "$([ "${n_paths:-0}" -ge 1 ] && echo yes || echo no)"
+  check "A8 every lint-test path filter lists pr-build-snap.yml" "$n_paths" "$n_listed"
+else
+  check "A8 lint-test.yml exists next to the workflow" "yes" "no"
+fi
+
+check "A9 pull_request types are opened, reopened, synchronize (no labeled)" \
+  "opened,reopened,synchronize" "$(y '.on.pull_request.types // [] | sort | join(",")')"
 
 [ "$fail" -eq 0 ] && echo "All artifact-step tests passed." || echo "Some artifact-step tests FAILED."
 exit "$fail"
