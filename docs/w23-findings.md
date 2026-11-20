@@ -692,9 +692,15 @@ failure keeps `disk-guard: cannot read free space` and exit 1. Everything after 
   (`@{SNAP_COREUTIL_DIRS}stat ixr`); `awk` → `/usr/bin/mawk` (`/{,usr/}bin/{,g,m}awk ixr`); `grep` → `/usr/bin/grep`
   (`/{,usr/}bin/{,e,f,r}grep ixr`); `snapctl` → `/usr/lib/snapd/snapctl` (`/usr/bin/snapctl ixr`, `/usr/lib/snapd/snapctl ixr`).
 - `tests/disk-guard.test.sh` now stubs `stat` (it answers only the exact argument vector `-f -c '%a %S'
-  $SNAP_COMMON/media/frigate`, else rc 1) and puts a `df` stub on PATH that always fails and records every call; the
-  last check asserts that no case called it. New cases: stat fails, garbage (`12x`), block size 0, one field, a third
+  $SNAP_COMMON/media/frigate`, else rc 1) and puts a `df` stub on PATH that always fails and records every call; a
+  check asserts that no case called it. New cases: stat fails, garbage (`12x`), block size 0, one field, a third
   field, block size 512 (both sides of the floor), 0 free blocks (a full disk still stops frigate).
+- Round 17 (review nits, test only): a static check that the script names no `df` outside comments, so a fallback to
+  `/usr/bin/df` by absolute path (or `busybox df`, `coreutils df`), which the PATH stub never sees while stat succeeds,
+  is now caught; a case exactly at the floor (20 GiB free, floor 20: no stop, exit 0, no line); and stat outputs with a
+  leading zero (`0123 4096`, `4096 04096`) that must read as "cannot read free space", exit 1, no stop. Green: 49 ok
+  under `sh`, `dash` and `bash`. Each new check is red against its mutant under `sh` and `dash`: the three `df`
+  fallbacks 1 FAIL each (the static check), `-lt` → `-le` 2, leading zero accepted in blocks 3, in the block size 2.
 - Red before: the new test on the bf9cd89 script, 15 FAIL under `sh` and under `dash` (among them `df is never called`).
   Green: 39 ok under `sh`, `dash` and `bash`. Mutants, each on a scratch copy, each red under `sh` and `dash`:
 
@@ -747,8 +753,9 @@ frigate.frigate  disabled  inactive  -
 (none)
 ```
 
-- (i) to (iii) **PASS**: no stop below the floor; one line, exit 0, frigate inactive AND disabled above it; no second
-  stop. The "29 GiB" against the unconfined `df`'s 30 is rounding: the guard floors bytes to GiB, `df -B1G` rounds up.
+- (i) to (iii) **PASS**: no stop while the free space is above the floor (floor 1, 29 GiB free: exit 0, no line); below
+  the floor (floor 130) one line, exit 0, frigate.frigate inactive AND disabled; the second run makes no second stop
+  (frigate already inactive: exit 0, no line). The "29 GiB" against the unconfined `df`'s 30 is rounding: the guard floors bytes to GiB, `df -B1G` rounds up.
 - (iv) **PASS**: 0 denials for the disk-guard profile. The 2 DENIED lines in the window are `snap.frigate.frigate`
   (`/sys/fs/cgroup/system.slice/cpu.max` and `/proc/sys/vm/nr_hugepages` opens), seen before as well.
 - So `stat`, `awk`, `grep`, `snapctl services` and `snapctl stop --disable` now run under confinement on arm64, end to

@@ -10,7 +10,8 @@ check() { if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1 [want 
 BS=4096   # the stub's fundamental block size; free GiB = blocks * BS / 2^30
 # case NAME FREE_GIB FLOOR(or "") FRIGATE_STATE [STAT_MODE] [STOP_MODE: ok|fail|noop|blind]
 #   STAT_MODE ok: prints "<blocks> 4096"; fail: rc 1, no output; garbage: "12x 4096"; zerobs: "<blocks> 0";
-#   onefield: "<blocks>"; bs512: "<blocks*8> 512" (a block size other than 4096); extra: "<blocks> 4096 9".
+#   onefield: "<blocks>"; bs512: "<blocks*8> 512" (a block size other than 4096); extra: "<blocks> 4096 9";
+#   lzblocks: "0123 4096" and lzbs: "4096 04096" (a leading zero: sh arithmetic would read it as octal).
 #   The stub answers ONLY the exact argument vector -f -c '%a %S' $SNAP_COMMON/media/frigate; any other is rc 1.
 #   STOP_MODE ok: stop exits 0 and the state flips to inactive (R2-N10); fail: rc 1, state stays; noop: rc 0, state stays.
 case_() {
@@ -44,6 +45,8 @@ case "$statmode" in
   onefield) echo "\$b" ;;
   bs512) echo "\$(( b * 8 )) 512" ;;
   extra) echo "\$b $BS 9" ;;
+  lzblocks) echo "0123 $BS" ;;
+  lzbs) echo "4096 0$BS" ;;
 esac
 EOF
   cat > "$d/bin/df" <<EOF
@@ -79,6 +82,10 @@ case_ n 21 "" active bs512;    check "block size 512, 21 GiB: no stop (blocks x 
 case_ o 19 "" active bs512;    check "block size 512, 19 GiB: stop once" 1 "$(stops o)"
 check "block size 512, 19 GiB: line names 19" "disk-guard: free 19 GiB below floor 20 GiB: stopped and disabled frigate.frigate" "$(cat "$SB/o/out")"
 case_ p 0 "" active;           check "0 free blocks: stop once (a full disk is readable)" 1 "$(stops p)"
+case_ q 20 "" active;          check "exactly at the floor (20 GiB, floor 20): no stop" 0 "$(stops q)"
+check "exactly at the floor: exit 0" 0 "$(cat "$SB/q/rc")"; check "exactly at the floor: no line" "" "$(cat "$SB/q/out")"
+case_ r 10 "" active lzblocks; unreadable r "leading zero in blocks (0123)"
+case_ s 10 "" active lzbs;     unreadable s "leading zero in the block size (04096)"
 # R2-N10: the stop is verified
 case_ g 19 "" active ok fail
 check "stop rc 1: exit 1" 1 "$(cat "$SB/g/rc")"
@@ -92,5 +99,9 @@ case_ i 19 "" active ok blind
 check "stop rc 0 but re-read fails: exit 1" 1 "$(cat "$SB/i/rc")"
 check "stop rc 0 but re-read fails: FAILED line" "disk-guard: free 19 GiB below floor 20 GiB: stop FAILED" "$(cat "$SB/i/out")"
 check "df is never called, in any case (F3: exec-denied under confinement)" "" "$(cat "$SB/dfcalls")"
+# Static: the script names no df outside comments (an absolute /usr/bin/df, busybox df or coreutils df fallback that the
+# PATH stub cannot see when stat succeeds).
+check "spike/bin/disk-guard names no df outside comments" 0 \
+  "$(grep -vE '^[[:space:]]*#' spike/bin/disk-guard | grep -cE '(^|[^[:alnum:]_.-])df([^[:alnum:]_-]|$)')"
 [ "$FAILS" = 0 ] && echo "disk-guard.test: all ok" || echo "disk-guard.test: FAILURES"
 exit "$FAILS"
