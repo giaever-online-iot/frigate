@@ -149,6 +149,22 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # Opt-in, one-day copy of the built snaps for local verification. The repo
+      # is public and a GitHub artifact can be downloaded by any logged-in user,
+      # while the Store listing is private: so this runs only when the PR carries
+      # the label below, and whoever applies the label deletes the artifact right
+      # after downloading it. See artifact-step.test.sh.
+      - name: Keep built snaps as a one-day artifact (opt-in by label)
+        if: ${{ steps.build.outputs.snaps != '0' && github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'snap-artifact') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: snaps-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: ${{ env.SNAP_NAME }}*.snap
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
       - name: Sticky PR comment
         if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/github-script@v9

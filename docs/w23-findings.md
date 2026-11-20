@@ -242,6 +242,20 @@ cross-checks.
   setup-python action, and the tool-cache 3.12.16. There was no container runtime without root on the laptop (no docker
   or podman; LXD needs root). The first green CI run is the evidence for the runner.
 
+**Opt-in snap artifact (round 12).** `pr-build-snap.yml` has a step, after the Store upload and before the sticky
+comment, that keeps the run's built `frigate*.snap` files as one GitHub artifact named `snaps-pr<N>-<head sha>`.
+- It is off by default. It runs only on a `pull_request` build that produced snaps, when the PR carries the label
+  `snap-artifact`. The repo is public, so any logged-in GitHub user can download its artifacts, while the snap's Store
+  listing is private.
+- Retention is 1 day. The files are stored uncompressed. The step is `continue-on-error`, so a failed artifact upload
+  never fails the build or its Store release.
+- The rule: whoever applies the label downloads the artifact and deletes it at once, without waiting for the expiry.
+  While the label stays on, every new build of the PR makes a new copy.
+- The label must be on the PR before the build starts. The workflow does not run on `labeled`, and a re-run is
+  expected to reuse the original event's label list (GitHub's behaviour, not tested here).
+- `.github/scripts/artifact-step.test.sh` pins the step: its place, the exact `if`, 1-day retention, the path, and no
+  other upload-artifact step in the file.
+
 ## Known pre-existing flake: `tests/hub/serve.test.sh` (clip mode)
 
 The whole-branch review saw `tests/hub/serve.test.sh` fail once in two runs on 5d46c3d: cam1 had 212 frames and 78
