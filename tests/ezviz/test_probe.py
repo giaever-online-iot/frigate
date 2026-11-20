@@ -359,6 +359,21 @@ class Probe(ProbeCase):
         self.assertEqual(evs(self.ledger()), ["attempt", "login_ok", "published", "stop"])
         self.assertEqual(group(), [])                                      # no helper (or consumer) left
 
+    def test_helper_mode_counts_a_broken_stream(self):                 # R3: decode_errors on a corrupted picture
+        import fakecam
+        ff = real_ffmpeg()
+        aus = fakecam.access_units(fakecam.split_nals(fixtures.make_es(ff, self.tmp / "full.h265", 4).read_bytes()))
+        bad = [n[:4] + b"\xff" * (len(n) - 4) if (n[0] >> 1) & 0x3F < 32 and k % 50 == 49 else n
+               for k, au in enumerate(aus) for n in au]               # garbage slice data in each GOP's last picture
+        (self.tmp / "bad.h265").write_bytes(b"".join(b"\x00\x00\x00\x01" + n for n in bad))
+        self.start_fake(ff, clip=self.tmp / "bad.h265")
+        p = self.probe(ff, "0.2", helper=True)
+        m = self.HELPER_LINE.match(p.stdout.strip())
+        self.assertIsNotNone(m, p.stdout + p.stderr)
+        self.assertEqual((m["recs"], m["cf"]), ("attempt,login_ok,published,stop", "mpegts"), p.stdout)
+        self.assertGreater(int(m["derr"]), 0, p.stdout)
+        self.assertGreaterEqual(int(m["frames"]), 100, p.stdout)
+
     def test_non_idr_start_is_not_fed_until_the_first_idr(self):        # the IDR gate
         import fakecam
         ff = real_ffmpeg()
@@ -437,6 +452,15 @@ class DiagUnit(unittest.TestCase):
         self.assertIn("wrong_checkout", self.mod.child_import_error(str(fake)))
         fake.write_text("#!/bin/sh\nexit 1\n")
         self.assertIn("wrong_checkout", self.mod.child_import_error(str(fake)))
+
+    def test_helper_counters_from_the_consumer_outputs(self):          # R3: frames are decoded rows, not packets
+        pk = lambda *ts: "#format: frame checksums\n#tb 0: 1/90000\n#media_type 0: video\n\n" + "".join(
+            f"0, {t}, {t}, 3600, 99, {t:032x}\n" for t in ts)
+        fr = "#tb 0: 1/25\n0, 0, 0, 1, 3110400, aa\n\n0, 2, 2, 1, 3110400, bb\n"
+        err = "\n[hevc @ 0x1] Could not find ref with POC 3\n[hevc @ 0x1] Error constructing the frame RPS.\n"
+        self.assertEqual(self.mod.counters(pk(0, 3600, 7200), fr, err), (2, 2, 40.0, 0.0))   # 3 packets, 2 frames
+        self.assertEqual(self.mod.counters(pk(0, 3600, 10800), "", ""), (0, 0, 40.0, 40.0))
+        self.assertEqual(self.mod.counters("", "", ""), (0, 0, 0.0, 0.0))
 
     def test_helper_late_sigterm_after_the_helper_ended_still_prints_the_line(self):   # R2
         import contextlib

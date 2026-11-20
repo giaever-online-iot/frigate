@@ -221,6 +221,20 @@ def main(argv: list) -> int:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def counters(pk: str, fr: str, err: str):
+    """R3: the consumer's numbers from its three outputs (the stream-copied framemd5, the decoded framemd5, its
+    `-v error` stderr): frames = decoded rows, decode_errors = non-empty stderr lines, and the PTS step mode and the
+    p99 deviation from 40 ms, in ms in the packets' #tb. framemd5 comment lines (#) and blank lines are not rows."""
+    rows = lambda s: [ln for ln in s.splitlines() if ln and not ln.startswith("#")]
+    tb = next((ln.split(":", 1)[1].strip() for ln in pk.splitlines() if ln.startswith("#tb 0:")), "1/90000")
+    ms = 1000 * int(tb.split("/")[0]) / int(tb.split("/")[1])
+    pts = [int(r.split(",")[2]) for r in rows(pk)]
+    steps = [(b - a) * ms for a, b in zip(pts, pts[1:])]
+    mode = Counter(round(x, 3) for x in steps).most_common(1)[0][0] if steps else 0.0
+    devs = sorted(abs(x - 40.0) for x in steps)
+    return len(rows(fr)), len(rows(err)), mode, devs[max(0, -(-99 * len(devs) // 100) - 1)] if devs else 0.0
+
+
 def _run_helper(name, minutes, ffmpeg, work) -> int:
     from ezviz_source import ledger, paths
     if not (os.path.isfile(ffmpeg) and os.access(ffmpeg, os.X_OK)):
@@ -260,23 +274,14 @@ def _run_helper(name, minutes, ffmpeg, work) -> int:
     ev = [r["ev"] for r in recs]
     t = {r["ev"]: r["t"] for r in recs}
     pub_s = f"{t['published'] - t['attempt']:.3f}" if "published" in t and "attempt" in t else "-"
-    rows = lambda f: [ln for ln in f.read_text(errors="replace").splitlines() if ln and not ln.startswith("#")] \
-        if f.exists() else []
-    tb = next((ln.split(":", 1)[1].strip() for ln in (work / "pk").read_text().splitlines()
-               if ln.startswith("#tb 0:")), "1/90000") if (work / "pk").exists() else "1/90000"
-    ms = 1000 * int(tb.split("/")[0]) / int(tb.split("/")[1])
-    pts = [int(r.split(",")[2]) for r in rows(work / "pk")]
-    steps = [(b - a) * ms for a, b in zip(pts, pts[1:])]
-    mode = Counter(round(x, 3) for x in steps).most_common(1)[0][0] if steps else 0.0
-    devs = sorted(abs(x - 40.0) for x in steps)
-    p99 = devs[max(0, -(-99 * len(devs) // 100) - 1)] if devs else 0.0
+    txt = (lambda f: f.read_text(errors="replace") if f.exists() else "")
+    frames, derr, mode, p99 = counters(txt(work / "pk"), txt(work / "fr"), txt(work / "ff.err"))
     argv = (work / "child.argv").read_text().splitlines() if (work / "child.argv").exists() else []
     child_f = argv[argv.index("-i") - 1] if "-i" in argv and argv.index("-i") >= 1 else "-"
     lines = (work / "helper.err").read_text(errors="replace").splitlines()
     words = [m.group(1) if (m := re.match(rf"ezviz-source {name}: ([a-z_]+)", ln)) else "other" for ln in lines]
-    derr = len([ln for ln in rows(work / "ff.err")])
     print(f"probe-helper {name}: rc={rc} records={','.join(ev)} published={int('published' in ev)} published_s={pub_s} "
-          f"frames={len(rows(work / 'fr'))} decode_errors={derr} pts_step_mode_ms={mode:.3f} pts_p99_dev_ms={p99:.3f} "
+          f"frames={frames} decode_errors={derr} pts_step_mode_ms={mode:.3f} pts_p99_dev_ms={p99:.3f} "
           f"child_f={child_f if re.fullmatch(r'[a-z0-9]+', child_f) else '-'} stderr_lines={len(lines)} "
           f"stderr_words={','.join(words)}", flush=True)
     return 0 if rc == 0 else 75
