@@ -667,7 +667,7 @@ It was not restarted. V7 has no verdict.
   (`requested_mask="r"`). It had no visible effect (login, publish and stop as above). This closes the AppArmor
   gap for the helper on arm64: no exec, network or file denial blocked it.
 
-**(c) The disk floor guard: FAIL (a production defect, not fixed here).**
+**(c) The disk floor guard: FAIL on the rev 22 file (a production defect), FIXED in round 16 (below).**
 - The configure hook: `snap set frigate disk-floor-gib=100000` → `configure: disk-floor-gib must be an integer
   1-10000`, rc 1, nothing stored. **PASS.**
 - The guard: floor 131 GiB against 31 GiB free, frigate active. `systemctl start snap.frigate.disk-guard.service`
@@ -679,9 +679,82 @@ It was not restarted. V7 has no verdict.
   `apparmor="DENIED" operation="exec" class="file" profile="snap.frigate.disk-guard" name="/usr/lib/cargo/bin/coreutils/df" requested_mask="x"`.
   In the app's shell: `/bin/bash: line 1: /usr/bin/df: Permission denied`, rc 126.
 - In the same profile `stat -f -c "avail_blocks=%a block_size=%S" "$SNAP_COMMON/media/frigate"` works
-  (`avail_blocks=8072622 block_size=4096`, about 30.8 GiB, matching the unconfined `df`). A candidate, not shipped.
+  (`avail_blocks=8072622 block_size=4096`, about 30.8 GiB, matching the unconfined `df`).
 - The amd64 file uses the same base, so the same failure is expected there (not run). The laptop tests could not see
-  it: they run the script outside confinement. As built, S9 fails.
+  it: they stubbed `df` on PATH and ran the script outside confinement. As built at bf9cd89, S9 fails.
+
+**The fix (round 16).** `spike/bin/disk-guard` reads free bytes as `stat -f -c '%a %S' "$SNAP_COMMON/media/frigate"`
+(available blocks × fundamental block size, POSIX sh arithmetic, stderr to /dev/null). Both fields must be digits with
+no leading zero (sh arithmetic reads `010` as octal), the block size above 0 and nothing after the two fields; any
+failure keeps `disk-guard: cannot read free space` and exit 1. Everything after the read is unchanged. No `df`.
+- The commands it runs, resolved in the disk-guard app's own namespace, and the profile line that allows each:
+  `sh` → `/usr/bin/dash` (`/{,usr/}bin/dash ixr`); `stat` → `/usr/lib/cargo/bin/coreutils/stat`
+  (`@{SNAP_COREUTIL_DIRS}stat ixr`); `awk` → `/usr/bin/mawk` (`/{,usr/}bin/{,g,m}awk ixr`); `grep` → `/usr/bin/grep`
+  (`/{,usr/}bin/{,e,f,r}grep ixr`); `snapctl` → `/usr/lib/snapd/snapctl` (`/usr/bin/snapctl ixr`, `/usr/lib/snapd/snapctl ixr`).
+- `tests/disk-guard.test.sh` now stubs `stat` (it answers only the exact argument vector `-f -c '%a %S'
+  $SNAP_COMMON/media/frigate`, else rc 1) and puts a `df` stub on PATH that always fails and records every call; the
+  last check asserts that no case called it. New cases: stat fails, garbage (`12x`), block size 0, one field, a third
+  field, block size 512 (both sides of the floor), 0 free blocks (a full disk still stops frigate).
+- Red before: the new test on the bf9cd89 script, 15 FAIL under `sh` and under `dash` (among them `df is never called`).
+  Green: 39 ok under `sh`, `dash` and `bash`. Mutants, each on a scratch copy, each red under `sh` and `dash`:
+
+| Mutant | FAIL (sh / dash) |
+|---|---|
+| back to `df` | 15 / 15 |
+| blocks only (no multiplication) | 8 / 8 |
+| `%f` instead of `%a` | 14 / 14 |
+| `%s` instead of `%S` | 14 / 14 |
+| numeric validation removed | 11 / 11 |
+| wrong directory (`$SNAP_COMMON/media`) | 14 / 14 |
+
+**The confined proof of the fix (round 16, arm64 guest).** The profile is generated from `meta/snap.yaml`, which the
+fix does not change. So the rev 22 file was repacked on the host with only `bin/disk-guard` replaced by the fixed
+script (`mksquashfs -noappend -comp xz -all-root -no-xattrs -no-fragments -b 131072`, the original's superblock
+options; the same 66,250 entries and modes). It was installed `--dangerous` in the same guest as x3; the installed
+`bin/disk-guard` has the fixed script's sha256. So the unit that systemd starts, under the real `snap.frigate.disk-guard`
+profile, ran the fixed script itself (not a copy through `snap run --shell`, which would not prove the unit's path).
+Each case is `systemctl start snap.frigate.disk-guard.service`, the unit the 10-min timer starts. The lines as printed
+(left out: the `snap services` header rows, the run timestamps and the hook error's first line `error: cannot perform
+the following tasks:`):
+
+```
+== hook refusal (one clean command)
+- Run configure hook of "frigate" snap (run hook "configure": configure: disk-floor-gib must be an integer 1-10000)
+set_rc=1
+free GiB (unconfined df, host side of the guest): 30
+== (i) floor 1
+unit_rc=0
+Result=success
+ExecMainStatus=0
+guard lines:
+(no guard line)
+frigate.frigate  enabled  active   -
+== (ii) floor 130
+unit_rc=0
+Result=success
+ExecMainStatus=0
+guard lines:
+disk-guard: free 29 GiB below floor 130 GiB: stopped and disabled frigate.frigate
+frigate.frigate  disabled  inactive  -
+== (iii) second run, same floor
+unit_rc=0
+Result=success
+ExecMainStatus=0
+guard lines:
+(no guard line)
+frigate.frigate  disabled  inactive  -
+== (iv) AppArmor DENIED naming snap.frigate.disk-guard since the cases began
+(none)
+```
+
+- (i) to (iii) **PASS**: no stop below the floor; one line, exit 0, frigate inactive AND disabled above it; no second
+  stop. The "29 GiB" against the unconfined `df`'s 30 is rounding: the guard floors bytes to GiB, `df -B1G` rounds up.
+- (iv) **PASS**: 0 denials for the disk-guard profile. The 2 DENIED lines in the window are `snap.frigate.frigate`
+  (`/sys/fs/cgroup/system.slice/cpu.max` and `/proc/sys/vm/nr_hugepages` opens), seen before as well.
+- So `stat`, `awk`, `grep`, `snapctl services` and `snapctl stop --disable` now run under confinement on arm64, end to
+  end. The guest was then restored (`snap unset frigate disk-floor-gib`, `snap start --enable frigate.frigate`: all
+  four daemons active) and powered off. Not proven: amd64 (same base and template, expected the same), and the hub's
+  real disk.
 
 **(d) Revert from main's file: NOT RUN** (the host's memory, as for V7).
 

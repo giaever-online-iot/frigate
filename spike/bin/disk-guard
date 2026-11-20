@@ -1,13 +1,24 @@
 #!/bin/sh
 # W-23 D13: the hub-side disk floor guard. A oneshot timer app (every 10 min). Below the floor
 # (snap set frigate disk-floor-gib=N, default 20) it stops AND disables frigate.frigate once and logs one line.
-# It never stops anything when it cannot read the free space. No plugs: df of $SNAP_COMMON/media/frigate and snapctl only.
+# It never stops anything when it cannot read the free space. No plugs: stat -f of $SNAP_COMMON/media/frigate and snapctl only.
+# Free bytes = available blocks (%a) x fundamental block size (%S). Not df: core26's df is rust coreutils under
+# /usr/lib/cargo/bin/coreutils/, which the confined profile does not allow to exec (W-23 round 15, F3); stat is allowed.
 # R2-N10: "stopped" is printed only if snapctl stop exited 0 AND a re-read positively shows frigate.frigate inactive.
 F=$(snapctl get disk-floor-gib 2>/dev/null) || F=""
 [ -n "$F" ] || F=20
 case "$F" in *[!0-9]*) echo "disk-guard: disk-floor-gib is not an integer; nothing done"; exit 1 ;; esac
-free=$(df -P -B1 "$SNAP_COMMON/media/frigate" 2>/dev/null | awk 'NR == 2 { print $4 }')
-case "$free" in ''|*[!0-9]*) echo "disk-guard: cannot read free space"; exit 1 ;; esac
+unreadable() { echo "disk-guard: cannot read free space"; exit 1; }
+sf=$(stat -f -c '%a %S' "$SNAP_COMMON/media/frigate" 2>/dev/null) || unreadable
+blocks=""; bsize=""; rest=""
+read -r blocks bsize rest <<EOF
+$sf
+EOF
+# digits only, no leading zero (sh arithmetic reads 010 as octal), a block size above 0, exactly two fields
+case "$blocks" in ''|*[!0-9]*|0[0-9]*) unreadable ;; esac
+case "$bsize" in ''|*[!0-9]*|0*) unreadable ;; esac
+[ -z "$rest" ] || unreadable
+free=$((blocks * bsize))
 floor=$((F * 1073741824))
 [ "$free" -lt "$floor" ] || exit 0
 snapctl services frigate.frigate 2>/dev/null | awk '$1 == "frigate.frigate" { print $3 }' | grep -qx active || exit 0
