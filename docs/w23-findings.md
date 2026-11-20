@@ -358,14 +358,65 @@ chosen: form=extend count=4320 starttimeout=30 timestamps=rtp
 - **Tests:** the muxer tests (`tests/ezviz/test_mpegts.py`) cover a session that crosses the 32-bit wrap, one that
   starts just below it, a backward step, a zero step and a 10**9-tick jump, plus a 20,000-step random fuzz that never
   goes back. Real ffmpeg reads strictly monotonic PTS, equal to the unwrapped ts, across a 32-bit wrap, and decodes the
-  clip with 0 errors.
-- **S2 check 1 re-run in rtp mode** (19 Nov, the local amd64 snap's go2rtc 1.9.14 and ffmpeg 8.0, fake camera):
+  clip with 0 errors. The plan says "ffprobe reads monotonic pts"; the test reads them with ffmpeg's framemd5 output
+  instead, which uses the same libavformat MPEG-TS demuxer.
+- **S2 check 1 re-run in rtp mode** (19 Nov, the local amd64 snap's go2rtc 1.9.14 and ffmpeg, fake camera; the
+  binary reports n8.1.1, and 8.0 is only its directory name `usr/lib/ffmpeg/8.0`):
   `serve-ezviz.test.sh` 53 ok, 0 FAIL. Check 1 decoded 251 frames in 10 s with 0 errors after a 0.000 s lead-in.
 - **Jitter evidence** (the plan asks for the consumer's pts-step p99 deviation from 40 ms under the chosen form): S2's
   check-1 consumer saw 326 pts steps, with a p99 |step − 40 ms| of 0.000 ms. That is the fake camera, whose RTP steps
   are exactly 3600, so it shows only that the helper, ffmpeg and go2rtc pass the camera's timestamps through
   unchanged. On the real cameras the probes measured `rtp_ts_step_p99_dev` ≤ 2 ticks (0.02 ms) at the source. A
   consumer-side measurement on the real cameras needs a hub run (S6/S8); it was not taken here.
+
+### The production path on the real cameras (round 9 tool): RESULT
+
+The Task 21 review asked (P1) for one run of the real helper on real camera bytes before S5, because the muxer and
+the `push_ts` path had only seen the fake camera. The run: `PROBE_HELPER=1 probe-run.sh <cam> 3 extend` (probe.py
+`--helper`), from a frozen checkout at fc721cc, on 19 Nov 2026 at 23:30 UTC. The maintainer ran it from a card. It
+ran 3 minutes, both cameras at once, one login each. The two lines, counters only, verbatim:
+
+    probe-helper cam1: rc=0 records=attempt,login_ok,published,stop published=1 published_s=6.769 frames=4454 decode_errors=0 pts_step_mode_ms=40.000 pts_p99_dev_ms=0.111 child_f=mpegts stderr_lines=4 stderr_words=attempt,login_ok,published,stop
+    probe-helper cam2: rc=0 records=attempt,login_ok,published,stop published=1 published_s=7.430 frames=4440 decode_errors=0 pts_step_mode_ms=40.000 pts_p99_dev_ms=0.000 child_f=mpegts stderr_lines=4 stderr_words=attempt,login_ok,published,stop
+
+**What it shows:**
+- The production helper (`python -I -m ezviz_source.main`, its own gate and ledger, the GA constants) ran on each real
+  camera.
+- It wrote MPEG-TS (`child_f=mpegts`) stamped with the cameras' RTP timestamps, and the consumer (the snap's ffmpeg)
+  decoded it cleanly: 0 decode errors, about 4450 frames in 3 minutes, 25 fps.
+- The PTS step is 40 ms (mode), with a p99 deviation of 0.111 ms and 0.000 ms.
+- Both sessions ended as a clean `stop` (E13) after `published`.
+
+**What it does not show:**
+- It ran on the laptop, not on the hub: not arm64 and not the Pi's CPU.
+- It ran 3 minutes, not a 24 h session. The RTP clock wraps every 13.25 h, so the wrap was almost certainly not
+  crossed on the cameras; only the synthetic tests cross it.
+- No go2rtc and no Frigate were in front of it.
+- `published_s` is the time from the attempt record to `published`: login, the time to the first IDR, plus the 5 s
+  hold (D22). It is not a decode latency.
+
+### Review of Task 21 and round 9; round 10
+
+- **Verdicts** (reviewer slot 12): Task 21, d6476bc..78c0a1f: **approve** at 78c0a1f. Round 9, 78c0a1f..fc721cc
+  (probe `--helper`): **approve_with_changes** at fc721cc.
+- **Round 10 closed the round 9 changes, tests, probe tool and docs only** (`git diff fc721cc -- spike/ snap/ .github/`
+  is empty). The commits are 99595ab, 87c6a73, ed8fd9d, 86c91f5, 2e6b596 and the docs commit that adds this section:
+  - R1: a process test stops the probe with SIGTERM mid-run. The result is `stop`, rc 0, the one line, and no helper
+    left.
+  - R2: a late SIGTERM after the helper has ended is a no-op (`p.send_signal`) instead of `os.kill` on a reaped PID.
+  - R3: the counters come from a pure function, `counters()`, tested on crafted outputs. A process test with a
+    corrupted picture must show `decode_errors` > 0.
+  - N1: asserts on the PCR base (= the PTS), the PCR reserved bits and the PES flags. mpegts.py is unchanged.
+  - N4 and N6: two pre-existing load flakes made robust in the tests (`test_exited_child_raises`, and the
+    `budget_wait` refusal timing). The refusal takes 0.04-0.06 s idle, inside S1's 150 ms, but under load (10 CPU
+    burners, load 16 on 14 threads) even the best of 5 runs took 0.20 s. The test therefore bounds the best run at
+    0.5 s, which still fails a refusal that sleeps 1 s, and keeps its per-run check that no pyezvizapi or camera
+    module is imported. The test no longer asserts the 150 ms itself; the idle figure above is the evidence for it.
+- **Known follow-ups, not changed** (production code; the real cameras ran fc721cc):
+  - N2: `RtpClock` learns any good step as "the" step. After a stall of up to 10 s, a re-base advances by that gap
+    instead of by one picture. This is harmless: the PTS stays monotonic.
+  - N3: `RtpClock.rebases` is counted but never surfaced, so a camera that restarts its timestamp base on the hub would
+    not be visible.
 
 ### A1 and the diagnostic run: RESULT (the cause is H2, fixed in d06e99c)
 
