@@ -593,3 +593,105 @@ suite lock): `tests/ezviz` unittest `Ran 251 tests`, `OK`, 0 skipped (240 before
 
 The two-arch CI build logs (`ezviz-py import proof ok`), the artifact sizes (`tests/w23-size.sh`, delta ≤ 35 MB), the
 `unsquashfs -l` checks and the amd64 gate VM and arm64 TCG VM proofs are recorded here by the orchestrator.
+
+## arm64 CI file and local VM proofs (round 15)
+
+Laptop only, 20 Nov 2026, 21:06 to 23:10 CET, under the suite lock. No hub, no camera, no key file.
+
+### The two CI files (PR head bf9cd89)
+
+| | arm64 | amd64 |
+|---|---|---|
+| Store revision (PR channel) | 22 | 21 |
+| sha256 | `73af148a8d8c3dadbe8e834236a230b4f23603b19a795c9a3e53de40327b988f` | `1083f2f1672c32a58758ec8e6743680d53e16cac27b779e92bb3e2355853037d` |
+| size (B) | 940,224,512 | 1,137,188,864 |
+| base file (main's tree: `snap/` and `spike/` unchanged on main since 13 Nov) | Store revision 9, 916,746,240 | Store revision 8, 1,109,827,584 |
+| size delta (limit 35,000,000) | +23,478,272 | +27,361,280 |
+| `opt/ezviz-py/bin/python3.12` | present | present |
+| files matching `opt/ezviz-py/lib/libpython3` | 0 | 0 |
+| `opt/ezviz-py/lib/python3.12/site-packages/pyezvizapi/__init__.py` | present | present |
+| `bin/disk-guard`, `bin/ezviz-check`, `bin/ezviz-rearm`, `bin/ezviz-source` | present | present |
+
+The sha256 and sizes were computed here on read-only copies; the listings are `unsquashfs -l` (66,250 lines for arm64).
+The arm64 file's `meta/snap.yaml`: base core26, strict confinement, apps include `ezviz-check` and `disk-guard`.
+
+### The arm64 TCG VM (tests/arm64-vm, `SPIKE_TIME_SCALE=20`)
+
+Guest: Ubuntu 26.04 cloud image (pinned serial, checksum verified), aarch64, 4 vCPU, 8 GB, snapd 2.78, core26
+20261023. Boot to `cloud-init status: done` took 16 min; `snap wait system seed.loaded` rc 0; no snap installed before
+the battery. The file was installed in file mode (guest copy hashed before `--dangerous`).
+
+**Scope.** The full battery at ×20 is about 22 hours (M7c timings: V5 to V18 about 15 min, V7 about 1 h 50, V9 with
+its mutation about 3 h 20, V10 alone 10 h), against a 4-hour budget. It ran with the battery's own check selection
+(`M7C_BATTERY_CHECKS`), V5 always first.
+
+Phase 1 (`v5_layout v6_runtime v18_edgetpu`, 21:23 to 21:39), verbatim:
+
+```
+PASS: V5 bytes: the guest copy of /mnt/out/dl/frigate_0.18.2_arm64.snap has sha256 73af148a8d8c3dadbe8e834236a230b4f23603b19a795c9a3e53de40327b988f
+INFO: V5 F11 Store auto-connect: not exercised: private snap, no Store in the VM (--dangerous install; auto-connected: shm-private of raw-usb hardware-observe mount-observe shm-private)
+PASS: V5 install: 4 plugs connected; go2rtc/frigate/nginx/certsync active, logrotate enabled+timer; /version=0.18.2-cfa08c5
+PASS: V5 layout: /etc/OpenCL/vendors and intel-opencl each list exactly .keep (D7)
+PASS: V6 runtime: 18 imports ok (sqlite_vec incl.); hevc decoders=4; ffprobe version n8.1.1-9-g58d4114d36-20260602 Copyright (c) 2007-2026 the FFmpeg developers
+PASS: V18 edgetpu: dlopen ok from /snap/frigate/x1/usr/lib/aarch64-linux-gnu/libedgetpu.so.1; delegate error is the no-device one (Failed to load delegate): ValueError: Failed to load delegate from /snap/frigate/x1/usr/lib/aarch64-linux-gnu/libedgetpu.so.1
+battery.sh: cleanup: shm-max-frames=absent quota=absent
+battery.sh: 5 PASS, 0 FAIL, 1 INFO
+```
+
+`snap services frigate` after V5 also lists `frigate.disk-guard enabled inactive timer-activated`.
+
+Phase 2 (`v7_h265`, from 21:45): **NOT COMPLETED.** V5 passed again (a reinstall over x1 as x2, so all four plugs kept
+their connections), `INFO: V9 stale frame segments before v7: 50`, the V7 clip was generated (22:04), then the host
+session stopped the battery's driver because the laptop ran low on memory (an 8 GB guest on a host with swap full).
+It was not restarted. V7 has no verdict.
+
+**(a) KillMode** (the installed x1): `KillMode=control-group`, `KillSignal=15`. **PASS.**
+
+**(b) The confined S2 subset** (the helper under the go2rtc profile, a fake camera in the guest). **PASS.**
+- Fake camera: `tests/ezviz/fakecam.py` run by the snap's own `opt/ezviz-py/bin/python3.12 -I` (outside confinement),
+  on 127.0.0.1:18000, a fake login code, serving the fixtures' 4 s 1080p25 H.265 clip (`fixtures.make_es`).
+- Camera file: `$SNAP_DATA/ezviz/cameras/cam1.conf`, root 0600 (dirs 0700), keys host, port, serial, login (fake).
+- With every frigate service stopped first, `snap start frigate.go2rtc` at 20:40:32 UTC. The generator wrote 3
+  streams; `ezviz-rearm cam1: armed` at +39 s. Ledger (`$SNAP_COMMON/ezviz/state/cam1.ledger`), relative to the start:
+  `attempt` +11.3 s, `login_ok` +26.7 s, `published` +32.0 s (bound: 60 s × 20).
+- `snap run --shell frigate.go2rtc -c '"$SNAP/bin/ezviz-rearm" --list'` → `preload: cam1`.
+- Media: go2rtc's `/api/streams` cam1 producer `bytes_recv 28247154`, `video, recvonly, H265`; the fake camera
+  counted `logins_ok 1`, `logins_rejected 0`, `media_sessions 1`. Process tree: go2rtc, the re-arm, `ezviz_source.main
+  cam1`, and its ffmpeg 8.0 child (`-f mpegts -i pipe:0 -c copy -an -f rtsp`).
+- `snap stop frigate.go2rtc` at 20:41:47 UTC (rc 0; systemd `Stopping` and `Deactivated successfully` both at 20:41:51):
+  the ledger ends `{"ev":"stop","dur":67.848}`; no `ezviz_source` process is left.
+- **AppArmor.** 629 DENIED lines before (b), 653 after. The new lines in the (b) window are the existing classes from
+  `snap stop frigate` (`snap.frigate.frigate` ptrace reads and `/proc/<pid>/cmdline` opens) and `go2rtc-run`
+  `capable dac_override` (2, also seen before (b)), plus **one line for the helper**:
+  `operation="open" profile="snap.frigate.go2rtc" name="/sys/fs/cgroup/system.slice/cpu.max" comm="python3.12"`
+  (`requested_mask="r"`). It had no visible effect (login, publish and stop as above). This closes the AppArmor
+  gap for the helper on arm64: no exec, network or file denial blocked it.
+
+**(c) The disk floor guard: FAIL (a production defect, not fixed here).**
+- The configure hook: `snap set frigate disk-floor-gib=100000` → `configure: disk-floor-gib must be an integer
+  1-10000`, rc 1, nothing stored. **PASS.**
+- The guard: floor 131 GiB against 31 GiB free, frigate active. `systemctl start snap.frigate.disk-guard.service`
+  → `disk-guard: cannot read free space`, exit 1; `frigate.frigate` stays `enabled active`. Every disk-guard run in the
+  journal from 20:30 to 22:00 UTC (11 lines: the 10-min timer and the hand start; floor set or unset) logged the same line.
+- Cause: in core26 `/usr/bin/df` is a symlink to `../lib/cargo/bin/coreutils/df` (rust coreutils). snapd 2.78's
+  base template allows a named list of coreutils (`@{SNAP_COREUTIL_DIRS}="/{bin/,usr/bin/,usr/bin/gnu,usr/lib/cargo/bin/coreutils/}"`,
+  e.g. `@{SNAP_COREUTIL_DIRS}stat ixr`), and `df` is not in it; the disk-guard app has no plugs. Kernel:
+  `apparmor="DENIED" operation="exec" class="file" profile="snap.frigate.disk-guard" name="/usr/lib/cargo/bin/coreutils/df" requested_mask="x"`.
+  In the app's shell: `/bin/bash: line 1: /usr/bin/df: Permission denied`, rc 126.
+- In the same profile `stat -f -c "avail_blocks=%a block_size=%S" "$SNAP_COMMON/media/frigate"` works
+  (`avail_blocks=8072622 block_size=4096`, about 30.8 GiB, matching the unconfined `df`). A candidate, not shipped.
+- The amd64 file uses the same base, so the same failure is expected there (not run). The laptop tests could not see
+  it: they run the script outside confinement. As built, S9 fails.
+
+**(d) Revert from main's file: NOT RUN** (the host's memory, as for V7).
+
+### Not run, and the limits
+
+- Not run: V7 (interrupted), V9, V9 mutation, V10, V11, V-OV, V-restore, V17, and (d). The amd64 gate VM proof is
+  not run either: the LXD gate VM is on the runner machine, which is unreachable from here, and this user is not in
+  the lxd group on the laptop.
+- TCG is full emulation (about ×19 slower than the host); its timings are not the hub's.
+- No Coral, no GPU in the guest (V18 proves the library loads and fails with the no-device error only).
+- The fake camera is not a real camera: it proves the confined helper's login, publish, re-arm and stop path on
+  aarch64, not the camera's protocol shape.
+- The helper's ledger saw one session (one login); the budget cap and phases are covered by the laptop suites, not here.
