@@ -124,6 +124,15 @@ class Muxer(unittest.TestCase):
                     0x1_2345_6789):
             self.assertEqual(pes_list(TsMuxer().mux(IDR(10), pts, True))[0]["pts"], pts, hex(pts))
 
+    def test_first_packet_pcr_equals_the_pts_and_pes_flags(self):      # N1, decoded by hand from 13818-1
+        pts = 0x1_2345_6789                                               # all 33 bits in use
+        v = [p for p in packets(TsMuxer().mux(IDR(400), pts, True)) if p["pid"] == mpegts.VIDEO_PID][0]
+        af, pl = v["af"], v["payload"]
+        # the muxer has no system clock of its own: it stamps each PES's PCR from that AU's own PTS, so they are equal
+        base = af[1] << 25 | af[2] << 17 | af[3] << 9 | af[4] << 1 | af[5] >> 7
+        self.assertEqual((base, (af[5] >> 1) & 0x3F, (af[5] & 1) << 8 | af[6]), (pts, 0x3F, 0))   # reserved bits 1
+        self.assertEqual((pl[:4], pl[6], pl[7]), (b"\x00\x00\x01\xE0", 0x84, 0x80))   # data_alignment 1; PTS only
+
     def test_every_size_packs_into_188_byte_packets(self):
         for n in range(0, 600):
             for idr in (True, False):
