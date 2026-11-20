@@ -34,6 +34,15 @@ LINE = re.compile(
 _TOOLS = {}
 
 
+def _pgrp(stat: Path):
+    """The process group of a live (non-zombie) /proc/<pid>/stat, else None."""
+    try:
+        f = stat.read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return None
+    return int(f[2]) if f[0] != "Z" else None
+
+
 def real_ffmpeg() -> str:
     """$W23_REAL_FFMPEG, else the 8.0 ffmpeg unsquashed from the local amd64 snap file, else PATH, else skip."""
     if "ff" in _TOOLS:
@@ -326,6 +335,30 @@ class Probe(ProbeCase):
             self.assertNotIn(marker, p.stdout + p.stderr)
         self.assertEqual(list((self.tmp / "tmp").iterdir()), [])          # the work dir is gone
 
+    def test_helper_mode_sigterm_mid_run_is_a_stop(self):              # R1: the probe passes its SIGTERM on (E13)
+        ff = real_ffmpeg()
+        self.start_fake(ff)
+        env = _path.child_env()
+        for k in ("SNAP", "SNAP_DATA", "SNAP_COMMON"):
+            env.pop(k, None)
+        p = subprocess.Popen(self.probe_cmd(ff, "5", helper=True), env=env, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(lambda: p.poll() is None and os.killpg(p.pid, 9))
+        t0, group = time.monotonic(), lambda: [ln for ln in Path("/proc").glob("[0-9]*/stat") if _pgrp(ln) == p.pid]
+        while time.monotonic() - t0 < 8 or "published" not in evs(self.ledger()):
+            self.assertLess(time.monotonic() - t0, 60, "never published")
+            self.assertIsNone(p.poll(), "probe ended early")
+            time.sleep(0.1)
+        self.assertGreaterEqual(len(group()), 3)                          # the probe, the helper, its consumer
+        p.send_signal(15)                                                  # to the probe's PID only
+        out, err = p.communicate(timeout=40)
+        self.assertEqual((p.returncode, err), (0, ""), out)
+        m = self.HELPER_LINE.match(out.rstrip("\n"))
+        self.assertIsNotNone(m, out)
+        self.assertEqual((m["rc"], m["recs"], m["pub"]), ("0", "attempt,login_ok,published,stop", "1"), out)
+        self.assertEqual(evs(self.ledger()), ["attempt", "login_ok", "published", "stop"])
+        self.assertEqual(group(), [])                                      # no helper (or consumer) left
+
     def test_non_idr_start_is_not_fed_until_the_first_idr(self):        # the IDR gate
         import fakecam
         ff = real_ffmpeg()
@@ -404,6 +437,28 @@ class DiagUnit(unittest.TestCase):
         self.assertIn("wrong_checkout", self.mod.child_import_error(str(fake)))
         fake.write_text("#!/bin/sh\nexit 1\n")
         self.assertIn("wrong_checkout", self.mod.child_import_error(str(fake)))
+
+    def test_helper_late_sigterm_after_the_helper_ended_still_prints_the_line(self):   # R2
+        import contextlib
+        import io
+        import signal
+        real = subprocess.Popen
+
+        class LateTerm(real):                         # a helper that has ended, then a SIGTERM reaches the probe
+            def wait(self, timeout=None):
+                rc = super().wait(timeout)
+                os.kill(os.getpid(), signal.SIGTERM)
+                return rc
+        for s in (signal.SIGTERM, signal.SIGINT):
+            self.addCleanup(signal.signal, s, signal.getsignal(s))
+        work, out = Path(fixtures.tmpdir(self)), io.StringIO()
+        with unittest.mock.patch.dict(os.environ, SNAP_COMMON=str(work)), \
+                unittest.mock.patch.object(self.mod, "child_import_error", return_value=""), \
+                unittest.mock.patch.object(subprocess, "Popen", lambda argv, **kw: LateTerm(["true"], **kw)), \
+                contextlib.redirect_stdout(out):
+            rc = self.mod._run_helper("cam1", 0.5, "/bin/true", work)
+        self.assertEqual(rc, 0)
+        self.assertRegex(out.getvalue(), r"^probe-helper cam1: rc=0 records= published=0 ")
 
     def test_first_twenty_and_non_rtp_frames(self):
         legacy = b"\xfa" + bytes([0x80, 96, 0, 1, 0, 0, 0, 0]) + b"\x55\x66\x77\x88" + b"\x40\x01\x0c"

@@ -245,8 +245,8 @@ def _run_helper(name, minutes, ffmpeg, work) -> int:
     with open(work / "helper.err", "wb") as err:
         p = subprocess.Popen([py, "-I", "-B", "-m", "ezviz_source.main", name, f"rtsp://127.0.0.1:1/{name}"],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, close_fds=True)
-    for sig in (signal.SIGTERM, signal.SIGINT):                     # a stop of the probe stops the helper (E13)
-        signal.signal(sig, lambda *_: os.kill(p.pid, signal.SIGTERM))
+    for sig in (signal.SIGTERM, signal.SIGINT):                     # a stop of the probe stops the helper (E13);
+        signal.signal(sig, lambda *_: p.send_signal(signal.SIGTERM))  # R2: a no-op once p is reaped (no stray PID)
     try:
         rc = p.wait(minutes * 60)                                   # a refusal or a session end returns early
     except subprocess.TimeoutExpired:
