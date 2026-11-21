@@ -9,9 +9,11 @@
 #      NRestarts, MemoryCurrent, MemoryPeak; slice MemoryCurrent/MemoryPeak/MemoryMax/CPUQuota and memory.stat
 #      anon/shmem/file; /dev/shm/snap.frigate bytes and frame files per camera; the Coral USB id; load, MemAvailable,
 #      swap used, PSI some avg60 (memory, cpu); the Home Assistant answer time (watch.sh's nc heuristic). A process
-#      label is unit, comm, role (d = rawvideo detect output, r = segment record output, e = an `-f rtsp` exec push)
-#      and ONE stream name matched by a fixed pattern (the exec line's title=m7c-<stream>, else 127.0.0.1:8554/<name>
-#      or m7c-clips/<file>); a whole command line is never printed.
+#      label is unit, comm, role (d = rawvideo detect output, r = segment record output, e = an `-f rtsp` exec push,
+#      h = a W-23 ezviz-source helper: args hold `-m ezviz_source.main <camera>`) and ONE stream name matched by a
+#      fixed pattern (the exec line's title=m7c-<stream>, else 127.0.0.1:8554/<name> or m7c-clips/<file>; for a
+#      helper the argument after the module, kept only if it matches ^[a-z0-9_]{1,32}$, else "?"); a whole command
+#      line is never printed.
 #   2. Frigate's /stats through the snap's own python (`snap run --shell frigate.frigate`, the script on stdin,
 #      urllib to 127.0.0.1:5001 with the Remote-User/Remote-Role headers): numbers only, for known keys only.
 # PASS/FAIL: the 4 units active (and NRestarts unchanged since --prev); per camera camera_fps >= 0.9 x the camera's
@@ -21,16 +23,18 @@
 # paced), and the detect ffmpeg's %CPU over the window is printed as INFO "decode headroom" (100 = one core; a
 # decode that cannot keep up pins its threads). The detector's inference_speed > 0; go2rtc runs
 # --execs exec ffmpegs (default 3: cam1, cam2, cam2_sub; 0 skips) and none restarted since --prev (same PID and
-# start time); /stats readable; no credential-like text in what the hub sent. Everything else is INFO, numeric.
+# start time); with --helpers N (default 0 skips), exactly N ezviz-source helpers in the go2rtc unit, one per
+# camera, each with a valid camera name, none restarted since --prev (same PID and start time); /stats readable;
+# no credential-like text in what the hub sent. Everything else is INFO, numeric.
 # Evidence: <out>/sample.txt, stats.txt (scrubbed), results.txt, counters.txt (the next run's --prev).
 # Usage: M7C_HUB_SOCK=<socket> M7C_HUB_TARGET=<target> tests/hub/observe.sh [--prev <evidence dir>] [--out <dir>]
-#          [--window S] [--fps cam1=5,cam2=5] [--execs N] [--ha-port 8123]
+#          [--window S] [--fps cam1=5,cam2=5] [--execs N] [--helpers N] [--ha-port 8123]
 # Exit: 0 all PASS; 1 any FAIL; 2 usage; 3 the ssh master is gone (LOUD). Test hook: M7C_OBSERVE_ROOT (a path
 # prefix for /proc, /sys and /dev/shm on the hub; empty in real use).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); EXEC="$HERE/ssh-exec.sh"
-usage() { echo "usage: observe.sh [--prev DIR] [--out DIR] [--window S] [--fps cam=N,...] [--execs N] [--ha-port N]" >&2; exit 2; }
-PREV=""; OUT=""; WIN=10; FPS="cam1=5,cam2=5"; NEX=3; PORT=8123
+usage() { echo "usage: observe.sh [--prev DIR] [--out DIR] [--window S] [--fps cam=N,...] [--execs N] [--helpers N] [--ha-port N]" >&2; exit 2; }
+PREV=""; OUT=""; WIN=10; FPS="cam1=5,cam2=5"; NEX=3; NHE=0; PORT=8123
 while [ $# -gt 0 ]; do
   case "$1" in
     --prev) [ $# -ge 2 ] || usage; PREV=$2; shift 2 ;;
@@ -38,6 +42,7 @@ while [ $# -gt 0 ]; do
     --window) [ $# -ge 2 ] || usage; WIN=$2; shift 2 ;;
     --fps) [ $# -ge 2 ] || usage; FPS=$2; shift 2 ;;
     --execs) [ $# -ge 2 ] || usage; NEX=$2; shift 2 ;;
+    --helpers) [ $# -ge 2 ] || usage; NHE=$2; shift 2 ;;
     --ha-port) [ $# -ge 2 ] || usage; PORT=$2; shift 2 ;;
     *) usage ;;
   esac
@@ -45,6 +50,7 @@ done
 uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac; }
 { uint "$WIN" && [ "$WIN" -ge 1 ] && [ "$WIN" -le 300 ]; } || usage
 uint "$NEX" || usage
+uint "$NHE" || usage
 { uint "$PORT" && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; } || usage
 [[ "$FPS" =~ ^[A-Za-z0-9_-]+=[0-9]+(,[A-Za-z0-9_-]+=[0-9]+)*$ ]] || usage
 if [ -n "$PREV" ] && [ ! -r "$PREV/counters.txt" ]; then echo "observe: --prev $PREV has no counters.txt" >&2; exit 2; fi
@@ -103,6 +109,10 @@ for f in $(find "$D" -name cgroup.procs 2>/dev/null); do
     s=$(printf '%s' "$a" | grep -oE 'title=m7c-[A-Za-z0-9_]+' | head -n 1 | sed 's#.*=m7c-##')
     [ -n "$s" ] || s=$(printf '%s' "$a" | grep -oE '127\.0\.0\.1:8554/[A-Za-z0-9_]+|m7c-clips/[A-Za-z0-9._-]+' | head -n 1 | sed 's#.*/##')
     r=""; case "$a" in *rawvideo*) r="${r}d" ;; esac; case "$a" in *"-f segment"*) r="${r}r" ;; esac; case "$a" in *"-f rtsp"*) r="${r}e" ;; esac
+    case "$a" in *" -m ezviz_source.main "*)
+      r="${r}h"; s=$(printf '%s' "$a" | awk '{ for (i = 1; i < NF; i++) if ($i == "-m" && $(i + 1) == "ezviz_source.main") { print $(i + 2); exit } }')
+      case "$s" in ''|*[!a-z0-9_]*) s='?' ;; esac; [ "${#s}" -le 32 ] || s='?' ;;
+    esac
     echo "label.$pid=$u $c ${r:--} ${s:--} $pp"
   done
 done
@@ -269,6 +279,33 @@ if [ "$NEX" -gt 0 ]; then
   else fail "go2rtc exec:$why"; fi
 fi
 
+# --- go2rtc ezviz-source helpers (W-23): label h, the camera name only (validated twice), never a command line ---
+HELP=(); hwhy=""; : > "$OUT/helpers.txt"
+for k in "${!V[@]}"; do
+  case "$k" in label.*) ;; *) continue ;; esac
+  pid=${k#label.}; read -r u _ r s _ <<<"${V[$k]}"
+  if [ "$u" != go2rtc ] || [[ "$r" != *h* ]]; then continue; fi
+  [[ "$s" =~ ^[a-z0-9_]{1,32}$ ]] || { hwhy="$hwhy a helper (pid $pid) has no valid camera name;"; s="?"; }
+  read -r _ st <<<"${V[b.proc.$pid]:-}"
+  age="?"; num "${st:-}" && num "${V[b.uptime]:-}" && age=$(calc "printf \"%.0f\", ${V[b.uptime]} - $st / $CLK")
+  HELP+=("$s"); [ "$s" = "?" ] || printf 'helper.%s=%s %s\n' "$s" "$pid" "${st:-?}" >> "$OUT/helpers.txt"
+  info "go2rtc helper: camera $s pid $pid, running ${age} s"
+done
+[ "${#HELP[@]}" -gt 0 ] && mapfile -t HELP < <(printf '%s\n' "${HELP[@]}" | sort)
+if [ "$NHE" -gt 0 ]; then
+  why=$hwhy; [ "${#HELP[@]}" = "$NHE" ] || why="$why ${#HELP[@]} helpers, want $NHE;"
+  dups=$(sort "$OUT/helpers.txt" | sed 's/=.*//' | uniq -d | sed 's/^helper\.//' | tr '\n' ' ')
+  [ -z "$dups" ] || why="$why more than one helper for ${dups% };"
+  if [ -n "$PREV" ]; then
+    while IFS='=' read -r k v; do
+      nowv=$(sed -n "s/^${k//./\\.}=//p" "$OUT/helpers.txt" | head -n 1)
+      [ "$nowv" = "$v" ] || why="$why ${k#helper.} restarted since --prev (pid/start $v -> ${nowv:-none});"
+    done < <(grep '^helper\.' "$PREV/counters.txt")
+  fi
+  if [ -z "$why" ]; then pass "go2rtc helpers: ${#HELP[@]} (${HELP[*]})$([ -n "$PREV" ] && echo ", none restarted since --prev")"
+  else fail "go2rtc helpers:$why"; fi
+fi
+
 # --- shm ---------------------------------------------------------------------------------------------------------
 fr=""; for k in "${!V[@]}"; do case "$k" in shm_frames.*) fr="$fr ${k#shm_frames.}=${V[$k]}" ;; esac; done
 info "shm: /dev/shm/snap.frigate $(mb "${V[shm_bytes]:-}") MB (${V[shm_bytes]:-?} B); frame files per camera:${fr:- none}; Frigate's own /stats storage /dev/shm used ${V[service.shm.used]:-?} of ${V[service.shm.total]:-?} (as Frigate reports it, MiB)"
@@ -301,6 +338,6 @@ else fail "hygiene: $CRED credential-like line(s) came from the hub (scrubbed in
 
 # --- counters for the next --prev ------------------------------------------------------------------------------
 { for k in "${!V[@]}"; do case "$k" in b.*) printf '%s=%s\n' "${k#b.}" "${V[$k]}" ;; memstat.*) printf '%s=%s\n' "$k" "${V[$k]}" ;; esac; done
-  cat "$OUT/execs.txt"; } | sort > "$OUT/counters.txt"
+  cat "$OUT/execs.txt" "$OUT/helpers.txt"; } | sort > "$OUT/counters.txt"
 echo "observe: $(grep -c '^PASS' "$RESULTS") PASS, $FAILS FAIL, $(grep -c '^INFO' "$RESULTS") INFO (evidence: $OUT)"
 [ "$FAILS" = 0 ]

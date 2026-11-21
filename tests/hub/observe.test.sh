@@ -158,6 +158,18 @@ check "slice cgroup unreadable: exit 1" 1 "$(rc f9)"; has "sample FAIL" "FAIL: s
 run w1 -- --window 3; check "--window 3: exit 0" 0 "$(rc w1)"; check "--window 3 is the hub sleep" 3 "$(cat "$T/w1/tree/slept")"
 has "--window 3: the window is 10 s of fake clock" "over the 10.000 s window" "$(O w1)"
 
+# --- go2rtc ezviz-source helpers (--helpers N): label h and the camera name only, never a command line (C4) ---
+run oh1 O_HELPERS="501:cam1 502:cam2" -- --execs 0 --helpers 2
+check "--helpers 2: exit 0" 0 "$(rc oh1)"; has "helpers PASS names both" "PASS: go2rtc helpers: 2 (cam1 cam2)" "$(O oh1)"
+hasnt "no exec verdict with --execs 0" "go2rtc exec:" "$(O oh1)"
+PRE='cp -r "$T/oh1/ev" "$T/$n/prev"' run oh2 O_HELPERS="501:cam1 777:cam2" -- --execs 0 --helpers 2 --prev "$T/oh2/prev"
+check "a helper restarted since --prev: exit 1" 1 "$(rc oh2)"; has "names the restarted helper" "FAIL: go2rtc helpers: cam2 restarted since --prev" "$(O oh2)"
+hasnt "never a whole command line" "rtsp://127.0.0.1:8554/x" "$(O oh2)"
+run oh3 O_HELPERS="501:cam1" -- --execs 0 --helpers 2; check "1 helper, want 2: exit 1" 1 "$(rc oh3)"; has "says the count" "FAIL: go2rtc helpers: 1 helpers, want 2;" "$(O oh3)"
+run oh4 O_HELPERS="501:cam1 502:CamX" -- --execs 0 --helpers 2; check "a helper whose camera name is not ^[a-z0-9_]{1,32}$: exit 1" 1 "$(rc oh4)"
+hasnt "an invalid camera name is never printed" "CamX" "$(O oh4)"
+check "helpers: no helper command line in the output or the evidence" 0 "$(grep -rlF -- 'ezviz_source.main' "$T"/oh?.out "$T"/oh?/ev | wc -l)"
+
 # every tests/hub script runs directly (git mode 100755), as the orchestrator calls them
 for f in tests/hub/*.sh; do check "$f is executable in git" 100755 "$(git ls-files -s "$f" | awk '{ print $1 }')"; done
 

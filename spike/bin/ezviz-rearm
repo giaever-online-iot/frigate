@@ -1,0 +1,4 @@
+#!/bin/sh
+# go2rtc-run helper (W-23 D19): re-arms the ezviz preloads. Same Python and isolation as ezviz-source (OD1/R1).
+unset LD_LIBRARY_PATH LD_PRELOAD
+exec "$SNAP/opt/ezviz-py/bin/python3.12" -I -B -m ezviz_source.rearm "$@"

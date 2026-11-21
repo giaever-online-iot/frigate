@@ -1,0 +1,5 @@
+#!/bin/sh
+# frigate.ezviz-check <name> (W-23 N9): reads the camera file and the state dir, contacts no camera.
+# Python gets no LD_LIBRARY_PATH and no PYTHON* variable (-I), as for ezviz-source.
+unset LD_LIBRARY_PATH LD_PRELOAD
+exec "$SNAP/opt/ezviz-py/bin/python3.12" -I -B -m ezviz_source.check "$@"

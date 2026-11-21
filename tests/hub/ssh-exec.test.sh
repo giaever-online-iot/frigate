@@ -70,7 +70,7 @@ has   "put: PUT OK with the sha" "PUT OK $D/f.snap sha256 $W" "$T/p1.out"
 PRE='touch "$T/$n/corrupt"' IN="$T/src.bin" run p2 -- put "$T/src.bin" "$D/g.snap"
 check "put, damaged copy: exit 1" 1 "$(rc p2)"
 has   "put, damaged copy: SHA MISMATCH" "SHA MISMATCH" "$T/p2.err"
-check "put, damaged copy: the bad file is removed" 1 "$([ -e "$D/g.snap" ]; echo $?)"
+check "put, damaged copy: the bad file is removed" 1 "$([ -e "$D/g.snap" ] && echo 0 || echo 1)"
 printf 'piped\n' > "$T/pipe.in"
 IN="$T/pipe.in" run p7 STUB_GREEDY_CHECK=1 -- exec 'cat'
 check "exec: stdin reaches the session even if the master check would read stdin" "piped" "$(cat "$T/p7.out")"

@@ -1,0 +1,6 @@
+#!/bin/sh
+# go2rtc exec child (W-23 D2, D8): ezviz-source <name> <rtsp output>. Runs on the helper's own Python 3.12 (OD1/R1).
+# Python gets no LD_LIBRARY_PATH and no PYTHON* variable (-I); the saved value reaches only the ffmpeg child (D7, P4).
+EZVIZ_CHILD_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}; export EZVIZ_CHILD_LD_LIBRARY_PATH
+unset LD_LIBRARY_PATH LD_PRELOAD
+exec "$SNAP/opt/ezviz-py/bin/python3.12" -I -B -m ezviz_source.main "$@"

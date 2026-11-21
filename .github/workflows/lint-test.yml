@@ -14,6 +14,8 @@ on:
       - 'snap/**'
       - 'spike/**'
       - '.github/workflows/lint-test.yml'
+      # W-23: .github/scripts/artifact-step.test.sh pins the opt-in artifact step in this file.
+      - '.github/workflows/pr-build-snap.yml'
   workflow_dispatch:
 
 permissions:
@@ -38,7 +40,8 @@ jobs:
           # list until it does.
           # M9: tests/*.sh covers spike-smoke.sh plus the rehearsal, the hermetic
           # *.test.sh suites and the libraries they source, with the same flags.
-          targets=(spike/bin/* snap/hooks/* tests/*.sh)
+          # W-23 (C24): the hub tools and the ezviz test scripts get the same flags; all pass them.
+          targets=(spike/bin/* snap/hooks/* tests/*.sh tests/hub/*.sh tests/ezviz/*.sh)
           # FINDING (task-6, CI adaptation, recorded in task-6-report.md): these two
           # codes pre-date this task and are owned by other milestones' scripts, not
           # by .github/ — Task 6 must not edit outside .github/, so they are excluded
@@ -65,12 +68,59 @@ jobs:
             bash "$t" || exit 1
           done
 
+      # W-23: tests/ezviz/venv.sh (make-config.test.sh and the helper suite) builds the hash-locked venv with python3.12,
+      # the snap helper's interpreter. ubuntu-latest is ubuntu-26.04: system Python 3.14 and no python3.12 package in its
+      # archive, so setup-python takes 3.12 from the tool cache. update-environment false and a PATH directory holding
+      # only a python3.12 link keep python3 the system one (and its python3-yaml) for the other tests.
+      - name: Set up Python 3.12
+        id: py312
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          update-environment: false
+
+      - name: Put python3.12 (only) on PATH
+        env:
+          PY312: ${{ steps.py312.outputs.python-path }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/py312"
+          ln -sf "$PY312" "$RUNNER_TEMP/py312/python3.12"
+          echo "$RUNNER_TEMP/py312" >> "$GITHUB_PATH"
+
       - name: Run tests/*.test.sh and tests/test_*.py
         run: |
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+          if ! python3.12 -c 'import ensurepip, sys; assert sys.version_info[:2] == (3, 12)' 2>/dev/null; then
+            echo "::error::python3.12 with ensurepip is not on PATH (tests/ezviz/venv.sh needs it; see 'Set up Python 3.12')"
+            exit 1
+          fi
           for t in tests/*.test.sh tests/*/*.test.sh; do
             echo "== $t"
             bash "$t" || exit 1
           done
           python3 -m unittest discover -s tests -p 'test_*.py' -v
           python3 -m unittest discover -s tests/arm64-vm -p 'test_*.py' -v
+
+      # W-23: test_probe.py's fake-camera runs (the real-shape and 0xB2 regression tests among them) decode with a real
+      # ffmpeg; without one they would SKIP, and the guard below makes any skip a failure.
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      # W-23: the helper suite on its own interpreter, from the hash lock (tests/ezviz is not a package, so the
+      # discover above does not reach it). serve-ezviz.test.sh SKIPs above: no local snap file in CI.
+      - name: ezviz helper tests (venv from the hash lock)
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          PY=$(bash tests/ezviz/venv.sh) || { echo "::error::tests/ezviz/venv.sh could not build the helper venv"; exit 1; }
+          log="$RUNNER_TEMP/ezviz-unittest.log"
+          rc=0
+          "$PY" -m unittest discover -s tests/ezviz -p 'test_*.py' -v 2>&1 | tee "$log" || rc=$?
+          # No silent skip, nothing after the summary: rc 0, and the last two non-empty lines are unittest's own
+          # "Ran N tests in Xs" and a plain "OK". A skip, a failure, a late writer, an empty or a truncated log are red.
+          ran=$(grep -v '^[[:space:]]*$' "$log" | tail -n 2 | head -n 1 || true)
+          verdict=$(grep -v '^[[:space:]]*$' "$log" | tail -n 1 || true)
+          if [ "$rc" -ne 0 ] || ! [[ "$ran" =~ ^Ran\ [0-9]+\ tests?\ in\ [0-9.]+s$ ]] || [ "$verdict" != "OK" ]; then
+            echo "::error::ezviz helper tests: rc $rc, summary '${ran:-none}' then '${verdict:-none}'; want rc 0, 'Ran N tests in Xs', then a plain OK (a skipped test counts as a failure here)"
+            exit 1
+          fi

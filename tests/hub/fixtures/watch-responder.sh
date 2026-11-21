@@ -5,6 +5,7 @@
 # W_FRNR (frigate NRestarts), W_FREE (free kB on the data fs), W_HALOAD (HA LoadState), W_HAACT (ActiveState),
 # W_HAPID (MainPID), W_HANR (HA NRestarts), W_HTTP (first HTTP line, '-' = no answer), W_HTTPMS, W_TCP (nc -z rc),
 # W_CTR (docker inspect "Running RestartCount StartedAt", '_' for spaces, '-' = no such container),
+# W_UV (the kernel transport's undervoltage count since the start, or 'unreadable'),
 # W_BROKEN (1 = garbage instead of a sample). `snap stop --disable frigate` is logged to $STUB_ST/stops.
 set -u
 st="${STUB_ST:?}"
@@ -34,6 +35,7 @@ ha_tcp_rc=$(pick "${W_TCP:-0}")
 ha_ctr=${ctr//_/ }
 ha_http=${http//_/ }
 ha_http_ms=$(pick "${W_HTTPMS:-40}")
+kuv=$(pick "${W_UV:-0}")
 end=1
 EOF
     ;;
