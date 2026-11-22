@@ -154,6 +154,11 @@ jobs:
       # while the Store listing is private: so this runs only when the PR carries
       # the label below, and whoever applies the label deletes the artifact right
       # after downloading it. See artifact-step.test.sh.
+      # This copy is the only way to get a built file later: snapcraft remote-build
+      # deletes its Launchpad build right after the download above ("Cleaning up"),
+      # and the Store copy of this private snap is not downloadable without a login.
+      # The label must be on the PR BEFORE the event that starts the run (opened,
+      # synchronize or reopened); adding it later does not start a run.
       - name: Keep built snaps as a one-day artifact (opt-in by label)
         if: ${{ steps.build.outputs.snaps != '0' && github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'snap-artifact') }}
         continue-on-error: true
